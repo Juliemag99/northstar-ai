@@ -1,0 +1,45 @@
+:root {
+  /* Brand */
+  --ns-navy-950: #07111f;
+  --ns-navy-900: #0a1628;
+  --ns-navy-800: #12233d;
+  --ns-navy-700: #1a3356;
+  --ns-navy-600: #274572;
+
+  --ns-gold-400: #e0b85a;
+  --ns-gold-500: #d4a84b;
+  --ns-gold-600: #b8892f;
+
+  --ns-slate-50: #f4f7fb;
+  --ns-slate-100: #e8eef6;
+  --ns-slate-200: #d5deea;
+  --ns-slate-300: #b7c4d6;
+  --ns-slate-400: #8494ab;
+  --ns-slate-500: #5d6d85;
+  --ns-slate-600: #445368;
+  --ns-slate-700: #2f3d4f;
+  --ns-slate-800: #1e2a3a;
+
+  --ns-success: #2f9e6b;
+  --ns-warning: #c98a2e;
+  --ns-danger: #c24b4b;
+  --ns-info: #3a7ca5;
+
+  --ns-surface: rgba(255, 255, 255, 0.92);
+  --ns-surface-solid: #ffffff;
+  --ns-border: rgba(30, 42, 58, 0.08);
+  --ns-shadow-sm: 0 1px 2px rgba(10, 22, 40, 0.04);
+  --ns-shadow-md: 0 8px 24px rgba(10, 22, 40, 0.08);
+
+  --ns-sidebar-width: 260px;
+  --ns-header-height: 64px;
+  --ns-radius-sm: 6px;
+  --ns-radius-md: 10px;
+  --ns-radius-lg: 14px;
+
+  --ns-font-brand: 'Outfit', sans-serif;
+  --ns-font-body: 'Source Sans 3', sans-serif;
+
+  --ns-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ns-duration: 180ms;
+}

@@ -1,0 +1,75 @@
+.ns-metric {
+  position: relative;
+  overflow: hidden;
+  padding: 1.1rem 1.15rem 1.15rem;
+  border: 1px solid var(--ns-border);
+  border-radius: var(--ns-radius-lg);
+  background: var(--ns-surface);
+  box-shadow: var(--ns-shadow-sm);
+  animation: ns-rise-in 420ms var(--ns-ease) both;
+  transition:
+    transform var(--ns-duration) var(--ns-ease),
+    box-shadow var(--ns-duration) var(--ns-ease);
+}
+
+.ns-metric::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--ns-navy-700);
+}
+
+.ns-metric:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--ns-shadow-md);
+}
+
+.ns-metric--warning::before {
+  background: var(--ns-warning);
+}
+
+.ns-metric--success::before {
+  background: var(--ns-success);
+}
+
+.ns-metric--danger::before {
+  background: var(--ns-danger);
+}
+
+.ns-metric--info::before {
+  background: var(--ns-info);
+}
+
+.ns-metric__label {
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--ns-slate-500);
+}
+
+.ns-metric__value {
+  margin-top: 0.45rem;
+  font-family: var(--ns-font-brand);
+  font-size: 2rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  color: var(--ns-navy-900);
+}
+
+.ns-metric__helper {
+  margin-top: 0.55rem;
+  font-size: 0.82rem;
+  color: var(--ns-slate-500);
+}
+
+@keyframes ns-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
