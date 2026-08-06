@@ -1,0 +1,43 @@
+.ns-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  padding: 0 0.55rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.ns-badge--neutral {
+  background: var(--ns-slate-100);
+  color: var(--ns-slate-600);
+}
+
+.ns-badge--critical {
+  background: rgba(194, 75, 75, 0.12);
+  color: #9d3030;
+}
+
+.ns-badge--high {
+  background: rgba(201, 138, 46, 0.14);
+  color: #8a5d18;
+}
+
+.ns-badge--medium {
+  background: rgba(58, 124, 165, 0.12);
+  color: #245875;
+}
+
+.ns-badge--success {
+  background: rgba(47, 158, 107, 0.12);
+  color: #1f6f4b;
+}
+
+.ns-badge--info {
+  background: rgba(58, 124, 165, 0.12);
+  color: #245875;
+}
