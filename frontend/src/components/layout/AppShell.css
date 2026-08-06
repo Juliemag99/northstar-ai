@@ -1,0 +1,50 @@
+.ns-shell {
+  min-height: 100vh;
+}
+
+.ns-shell__main {
+  margin-left: var(--ns-sidebar-width);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.ns-shell__content {
+  flex: 1;
+  padding: 1.35rem 1.5rem 2rem;
+}
+
+.ns-shell__backdrop {
+  display: none;
+}
+
+@media (max-width: 960px) {
+  .ns-shell__main {
+    margin-left: 0;
+  }
+
+  .ns-shell__backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    border: 0;
+    padding: 0;
+    background: rgba(7, 17, 31, 0.45);
+    cursor: pointer;
+    animation: ns-fade-in 180ms var(--ns-ease);
+  }
+
+  .ns-shell__content {
+    padding: 1rem;
+  }
+}
+
+@keyframes ns-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}

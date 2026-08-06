@@ -1,0 +1,36 @@
+.ns-placeholder {
+  display: grid;
+  place-items: center;
+  min-height: calc(100vh - var(--ns-header-height) - 4rem);
+  padding: 1rem 0;
+}
+
+.ns-placeholder__card {
+  width: min(100%, 34rem);
+  padding: 2rem 1.75rem;
+  border: 1px solid var(--ns-border);
+  border-radius: var(--ns-radius-lg);
+  background: var(--ns-surface);
+  box-shadow: var(--ns-shadow-sm);
+  text-align: center;
+  animation: ns-rise-in 360ms var(--ns-ease) both;
+}
+
+.ns-placeholder__eyebrow {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ns-gold-600);
+}
+
+.ns-placeholder__title {
+  margin-top: 0.55rem;
+  font-size: 1.55rem;
+  color: var(--ns-navy-900);
+}
+
+.ns-placeholder__copy {
+  margin-top: 0.65rem;
+  color: var(--ns-slate-600);
+}
