@@ -1,0 +1,87 @@
+.ns-panel {
+  border: 1px solid var(--ns-border);
+  border-radius: var(--ns-radius-lg);
+  background: var(--ns-surface);
+  box-shadow: var(--ns-shadow-sm);
+  animation: ns-rise-in 480ms var(--ns-ease) both;
+}
+
+.ns-panel__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.15rem 1.25rem 0.85rem;
+}
+
+.ns-panel__title {
+  font-size: 1.05rem;
+  color: var(--ns-navy-900);
+}
+
+.ns-panel__subtitle {
+  margin-top: 0.2rem;
+  font-size: 0.86rem;
+  color: var(--ns-slate-500);
+}
+
+.ns-prospects__table-wrap {
+  overflow-x: auto;
+}
+
+.ns-prospects__table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 720px;
+}
+
+.ns-prospects__table th,
+.ns-prospects__table td {
+  padding: 0.85rem 1.15rem;
+  text-align: left;
+  vertical-align: middle;
+  border-top: 1px solid var(--ns-border);
+}
+
+.ns-prospects__table th {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ns-slate-500);
+  background: rgba(232, 238, 246, 0.45);
+}
+
+.ns-prospects__table td {
+  font-size: 0.92rem;
+  color: var(--ns-slate-700);
+}
+
+.ns-prospects__table tbody tr {
+  transition: background var(--ns-duration) var(--ns-ease);
+}
+
+.ns-prospects__table tbody tr:hover {
+  background: rgba(212, 168, 75, 0.05);
+}
+
+.ns-prospects__person {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.ns-prospects__name {
+  font-weight: 600;
+  color: var(--ns-navy-900);
+}
+
+.ns-prospects__role {
+  font-size: 0.8rem;
+  color: var(--ns-slate-500);
+}
+
+.ns-prospects__due.is-overdue {
+  color: var(--ns-danger);
+  font-weight: 600;
+}

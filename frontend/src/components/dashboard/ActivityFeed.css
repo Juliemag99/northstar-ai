@@ -1,0 +1,91 @@
+.ns-activity {
+  animation-delay: 120ms;
+}
+
+.ns-activity__list {
+  display: flex;
+  flex-direction: column;
+  padding: 0 0.35rem 0.75rem;
+}
+
+.ns-activity__item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.85rem;
+  padding: 0.85rem 0.9rem;
+  border-top: 1px solid var(--ns-border);
+  animation: ns-rise-in 420ms var(--ns-ease) both;
+}
+
+.ns-activity__marker {
+  width: 0.7rem;
+  height: 0.7rem;
+  margin-top: 0.35rem;
+  border-radius: 50%;
+  background: var(--ns-navy-700);
+  box-shadow: 0 0 0 4px rgba(18, 35, 61, 0.08);
+}
+
+.ns-activity__marker--call {
+  background: var(--ns-info);
+  box-shadow: 0 0 0 4px rgba(58, 124, 165, 0.12);
+}
+
+.ns-activity__marker--email {
+  background: var(--ns-gold-500);
+  box-shadow: 0 0 0 4px rgba(212, 168, 75, 0.14);
+}
+
+.ns-activity__marker--meeting {
+  background: var(--ns-success);
+  box-shadow: 0 0 0 4px rgba(47, 158, 107, 0.12);
+}
+
+.ns-activity__marker--note {
+  background: var(--ns-slate-400);
+  box-shadow: 0 0 0 4px rgba(132, 148, 171, 0.14);
+}
+
+.ns-activity__marker--assignment {
+  background: var(--ns-danger);
+  box-shadow: 0 0 0 4px rgba(194, 75, 75, 0.12);
+}
+
+.ns-activity__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.ns-activity__type {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ns-slate-500);
+}
+
+.ns-activity__time {
+  font-size: 0.78rem;
+  color: var(--ns-slate-400);
+  white-space: nowrap;
+}
+
+.ns-activity__title {
+  margin-top: 0.2rem;
+  font-weight: 600;
+  color: var(--ns-navy-900);
+}
+
+.ns-activity__detail {
+  margin-top: 0.2rem;
+  font-size: 0.88rem;
+  color: var(--ns-slate-600);
+}
+
+.ns-activity__actor {
+  margin-top: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--ns-slate-500);
+}
