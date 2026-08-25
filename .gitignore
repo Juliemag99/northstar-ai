@@ -1,0 +1,44 @@
+# Environment files (keep committed examples)
+.env
+.env.*
+!.env.example
+
+# Python virtual environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# SQLite databases and sidecar files
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Frontend build artifacts
+frontend/node_modules/
+frontend/dist/
+
+# Logs and temporary files
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Generated ZIP archives
+*.zip
+
+# Client data (do not share)
+database/imports/
+database/client_documents/
+database/backups/
+database/carmeco_prospects.csv

@@ -1,0 +1,381 @@
+"""SQLite connection helpers for the NorthStar local database."""
+
+from __future__ import annotations
+
+import atexit
+import os
+import sqlite3
+import tempfile
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DATABASE_DIR = REPO_ROOT / "database"
+PRODUCTION_DB_PATH = DATABASE_DIR / "northstar.db"
+SCHEMA_PATH = DATABASE_DIR / "schema.sql"
+
+
+class _DatabasePath:
+    """Mutable path object so tests can isolate without rebinding imports."""
+
+    def __init__(self, path: Path):
+        object.__setattr__(self, "_path", Path(path))
+
+    def set(self, path: Path | str) -> None:
+        object.__setattr__(self, "_path", Path(path))
+
+    def __fspath__(self) -> str:
+        return str(self._path)
+
+    def __str__(self) -> str:
+        return str(self._path)
+
+    def __repr__(self) -> str:
+        return f"DB_PATH({self._path})"
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, _DatabasePath):
+            return self._path == other._path
+        return self._path == other
+
+    def __hash__(self) -> int:
+        return hash(self._path)
+
+    def __getattr__(self, name: str):
+        return getattr(self._path, name)
+
+
+DB_PATH = _DatabasePath(PRODUCTION_DB_PATH)
+_TEST_ISOLATED = False
+
+# Additive column migrations for existing local DBs (CREATE IF NOT EXISTS will not alter).
+_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
+    "users": [
+        ("is_internal_northstar", "INTEGER NOT NULL DEFAULT 1"),
+    ],
+    "client_company_relationships": [
+        ("assigned_user_id", "INTEGER"),
+        ("priority", "TEXT NOT NULL DEFAULT ''"),
+        ("next_action", "TEXT NOT NULL DEFAULT ''"),
+        ("follow_up_date", "TEXT"),
+        ("notes", "TEXT NOT NULL DEFAULT ''"),
+        ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+        ("is_hot", "INTEGER NOT NULL DEFAULT 0"),
+        ("external_record_no", "TEXT NOT NULL DEFAULT ''"),
+    ],
+    "activities": [
+        ("user_id", "INTEGER"),
+        ("follow_up_completed", "INTEGER NOT NULL DEFAULT 0"),
+        ("completion_status", "TEXT NOT NULL DEFAULT 'open'"),
+    ],
+    "opportunity_assignments": [
+        ("opportunity_score", "INTEGER NOT NULL DEFAULT 0"),
+        ("source_summary", "TEXT NOT NULL DEFAULT ''"),
+    ],
+}
+
+
+def _resolved_db_path(db_path: Path | str | None = None) -> Path:
+    if db_path is None:
+        path = Path(os.fspath(DB_PATH))
+    else:
+        path = Path(db_path)
+    test_db = os.environ.get("NORTHSTAR_TEST_DB", "").strip()
+    if test_db and path.resolve() == PRODUCTION_DB_PATH.resolve():
+        raise RuntimeError(
+            "Automated tests are isolated and must not open production northstar.db"
+        )
+    return path
+
+
+def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
+    path = _resolved_db_path(db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 8000")
+    return conn
+
+
+def isolate_for_tests() -> Path:
+    """Copy production into a throwaway SQLite file. Never writes production."""
+    global _TEST_ISOLATED
+    env_path = os.environ.get("NORTHSTAR_TEST_DB", "").strip()
+    if env_path:
+        DB_PATH.set(env_path)
+        _TEST_ISOLATED = True
+        return Path(env_path)
+    if _TEST_ISOLATED:
+        return Path(os.fspath(DB_PATH))
+
+    handle, name = tempfile.mkstemp(prefix="northstar-test-", suffix=".db")
+    os.close(handle)
+    os.unlink(name)
+    if PRODUCTION_DB_PATH.exists():
+        src = sqlite3.connect(str(PRODUCTION_DB_PATH))
+        try:
+            dst = sqlite3.connect(name)
+            try:
+                src.backup(dst)
+                dst.commit()
+            finally:
+                dst.close()
+        finally:
+            src.close()
+    DB_PATH.set(name)
+    os.environ["NORTHSTAR_TEST_DB"] = name
+    _TEST_ISOLATED = True
+
+    def _cleanup() -> None:
+        for candidate in (name, name + "-wal", name + "-shm"):
+            try:
+                os.remove(candidate)
+            except OSError:
+                pass
+
+    atexit.register(_cleanup)
+    return Path(name)
+
+
+if os.environ.get("NORTHSTAR_TEST_DB", "").strip():
+    isolate_for_tests()
+
+
+def init_schema(conn: sqlite3.Connection) -> None:
+    schema = SCHEMA_PATH.read_text(encoding="utf-8")
+    conn.executescript(schema)
+    conn.commit()
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return {str(r["name"]) for r in rows}
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def migrate_schema(conn: sqlite3.Connection) -> None:
+    """Add missing columns/indexes on existing databases without wiping data."""
+    for table, columns in _COLUMN_MIGRATIONS.items():
+        if not _table_exists(conn, table):
+            continue
+        existing = _table_columns(conn, table)
+        for name, declaration in columns:
+            if name in existing:
+                continue
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+
+    # Indexes that CREATE INDEX IF NOT EXISTS may not have run on older DBs
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ccr_assigned_user
+            ON client_company_relationships(assigned_user_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ccr_follow_up_date
+            ON client_company_relationships(follow_up_date)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_activities_user
+            ON activities(user_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_user_client_user
+            ON user_client_assignments(user_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_user_client_client
+            ON user_client_assignments(client_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ccr_is_hot
+            ON client_company_relationships(is_hot)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ccr_client_record_no
+            ON client_company_relationships(client_id, external_record_no)
+        """
+    )
+    # Backfill relationship Record Nos from master company when empty
+    # (legacy Carmeco rows stored Record No. only on companies).
+    if "external_record_no" in _table_columns(conn, "client_company_relationships"):
+        conn.execute(
+            """
+            UPDATE client_company_relationships
+            SET external_record_no = (
+                SELECT co.external_record_no
+                FROM companies co
+                WHERE co.id = client_company_relationships.company_id
+            )
+            WHERE TRIM(COALESCE(external_record_no, '')) = ''
+            """
+        )
+    if _table_exists(conn, "work_queue_items"):
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_work_queue_client_due
+                ON work_queue_items(client_id, due_date, completion_status)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_work_queue_action
+                ON work_queue_items(action_type, completion_status)
+            """
+        )
+    if _table_exists(conn, "revenue_milestones"):
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_milestones_client_company
+                ON revenue_milestones(client_id, company_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_milestones_type
+                ON revenue_milestones(milestone_type)
+            """
+        )
+    conn.commit()
+
+
+def seed_default_users(conn: sqlite3.Connection) -> None:
+    """Ensure Julie Magnani exists and is assigned to Carmeco (idempotent)."""
+    if not _table_exists(conn, "users") or not _table_exists(conn, "clients"):
+        return
+
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO users (email, full_name, is_administrator, active)
+        VALUES ('julie.magnani@northstargroup.com', 'Julie Magnani', 0, 1)
+        """
+    )
+    # NorthStar management user for All Clients / cross-client authorization tests
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO users (email, full_name, is_administrator, active)
+        VALUES ('admin@northstargroup.com', 'NorthStar Admin', 1, 1)
+        """
+    )
+    user = conn.execute(
+        "SELECT id FROM users WHERE email = ?",
+        ("julie.magnani@northstargroup.com",),
+    ).fetchone()
+    if user is None:
+        conn.commit()
+        return
+
+    user_id = int(user["id"])
+    for client_code, role in (("carmeco", "account_executive"), ("brown", "account_executive")):
+        client = conn.execute(
+            "SELECT id FROM clients WHERE code = ?",
+            (client_code,),
+        ).fetchone()
+        if client is None:
+            continue
+        client_id = int(client["id"])
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO user_client_assignments (
+                user_id, client_id, role, active
+            ) VALUES (?, ?, ?, 1)
+            """,
+            (user_id, client_id, role),
+        )
+        # Backfill relationship ownership when unset
+        conn.execute(
+            """
+            UPDATE client_company_relationships
+            SET assigned_user_id = ?
+            WHERE client_id = ? AND assigned_user_id IS NULL
+            """,
+            (user_id, client_id),
+        )
+        # Backfill activity user_id when unset
+        if _table_exists(conn, "activities") and "user_id" in _table_columns(
+            conn, "activities"
+        ):
+            conn.execute(
+                """
+                UPDATE activities
+                SET user_id = ?
+                WHERE client_id = ? AND user_id IS NULL
+                """,
+                (user_id, client_id),
+            )
+    conn.commit()
+
+
+def ensure_schema(db_path: Path | None = None) -> None:
+    """Apply schema idempotently so new tables/columns exist on existing DBs."""
+    with get_connection(db_path) as conn:
+        # Columns first on existing tables, then CREATE TABLE / indexes from schema.sql
+        migrate_schema(conn)
+        init_schema(conn)
+        migrate_schema(conn)  # indexes that depend on newly added columns
+        seed_default_users(conn)
+        from milestones_data import backfill_milestones_from_existing
+
+        backfill_milestones_from_existing(conn)
+        from ask_northstar_data import ensure_ask_northstar_schema
+
+        ensure_ask_northstar_schema(conn)
+        from research_data import ensure_research_schema
+
+        ensure_research_schema(conn)
+        from client_setup_data import ensure_client_setup_schema
+
+        ensure_client_setup_schema(conn)
+        from client_knowledge_data import ensure_client_knowledge_schema
+
+        ensure_client_knowledge_schema(conn)
+        from client_engagement_import import ensure_engagement_import_schema
+
+        ensure_engagement_import_schema(conn)
+        from client_workspace_data import ensure_contact_workflow_schema
+
+        ensure_contact_workflow_schema(conn)
+        from next_actions import ensure_next_action_schema
+
+        ensure_next_action_schema(conn)
+        from appointments_data import ensure_appointments_schema
+
+        ensure_appointments_schema(conn)
+        from campaigns_data import ensure_campaigns_schema
+
+        ensure_campaigns_schema(conn)
+
+    # Build/refresh FTS index after schema is ready
+    from search_data import rebuild_search_index
+
+    rebuild_search_index()
+
+
+def reset_database(db_path: Path | None = None) -> sqlite3.Connection:
+    """Drop and recreate the local database file, then apply schema."""
+    path = db_path or DB_PATH
+    if path.exists():
+        path.unlink()
+    conn = get_connection(path)
+    init_schema(conn)
+    migrate_schema(conn)
+    seed_default_users(conn)
+    return conn
