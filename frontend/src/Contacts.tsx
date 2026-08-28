@@ -2,6 +2,8 @@ import { Link } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import { companyWorkspaceHref, fetchContacts } from './api/carmeco'
 import type { ContactListItem } from './types/carmeco'
+import AddContactModal from './AddContactModal'
+import { SELECT_CLIENT_FOR_WRITE, requireWriteClientId } from './writeClient'
 
 const PAGE_SIZE = 50
 
@@ -37,6 +39,8 @@ export default function Contacts({
   const [clientTotal, setClientTotal] = useState(0)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [addOpen, setAddOpen] = useState(false)
+  const [writeError, setWriteError] = useState<string | null>(null)
   const showClientColumn = activeClientId === 0
 
   useEffect(() => {
@@ -95,6 +99,16 @@ export default function Contacts({
   const to = Math.min(total, (safePage + 1) * PAGE_SIZE)
   const searching = Boolean(debouncedQuery)
 
+  function openAddContact() {
+    try {
+      requireWriteClientId(activeClientId)
+      setWriteError(null)
+      setAddOpen(true)
+    } catch (err) {
+      setWriteError(err instanceof Error ? err.message : SELECT_CLIENT_FOR_WRITE)
+    }
+  }
+
   return (
     <>
       <div className="page-heading page-heading--split">
@@ -104,8 +118,25 @@ export default function Contacts({
             Search {activeClientName} CRM contacts by name, company, title, phone, or email. Open a
             contact to view the Contact Workspace.
           </p>
+          {writeError ? (
+            <p className="data-status" role="status">
+              {writeError}
+            </p>
+          ) : null}
+        </div>
+        <div className="heading-controls">
+          <button type="button" className="primary-btn" onClick={openAddContact}>
+            Add Contact
+          </button>
         </div>
       </div>
+
+      <AddContactModal
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        clientId={activeClientId}
+        clientName={activeClientName}
+      />
 
       <section className="panel panel--queue" aria-label="Contacts">
         <div className="panel-header">

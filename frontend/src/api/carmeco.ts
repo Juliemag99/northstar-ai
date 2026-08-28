@@ -1,4 +1,5 @@
 import { type NextActionCatalog } from '../nextAction'
+import { requireWriteClientId } from '../writeClient'
 import type {
   ActiveClient,
   ActivitySummary,
@@ -119,7 +120,7 @@ function normalizeMilestone(raw: unknown): RevenueMilestone {
   const record = (raw ?? {}) as Record<string, unknown>
   return {
     id: asNumber(record.id, asNumber(record.milestone_id)),
-    client: pick(record, 'client') || 'Carmeco',
+    client: pick(record, 'client') || '',
     external_record_no: pick(record, 'external_record_no'),
     milestone_type: (pick(record, 'milestone_type') || 'Appointment Set') as RevenueMilestoneType,
     milestone_date: pick(record, 'milestone_date'),
@@ -328,7 +329,8 @@ export async function fetchMilestoneSummary(): Promise<MilestoneSummary> {
 }
 
 export async function createMilestone(params: {
-  client: string
+  client?: string
+  client_id: number
   external_record_no: string
   milestone_type: RevenueMilestoneType
   milestone_date: string
@@ -339,25 +341,28 @@ export async function createMilestone(params: {
   notes?: string
   created_by?: string
 }): Promise<RevenueMilestone> {
+  const writeClientId = requireWriteClientId(params.client_id)
   const response = await fetch('/api/milestones', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
+    body: JSON.stringify({ ...params, client_id: writeClientId, client: params.client || '' }),
   })
   return normalizeMilestone(await parseJson<unknown>(response))
 }
 
 export async function setCompanyHot(params: {
-  client: string
+  client?: string
+  client_id: number
   external_record_no: string
   is_hot: boolean
   notes?: string
   created_by?: string
 }): Promise<CompanyWorkspace | null> {
+  const writeClientId = requireWriteClientId(params.client_id)
   const response = await fetch('/api/milestones/hot', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
+    body: JSON.stringify({ ...params, client_id: writeClientId, client: params.client || '' }),
   })
   const raw = await parseJson<Record<string, unknown>>(response)
   return raw.workspace ? normalizeWorkspace(raw.workspace) : null
@@ -530,6 +535,7 @@ export async function updateCompanyStatus(
   clientId?: number | null,
   clientName = '',
 ): Promise<FieldUpdateResult> {
+  const writeClientId = requireWriteClientId(clientId)
   const response = await fetch(
     `/api/companies/by-record/${encodeURIComponent(recordNo.trim())}/status`,
     {
@@ -537,7 +543,7 @@ export async function updateCompanyStatus(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         client: clientName,
-        client_id: clientId ?? undefined,
+        client_id: writeClientId,
         status,
         user,
       }),
@@ -552,8 +558,9 @@ export async function updateCompanyNotes(
   noteText: string,
   user = 'Julie Magnani',
   clientId?: number | null,
-  clientName = 'Carmeco',
+  clientName = '',
 ): Promise<FieldUpdateResult> {
+  const writeClientId = requireWriteClientId(clientId)
   const response = await fetch(
     `/api/companies/by-record/${encodeURIComponent(recordNo.trim())}/notes`,
     {
@@ -561,7 +568,7 @@ export async function updateCompanyNotes(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         client: clientName,
-        client_id: clientId ?? undefined,
+        client_id: writeClientId,
         note_text: noteText,
         user,
       }),
@@ -651,7 +658,7 @@ export async function globalSearch(params: GlobalSearchParams): Promise<SearchRe
 
 export async function fetchCompanyActivities(
   recordNo: string,
-  client = 'Carmeco',
+  client = '',
   clientId?: number | null,
 ): Promise<ActivitySummary[]> {
   const query = new URLSearchParams({ client })
@@ -687,16 +694,17 @@ export async function createCompanyNote(params: {
   external_record_no: string
   notes: string
   client?: string
-  client_id?: number
+  client_id: number
   created_by?: string
   contact_id?: number | null
 }): Promise<ActivitySummary> {
+  const writeClientId = requireWriteClientId(params.client_id)
   const response = await fetch('/api/activities', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      client: params.client ?? 'Carmeco',
-      client_id: params.client_id,
+      client: params.client || '',
+      client_id: writeClientId,
       external_record_no: params.external_record_no,
       activity_type: 'Note',
       notes: params.notes,
@@ -1133,10 +1141,11 @@ export async function completeFollowUpTask(params: {
   source: string
   source_id: number | null
 }> {
+  const writeClientId = requireWriteClientId(params.client_id)
   const response = await fetch('/api/follow-up-tasks/complete', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
+    body: JSON.stringify({ ...params, client_id: writeClientId }),
   })
   const raw = await parseJson<Record<string, unknown>>(response)
   return {
@@ -1206,10 +1215,11 @@ export async function logWorkQueueCall(params: {
   completed_queue_item: boolean
   appointment_id: number | null
 }> {
+  const writeClientId = requireWriteClientId(params.client_id)
   const response = await fetch('/api/work-queue/log-call', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
+    body: JSON.stringify({ ...params, client_id: writeClientId }),
   })
   const raw = await parseJson<Record<string, unknown>>(response)
   return {
@@ -1297,13 +1307,14 @@ export async function logOutreach(params: {
   return_next?: boolean
   created_by?: string
 }): Promise<OutreachLogResult> {
+  const writeClientId = requireWriteClientId(params.client_id)
   const response = await fetch(
-    `/api/clients/${encodeURIComponent(String(params.client_id))}/outreach`,
+    `/api/clients/${encodeURIComponent(String(writeClientId))}/outreach`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        client_id: params.client_id,
+        client_id: writeClientId,
         external_record_no: params.external_record_no,
         contact_id: params.contact_id ?? null,
         outreach_type: params.outreach_type || 'Call',
@@ -1337,7 +1348,8 @@ export async function logOutreach(params: {
 }
 
 export async function createCompanyActivity(params: {
-  client: string
+  client?: string
+  client_id: number
   external_record_no: string
   activity_type: string
   activity_at?: string
@@ -1348,10 +1360,15 @@ export async function createCompanyActivity(params: {
   assigned_user?: string
   created_by?: string
 }): Promise<ActivitySummary> {
+  const writeClientId = requireWriteClientId(params.client_id)
   const response = await fetch('/api/activities', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
+    body: JSON.stringify({
+      ...params,
+      client: params.client || '',
+      client_id: writeClientId,
+    }),
   })
   const raw = await parseJson<Record<string, unknown>>(response)
   return {
@@ -3410,6 +3427,11 @@ export type ContactWorkspace = {
   timeline: ContactTimelineItem[]
   company_timeline: ContactTimelineItem[]
   reps: ContactRepOption[]
+  linkedin_url?: string
+  location?: string
+  zoominfo_contact_id?: string
+  source?: string
+  source_updated_at?: string
 }
 
 export type ContactRepOption = {
@@ -3691,10 +3713,11 @@ export async function updateContactWorkflow(
   contactId: number,
   body: ContactWorkflowUpdate,
 ): Promise<ContactWorkflowResult> {
+  const writeClientId = requireWriteClientId(body.client_id)
   const response = await fetch(`/api/contacts/${encodeURIComponent(String(contactId))}/workflow`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ ...body, client_id: writeClientId }),
   })
   return (await parseJson(response)) as ContactWorkflowResult
 }
@@ -3703,10 +3726,11 @@ export async function createContactActivity(
   contactId: number,
   body: ContactActivityCreate,
 ): Promise<ContactWorkflowResult> {
+  const writeClientId = requireWriteClientId(body.client_id)
   const response = await fetch(`/api/contacts/${encodeURIComponent(String(contactId))}/activities`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ ...body, client_id: writeClientId }),
   })
   return (await parseJson(response)) as ContactWorkflowResult
 }
@@ -3934,12 +3958,361 @@ export async function assignSharedContact(
   contactId: number,
   body: ContactAssignRequest,
 ): Promise<ContactAssignResult> {
+  const writeClientId = requireWriteClientId(body.client_id)
   const response = await fetch(`/api/contacts/${encodeURIComponent(String(contactId))}/assign`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ ...body, client_id: writeClientId }),
   })
   return (await parseJson(response)) as ContactAssignResult
+}
+
+export type CompanyLookupItem = {
+  id: number
+  company_name: string
+  external_record_no: string
+}
+
+export type ManualContactMatch = {
+  contact_id: number
+  first_name: string
+  last_name: string
+  title: string
+  email: string
+  phone: string
+  alt_phone: string
+  company_id: number
+  company_name: string
+  reasons: string[]
+  confidence: string
+  already_assigned: boolean
+  same_company: boolean
+}
+
+export type ManualContactPreviewResponse = {
+  matches: ManualContactMatch[]
+  can_create: boolean
+  requires_contact_info_confirmation: boolean
+  message: string
+}
+
+export type ManualContactSaveResult = {
+  ok: boolean
+  action: string
+  message: string
+  contact_id: number
+  company_id: number
+  client_id: number
+  activity_id: number | null
+  already_assigned: boolean
+}
+
+export async function lookupCompaniesForClient(
+  clientId: number,
+  q = '',
+): Promise<{ companies: CompanyLookupItem[] }> {
+  const writeClientId = requireWriteClientId(clientId)
+  const query = new URLSearchParams({
+    client_id: String(writeClientId),
+    q,
+  })
+  const response = await fetch(`/api/companies/lookup?${query.toString()}`)
+  return (await parseJson(response)) as { companies: CompanyLookupItem[] }
+}
+
+export async function previewManualContact(body: {
+  client_id: number
+  company_id: number
+  first_name: string
+  last_name: string
+  title?: string
+  email?: string
+  phone?: string
+  alt_phone?: string
+}): Promise<ManualContactPreviewResponse> {
+  const writeClientId = requireWriteClientId(body.client_id)
+  const response = await fetch('/api/contacts/manual/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, client_id: writeClientId }),
+  })
+  return (await parseJson(response)) as ManualContactPreviewResponse
+}
+
+export async function saveManualContact(body: {
+  client_id: number
+  company_id: number
+  action: 'create' | 'link'
+  existing_contact_id?: number | null
+  first_name?: string
+  last_name?: string
+  title?: string
+  email?: string
+  phone?: string
+  alt_phone?: string
+  confirm_without_contact_info?: boolean
+  created_by?: string
+}): Promise<ManualContactSaveResult> {
+  const writeClientId = requireWriteClientId(body.client_id)
+  const response = await fetch('/api/contacts/manual', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, client_id: writeClientId }),
+  })
+  return (await parseJson(response)) as ManualContactSaveResult
+}
+
+export type ManualCompanyClientRel = {
+  client_id: number
+  client_name: string
+  status: string
+}
+
+export type ManualCompanyMatch = {
+  company_id: number
+  company_name: string
+  external_record_no: string
+  website: string
+  address: string
+  city: string
+  state: string
+  zip: string
+  phone: string
+  reasons: string[]
+  confidence: string
+  already_assigned: boolean
+  client_relationships: ManualCompanyClientRel[]
+  score: number
+  ai_assessment: string
+  ai_explanation: string
+  ai_confidence: string
+  ai_available: boolean
+}
+
+export type ManualCompanyPreviewResponse = {
+  matches: ManualCompanyMatch[]
+  can_create: boolean
+  requires_create_confirmation: boolean
+  message: string
+  ai_available: boolean
+}
+
+export type ManualCompanySaveResult = {
+  ok: boolean
+  action: string
+  message: string
+  company_id: number
+  client_id: number
+  external_record_no: string
+  activity_id: number | null
+  already_assigned: boolean
+}
+
+export type ZoomInfoSnapshot = {
+  first_name?: string
+  last_name?: string
+  title?: string
+  email?: string
+  phone?: string
+  alt_phone?: string
+  mobile_phone?: string
+  company_name?: string
+  zoominfo_company_id?: string
+  zoominfo_contact_id?: string
+  linkedin_url?: string
+  location?: string
+  website?: string
+  address?: string
+  city?: string
+  state?: string
+  zip?: string
+  industry?: string
+  employee_size?: string
+  sales_volume?: string
+}
+
+export type ZoomInfoFieldChoice = {
+  field: string
+  label: string
+  northstar_value: string
+  zoominfo_value: string
+  keep_northstar: boolean
+  blank_zoominfo: boolean
+  different_company: boolean
+  applyable: boolean
+}
+
+export type ZoomInfoContactPreviewResponse = {
+  available: boolean
+  status: string
+  contact_id: number
+  client_id: number
+  company_id: number | null
+  company_name: string
+  fields: ZoomInfoFieldChoice[]
+  different_company: boolean
+  zoominfo_company_name: string
+  matches: ManualContactMatch[]
+  retrieved_at: string
+}
+
+export type ZoomInfoContactApplyResult = {
+  ok: boolean
+  message: string
+  contact_id: number
+  client_id: number
+  company_id: number | null
+  changed_fields: string[]
+  activity_id: number | null
+  company_relinked: boolean
+}
+
+export type ZoomInfoAddPreviewResponse = {
+  kind: string
+  client_id: number
+  company_id: number | null
+  matches: Array<Record<string, unknown>>
+  can_create: boolean
+  requires_create_confirmation: boolean
+  message: string
+}
+
+export type ZoomInfoAddResult = {
+  ok: boolean
+  action: string
+  message: string
+  kind: string
+  company_id: number | null
+  contact_id: number | null
+  client_id: number
+  external_record_no: string
+  activity_id: number | null
+}
+
+export async function previewManualCompany(body: {
+  client_id: number
+  company_name: string
+  website?: string
+  address?: string
+  city?: string
+  state?: string
+  zip?: string
+  phone?: string
+  industry?: string
+  employee_size?: string
+  sales_volume?: string
+  external_record_no?: string
+  notes?: string
+}): Promise<ManualCompanyPreviewResponse> {
+  const writeClientId = requireWriteClientId(body.client_id)
+  const response = await fetch('/api/companies/manual/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, client_id: writeClientId }),
+  })
+  return (await parseJson(response)) as ManualCompanyPreviewResponse
+}
+
+export async function saveManualCompany(body: {
+  client_id: number
+  action: 'create' | 'link'
+  existing_company_id?: number | null
+  company_name?: string
+  website?: string
+  address?: string
+  city?: string
+  state?: string
+  zip?: string
+  phone?: string
+  industry?: string
+  employee_size?: string
+  sales_volume?: string
+  external_record_no?: string
+  notes?: string
+  confirm_create_despite_match?: boolean
+  created_by?: string
+}): Promise<ManualCompanySaveResult> {
+  const writeClientId = requireWriteClientId(body.client_id)
+  const response = await fetch('/api/companies/manual', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, client_id: writeClientId }),
+  })
+  return (await parseJson(response)) as ManualCompanySaveResult
+}
+
+export async function previewZoomInfoContact(
+  contactId: number,
+  body: { client_id: number; zoominfo?: ZoomInfoSnapshot | null },
+): Promise<ZoomInfoContactPreviewResponse> {
+  const writeClientId = requireWriteClientId(body.client_id)
+  const response = await fetch(
+    `/api/contacts/${encodeURIComponent(String(contactId))}/zoominfo/preview`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...body, client_id: writeClientId }),
+    },
+  )
+  return (await parseJson(response)) as ZoomInfoContactPreviewResponse
+}
+
+export async function applyZoomInfoContact(
+  contactId: number,
+  body: {
+    client_id: number
+    apply_fields: string[]
+    zoominfo: ZoomInfoSnapshot
+    confirm_company_relink?: boolean
+    target_company_id?: number | null
+    created_by?: string
+  },
+): Promise<ZoomInfoContactApplyResult> {
+  const writeClientId = requireWriteClientId(body.client_id)
+  const response = await fetch(
+    `/api/contacts/${encodeURIComponent(String(contactId))}/zoominfo/apply`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...body, client_id: writeClientId }),
+    },
+  )
+  return (await parseJson(response)) as ZoomInfoContactApplyResult
+}
+
+export async function previewZoomInfoAdd(body: {
+  client_id: number
+  company_id?: number | null
+  zoominfo: ZoomInfoSnapshot
+  kind?: 'company' | 'contact'
+}): Promise<ZoomInfoAddPreviewResponse> {
+  const writeClientId = requireWriteClientId(body.client_id)
+  const response = await fetch('/api/zoominfo/add/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, client_id: writeClientId }),
+  })
+  return (await parseJson(response)) as ZoomInfoAddPreviewResponse
+}
+
+export async function saveZoomInfoAdd(body: {
+  client_id: number
+  company_id?: number | null
+  action: 'create' | 'link'
+  existing_company_id?: number | null
+  existing_contact_id?: number | null
+  zoominfo: ZoomInfoSnapshot
+  kind?: 'company' | 'contact'
+  confirm_create_despite_match?: boolean
+  created_by?: string
+}): Promise<ZoomInfoAddResult> {
+  const writeClientId = requireWriteClientId(body.client_id)
+  const response = await fetch('/api/zoominfo/add', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, client_id: writeClientId }),
+  })
+  return (await parseJson(response)) as ZoomInfoAddResult
 }
 
 export async function fetchClientSalesEvents(
@@ -4148,10 +4521,11 @@ export async function createCampaign(body: {
   end_date?: string
   notes?: string
 }): Promise<CampaignSummary> {
+  const writeClientId = requireWriteClientId(body.client_id)
   const response = await fetch('/api/campaigns', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ ...body, client_id: writeClientId }),
   })
   return parseJson<CampaignSummary>(response)
 }
@@ -4290,10 +4664,11 @@ export async function confirmCampaignRoute(body: {
   campaign_id: number
   source?: string
 }): Promise<CampaignRouteSuggestion> {
+  const writeClientId = requireWriteClientId(body.client_id)
   const response = await fetch('/api/campaigns/route/confirm', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ ...body, client_id: writeClientId }),
   })
   return parseJson<CampaignRouteSuggestion>(response)
 }

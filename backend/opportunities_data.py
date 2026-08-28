@@ -664,6 +664,8 @@ def opportunity_count_for_dashboard(
 
 
 def dismiss_opportunity(body: OpportunityDismissRequest) -> OpportunityActionResult:
+    from access import require_write_client_id
+
     if body.reason not in DISMISS_REASONS:
         raise ValueError(
             f"Invalid dismissal reason. Allowed: {', '.join(sorted(DISMISS_REASONS))}."
@@ -671,8 +673,7 @@ def dismiss_opportunity(body: OpportunityDismissRequest) -> OpportunityActionRes
     user = get_default_user()
     if user is None:
         raise PermissionError("User not found.")
-    if not user_can_access_client(user.id, body.target_client_id) and not user.is_administrator:
-        raise PermissionError("Not authorized for Target Client.")
+    require_write_client_id(body.target_client_id, user_id=user.id)
 
     with get_connection() as conn:
         company = conn.execute(
@@ -717,11 +718,12 @@ def dismiss_opportunity(body: OpportunityDismissRequest) -> OpportunityActionRes
 
 def mark_opportunity_reviewed(body: OpportunityReviewRequest) -> OpportunityActionResult:
     """Mark opportunity Reviewed for TARGET client only (does not create work)."""
+    from access import require_write_client_id
+
     user = get_default_user()
     if user is None:
         raise PermissionError("User not found.")
-    if not user_can_access_client(user.id, body.target_client_id) and not user.is_administrator:
-        raise PermissionError("Not authorized for Target Client.")
+    require_write_client_id(body.target_client_id, user_id=user.id)
 
     with get_connection() as conn:
         company = conn.execute(
@@ -803,8 +805,9 @@ def add_opportunity_to_target(
     user = get_default_user()
     if user is None:
         raise PermissionError("User not found.")
-    if not user_can_access_client(user.id, target_client_id) and not user.is_administrator:
-        raise PermissionError("Not authorized for Target Client.")
+    from access import require_write_client_id
+
+    require_write_client_id(target_client_id, user_id=user.id)
 
     with get_connection() as conn:
         company = conn.execute(

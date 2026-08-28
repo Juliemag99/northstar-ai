@@ -15,6 +15,8 @@ import type {
   CampaignContactRow,
   CampaignWorkspace as CampaignWorkspaceData,
 } from './types/carmeco'
+import AddCompanyModal from './AddCompanyModal'
+import { SELECT_CLIENT_FOR_WRITE, requireWriteClientId } from './writeClient'
 
 function display(value: string | null | undefined): string {
   return (value || '').trim() || '—'
@@ -61,6 +63,7 @@ export default function CampaignWorkspace({
   const [contactHits, setContactHits] = useState<CampaignContactRow[]>([])
   const [adding, setAdding] = useState(false)
   const [pendingRemoval, setPendingRemoval] = useState<PendingRemoval | null>(null)
+  const [addCompanyOpen, setAddCompanyOpen] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -222,6 +225,31 @@ export default function CampaignWorkspace({
               Existing companies can belong to multiple campaigns. Adding here does not create a duplicate
               master record.
             </p>
+            <div className="heading-controls" style={{ marginBottom: '0.75rem' }}>
+              <button
+                type="button"
+                className="primary-btn"
+                onClick={() => {
+                  try {
+                    requireWriteClientId(activeClientId)
+                    setAddCompanyOpen(true)
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : SELECT_CLIENT_FOR_WRITE)
+                  }
+                }}
+              >
+                Add Company
+              </button>
+            </div>
+            <AddCompanyModal
+              open={addCompanyOpen}
+              onClose={() => setAddCompanyOpen(false)}
+              clientId={activeClientId}
+              clientName={data?.campaign?.client_name || ''}
+              onCreated={async (result) => {
+                await addCampaignCompany(campaignId, result.company_id)
+              }}
+            />
             <label className="edit-field">
               <span className="edit-field__label">Add company</span>
               <input

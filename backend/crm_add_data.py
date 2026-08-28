@@ -13,6 +13,7 @@ from typing import Any
 
 from access import get_default_user, get_user_by_id, user_can_access_client
 from activities_data import create_activity
+from contact_phone import format_us_phone_display, lookup_contact_phone_matches, upsert_contact_phone_keys
 from db import get_connection
 from import_brown_industries import digits_phone, domain, norm_addr, norm_name
 from models import (
@@ -73,13 +74,9 @@ def _resolve_contact_names(c: CrmAddContactInput) -> tuple[str, str, str]:
 
 
 def _require_client_access(user_id: int, client_id: int) -> None:
-    user = get_user_by_id(user_id)
-    if user is None:
-        raise PermissionError("User not found.")
-    if user.is_administrator:
-        return
-    if not user_can_access_client(user_id, client_id):
-        raise PermissionError("Not authorized for this client.")
+    from access import require_write_client_id
+
+    require_write_client_id(client_id, user_id=user_id)
 
 
 def allocate_ns_record_no(conn) -> str:
@@ -325,7 +322,6 @@ def match_company(
 def match_contact(conn, company_id: int, contact: CrmAddContactInput) -> dict[str, Any]:
     first, last, full = _resolve_contact_names(contact)
     email = _norm_email(contact.email)
-    phone = digits_phone(_blank(contact.phone))
     title = _blank(contact.title)
     norm = _norm_person_name(full)
 
@@ -348,26 +344,30 @@ def match_contact(conn, company_id: int, contact: CrmAddContactInput) -> dict[st
                 "confidence": "high",
             }
 
-    if phone and len(phone) >= 7:
-        for r in conn.execute(
+    phone_possible: dict[str, Any] | None = None
+    for contact_id, reasons, confidence in lookup_contact_phone_matches(
+        conn, _blank(contact.phone), company_id=int(company_id)
+    ):
+        row = conn.execute(
             """
-            SELECT id, first_name, last_name, title, phone, alt_phone, email
-            FROM contacts WHERE company_id = ?
+            SELECT id, first_name, last_name
+            FROM contacts WHERE id = ? AND company_id = ?
             """,
-            (company_id,),
-        ).fetchall():
-            for field in ("phone", "alt_phone"):
-                digits = digits_phone(_blank(r[field]))
-                if digits and (
-                    digits.endswith(phone[-7:]) or phone.endswith(digits[-7:])
-                ):
-                    return {
-                        "status": "existing",
-                        "contact_id": int(r["id"]),
-                        "matched_name": f"{_blank(r['first_name'])} {_blank(r['last_name'])}".strip(),
-                        "reasons": ["phone"],
-                        "confidence": "high",
-                    }
+            (contact_id, company_id),
+        ).fetchone()
+        if row is None:
+            continue
+        payload = {
+            "contact_id": int(row["id"]),
+            "matched_name": f"{_blank(row['first_name'])} {_blank(row['last_name'])}".strip(),
+            "reasons": reasons,
+            "confidence": confidence,
+        }
+        if confidence == "high":
+            payload["status"] = "existing"
+            return payload
+        if phone_possible is None:
+            phone_possible = {**payload, "status": "possible_match"}
 
     possibles: list[tuple[Any, list[str]]] = []
     if norm:
@@ -407,6 +407,9 @@ def match_contact(conn, company_id: int, contact: CrmAddContactInput) -> dict[st
             "confidence": "medium" if len(possibles) == 1 else "low",
             "possibles_count": len(possibles),
         }
+
+    if phone_possible is not None:
+        return phone_possible
 
     return {
         "status": "new",
@@ -780,11 +783,15 @@ def create_or_link_contact(
                 first,
                 last,
                 _blank(contact.title),
-                _blank(contact.phone),
+                format_us_phone_display(_blank(contact.phone)),
                 email,
             ),
         )
-        return int(cur.lastrowid), "created", True
+        contact_id = int(cur.lastrowid)
+        upsert_contact_phone_keys(
+            conn, contact_id, format_us_phone_display(_blank(contact.phone)), ""
+        )
+        return contact_id, "created", True
 
     if status == "existing":
         return int(cm["contact_id"]), "existing", False

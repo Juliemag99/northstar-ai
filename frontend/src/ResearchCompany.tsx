@@ -9,6 +9,7 @@ import {
 } from './api/carmeco'
 import type { ResearchCompanyResponse, ResearchFindingView } from './types/carmeco'
 import AddToNorthStar from './AddToNorthStar'
+import ZoomInfoAddModal from './ZoomInfoAddModal'
 import type { CrmAddContactInput } from './api/carmeco'
 import { ASK_NORTHSTAR_PATH, isFromAskNorthStar, withAskReturnParam } from './askNorthStarReturn'
 
@@ -161,6 +162,7 @@ export default function ResearchCompany({
   const [addOpen, setAddOpen] = useState(false)
   const [addContacts, setAddContacts] = useState<CrmAddContactInput[]>([])
   const [detailContact, setDetailContact] = useState<ResearchFindingView | null>(null)
+  const [zoomInfoAddKind, setZoomInfoAddKind] = useState<'company' | 'contact' | null>(null)
 
   const load = useCallback(
     async (opts?: {
@@ -1222,6 +1224,19 @@ export default function ResearchCompany({
             <p>
               <strong>{display(String(data.data_provider?.status || 'ZoomInfo not connected'))}</strong>
             </p>
+            <p>
+              When ZoomInfo finds a person or company that is not already in NorthStar, use Add to
+              NorthStar. Nothing is created automatically from search results.
+            </p>
+            <div className="heading-controls" style={{ margin: '0.75rem 0' }}>
+              <button
+                type="button"
+                className="primary-btn"
+                onClick={() => setZoomInfoAddKind('company')}
+              >
+                Add to NorthStar
+              </button>
+            </div>
             <p className="queue-sub">Future capabilities may include:</p>
             <ul className="ask-bullet-list">
               {(
@@ -1503,6 +1518,24 @@ export default function ResearchCompany({
           )
         : null}
 
+      {zoomInfoAddKind && workingForClientId != null && workingForClientId > 0 && data ? (
+        <ZoomInfoAddModal
+          open
+          onClose={() => setZoomInfoAddKind(null)}
+          clientId={workingForClientId}
+          clientName={data.working_for_client_name || defaultClientName}
+          kind={zoomInfoAddKind}
+          lockedCompanyId={zoomInfoAddKind === 'contact' ? data.company_id : null}
+          lockedCompanyName={data.company_name}
+          zoominfo={{
+            company_name: data.company_name || '',
+            website: data.northstar_known?.website || '',
+            address: data.northstar_known?.address || '',
+            city: data.northstar_known?.city || '',
+            state: data.northstar_known?.state || '',
+          }}
+        />
+      ) : null}
       {addOpen && workingForClientId != null && workingForClientId > 0 && data ? (
         <AddToNorthStar
           open={addOpen}

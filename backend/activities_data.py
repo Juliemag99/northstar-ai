@@ -29,6 +29,11 @@ ACTIVITY_TYPES = frozenset(
         "Note",
         "Status Change",
         "Contact Assignment",
+        "Contact Created",
+        "Contact Linked",
+        "Contact Updated from ZoomInfo",
+        "Company Created",
+        "Company Linked",
         "Campaign Assignment",
         "Campaign Bulk Assignment",
         "Campaign Reassignment",
@@ -51,6 +56,11 @@ ACTIVITY_TIMELINE_TYPES = (
     "Appointment Cancelled",
     "Appointment Completed",
     "Contact Assignment",
+    "Contact Created",
+    "Contact Linked",
+    "Contact Updated from ZoomInfo",
+    "Company Created",
+    "Company Linked",
     "Campaign Assignment",
     "Campaign Bulk Assignment",
     "Campaign Reassignment",
@@ -68,7 +78,15 @@ def _db_exists() -> bool:
     return DB_PATH.exists()
 
 
+def _resolve_client_for_write(conn, client_id: object):
+    from access import require_write_client_id
+
+    cid = require_write_client_id(client_id, conn=conn)
+    return conn.execute("SELECT * FROM clients WHERE id = ?", (cid,)).fetchone()
+
+
 def _resolve_client(conn, client_name: str = "Carmeco", client_id: int | None = None):
+    """Read helper. Writes must use _resolve_client_for_write / require_write_client_id."""
     if client_id is not None:
         return conn.execute(
             "SELECT * FROM clients WHERE id = ?", (int(client_id),)
@@ -236,7 +254,7 @@ def create_activity(body: ActivityCreateRequest) -> Activity:
         follow_up_at = None
 
     with get_connection() as conn:
-        client_row = _resolve_client(conn, body.client, body.client_id)
+        client_row = _resolve_client_for_write(conn, body.client_id)
         if client_row is None:
             raise ValueError("Unknown client.")
 

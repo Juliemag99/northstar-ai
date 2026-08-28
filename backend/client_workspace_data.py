@@ -31,6 +31,13 @@ def _blank(value: object | None) -> str:
     return str(value).strip()
 
 
+def _row_opt(row, key: str) -> str:
+    try:
+        return _blank(row[key])
+    except (KeyError, IndexError):
+        return ""
+
+
 def _contact_display_name(first: str, last: str) -> str:
     return f"{first} {last}".strip()
 
@@ -309,7 +316,18 @@ def resolve_relationship(
     if not key:
         return None
 
-    client_row = resolve_client_row(conn, client_id=client_id, client=client)
+    if client_id is not None:
+        try:
+            cid_arg = int(client_id)
+        except (TypeError, ValueError):
+            return None
+        if cid_arg <= 0:
+            return None
+        client_row = resolve_client_row(conn, client_id=cid_arg, client=None)
+        if client_row is None:
+            return None
+    else:
+        client_row = resolve_client_row(conn, client_id=None, client=client)
 
     if client_row is not None:
         cid = int(client_row["id"])
@@ -981,16 +999,20 @@ def update_relationship_status(
     client: str = "",
     user: str = "Julie Magnani",
 ) -> dict:
+    from access import require_write_client_id
+
     key = record_no.strip()
     new_status = status.strip()
     if not key:
         raise ValueError("Record No. is required.")
     if not new_status:
         raise ValueError("Status is required.")
+    del client
 
     with get_connection() as conn:
+        cid = require_write_client_id(client_id, conn=conn)
         rel = resolve_relationship(
-            conn, record_no=key, client_id=client_id, client=client
+            conn, record_no=key, client_id=cid, client=None
         )
         if rel is None:
             raise LookupError(
@@ -1067,17 +1089,21 @@ def update_relationship_notes(
     *,
     note_text: str,
     client_id: int | None = None,
-    client: str = "Carmeco",
+    client: str = "",
     user: str = "Julie Magnani",
 ) -> dict:
+    from access import require_write_client_id
+
     key = record_no.strip()
     new_text = note_text if note_text is not None else ""
     if not key:
         raise ValueError("Record No. is required.")
+    del client
 
     with get_connection() as conn:
+        cid = require_write_client_id(client_id, conn=conn)
         rel = resolve_relationship(
-            conn, record_no=key, client_id=client_id, client=client
+            conn, record_no=key, client_id=cid, client=None
         )
         if rel is None:
             raise LookupError(
@@ -1152,7 +1178,7 @@ def list_carmeco_statuses() -> list[str]:
 def update_carmeco_status(
     record_no: str,
     *,
-    client: str = "Carmeco",
+    client: str = "",
     status: str,
     user: str = "Julie Magnani",
     client_id: int | None = None,
@@ -1160,7 +1186,7 @@ def update_carmeco_status(
     return update_relationship_status(
         record_no,
         status=status,
-        client=client,
+        client="",
         client_id=client_id,
         user=user,
     )
@@ -1169,7 +1195,7 @@ def update_carmeco_status(
 def update_carmeco_notes(
     record_no: str,
     *,
-    client: str = "Carmeco",
+    client: str = "",
     note_text: str,
     user: str = "Julie Magnani",
     client_id: int | None = None,
@@ -1177,7 +1203,7 @@ def update_carmeco_notes(
     return update_relationship_notes(
         record_no,
         note_text=note_text,
-        client=client,
+        client="",
         client_id=client_id,
         user=user,
     )
@@ -1663,6 +1689,11 @@ def get_contact_workspace(
                     timeline=[],
                     company_timeline=[],
                     reps=[],
+                    linkedin_url=_row_opt(row, "linkedin_url"),
+                    location=_row_opt(row, "location"),
+                    zoominfo_contact_id=_row_opt(row, "zoominfo_contact_id"),
+                    source=_row_opt(row, "source"),
+                    source_updated_at=_row_opt(row, "source_updated_at"),
                 )
             if rel is None or int(rel["client_id"]) != requested_id:
                 rel = None
@@ -1810,6 +1841,11 @@ def get_contact_workspace(
         timeline=timeline,
         company_timeline=company_timeline,
         reps=reps,
+        linkedin_url=_row_opt(row, "linkedin_url"),
+        location=_row_opt(row, "location"),
+        zoominfo_contact_id=_row_opt(row, "zoominfo_contact_id"),
+        source=_row_opt(row, "source"),
+        source_updated_at=_row_opt(row, "source_updated_at"),
     )
 
 
@@ -1819,14 +1855,12 @@ def update_contact_workflow(contact_id: int, body) -> dict:
     Updates contact_client_workflows + the matching CCR only.
     Never inserts a contact. Never writes another client's CCR.
     """
-    from access import get_default_user, user_can_access_client
+    from access import get_default_user, require_write_client_id, user_can_access_client
     from models import ContactWorkflowUpdate
 
     if not isinstance(body, ContactWorkflowUpdate):
         body = ContactWorkflowUpdate.model_validate(body)
-    client_id = int(body.client_id)
-    if client_id <= 0:
-        raise ValueError("client_id is required.")
+    client_id = require_write_client_id(body.client_id)
     user = get_default_user()
     if user is None:
         raise PermissionError("User not found.")
@@ -2447,15 +2481,13 @@ def create_contact_activity(contact_id: int, body) -> dict:
     Otherwise it logs the call, updates status, and completes any open
     follow-up for this contact + client. Note never changes status or follow-up.
     """
-    from access import get_default_user, user_can_access_client
+    from access import get_default_user, require_write_client_id, user_can_access_client
     from activities_data import ACTIVITY_TYPES, insert_activity_row
     from models import ContactActivityCreate
 
     if not isinstance(body, ContactActivityCreate):
         body = ContactActivityCreate.model_validate(body)
-    client_id = int(body.client_id)
-    if client_id <= 0:
-        raise ValueError("client_id is required.")
+    client_id = require_write_client_id(body.client_id)
     activity_type = _blank(body.activity_type)
     if activity_type not in ACTIVITY_TYPES:
         raise ValueError(
@@ -2835,15 +2867,13 @@ def create_contact_activity(contact_id: int, body) -> dict:
 
 def complete_contact_follow_up(contact_id: int, body) -> dict:
     """Complete this contact's open follow-up for the Active Client only."""
-    from access import get_default_user, user_can_access_client
+    from access import get_default_user, require_write_client_id, user_can_access_client
     from activities_data import insert_activity_row
     from models import ContactFollowUpCompleteRequest
 
     if not isinstance(body, ContactFollowUpCompleteRequest):
         body = ContactFollowUpCompleteRequest.model_validate(body)
-    client_id = int(body.client_id)
-    if client_id <= 0:
-        raise ValueError("client_id is required.")
+    client_id = require_write_client_id(body.client_id)
     user = get_default_user()
     if user is None:
         raise PermissionError("User not found.")
@@ -2984,14 +3014,12 @@ def complete_contact_follow_up(contact_id: int, body) -> dict:
 
 def reschedule_contact_follow_up(contact_id: int, body) -> dict:
     """Update the existing open follow-up date/time; do not create a duplicate."""
-    from access import get_default_user, user_can_access_client
+    from access import get_default_user, require_write_client_id, user_can_access_client
     from models import ContactFollowUpRescheduleRequest
 
     if not isinstance(body, ContactFollowUpRescheduleRequest):
         body = ContactFollowUpRescheduleRequest.model_validate(body)
-    client_id = int(body.client_id)
-    if client_id <= 0:
-        raise ValueError("client_id is required.")
+    client_id = require_write_client_id(body.client_id)
     follow_date = _blank(body.follow_up_date)[:10]
     follow_time = _blank(body.follow_up_time)[:5]
     if not follow_date or not follow_time:
@@ -3210,15 +3238,13 @@ def _allocate_relationship_record_no(conn) -> str:
 
 def assign_shared_contact(contact_id: int, body) -> dict:
     """Link an existing master contact to the Active Client. Never duplicates the person."""
-    from access import get_default_user, user_can_access_client
+    from access import get_default_user, require_write_client_id, user_can_access_client
     from activities_data import create_activity
     from models import ActivityCreateRequest, ContactAssignRequest
 
     if not isinstance(body, ContactAssignRequest):
         body = ContactAssignRequest.model_validate(body)
-    client_id = int(body.client_id)
-    if client_id <= 0:
-        raise ValueError("client_id is required.")
+    client_id = require_write_client_id(body.client_id)
     user = get_default_user()
     if user is None:
         raise PermissionError("User not found.")

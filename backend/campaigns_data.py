@@ -569,14 +569,12 @@ def get_campaign_workspace(campaign_id: int) -> CampaignWorkspace:
 
 
 def create_operational_campaign(body: CampaignCreateRequest) -> CampaignSummary:
+    from access import require_write_client_id
+
     user = get_default_user()
     if user is None:
         raise PermissionError("User not found.")
-    client_id = int(body.client_id)
-    if client_id <= 0:
-        raise ValueError("Select a client for this campaign.")
-    if not user_can_access_client(user.id, client_id) and not user.is_administrator:
-        raise PermissionError("Not authorized for this client.")
+    client_id = require_write_client_id(body.client_id, user_id=user.id)
     name = _blank(body.campaign_name)
     if not name:
         raise ValueError("Campaign name is required.")
@@ -1665,6 +1663,9 @@ def suggest_campaign_route(
 
 
 def confirm_campaign_route(body: CampaignRouteConfirmRequest) -> CampaignRouteSuggestion:
+    from access import require_write_client_id
+
+    require_write_client_id(body.client_id)
     allowed = _authorized_client_ids(body.client_id)
     if int(body.client_id) not in allowed:
         raise PermissionError("Not authorized for this client.")
@@ -1761,6 +1762,9 @@ def confirm_campaign_route(body: CampaignRouteConfirmRequest) -> CampaignRouteSu
 
 
 def defer_campaign_route(body: CampaignRouteDeferRequest) -> CampaignRouteSuggestion:
+    from access import require_write_client_id
+
+    require_write_client_id(body.client_id)
     allowed = _authorized_client_ids(body.client_id)
     if int(body.client_id) not in allowed:
         raise PermissionError("Not authorized for this client.")
@@ -2135,9 +2139,9 @@ def _assign_unassigned_row(
 
 
 def bulk_assign_unassigned(body: UnassignedBulkAssignRequest) -> UnassignedBulkAssignResult:
-    client_id = int(body.client_id)
-    if client_id <= 0:
-        raise ValueError("Select one client. Bulk assign cannot run across All My Clients.")
+    from access import require_write_client_id
+
+    client_id = require_write_client_id(body.client_id)
     campaign_id = int(body.campaign_id)
     if campaign_id <= 0:
         raise ValueError("Select a campaign.")

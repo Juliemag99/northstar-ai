@@ -67,7 +67,10 @@ CREATE TABLE IF NOT EXISTS companies (
     customer_campaign TEXT NOT NULL DEFAULT '',
     entered_at TEXT NOT NULL DEFAULT '',
     last_updated_at TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    zoominfo_company_id TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    source_updated_at TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS contacts (
@@ -82,6 +85,11 @@ CREATE TABLE IF NOT EXISTS contacts (
     email TEXT NOT NULL DEFAULT '',
     source_row_index INTEGER NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    linkedin_url TEXT NOT NULL DEFAULT '',
+    location TEXT NOT NULL DEFAULT '',
+    zoominfo_contact_id TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    source_updated_at TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
 );
 
@@ -163,8 +171,61 @@ CREATE INDEX IF NOT EXISTS idx_companies_external_record_no
     ON companies(external_record_no);
 CREATE INDEX IF NOT EXISTS idx_contacts_company_id
     ON contacts(company_id);
+CREATE INDEX IF NOT EXISTS idx_contacts_last_first_nocase
+    ON contacts(last_name COLLATE NOCASE, first_name COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS idx_contacts_external_record_no
     ON contacts(external_record_no);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_companies_zoominfo_id
+    ON companies(zoominfo_company_id) WHERE TRIM(zoominfo_company_id) != '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_zoominfo_id
+    ON contacts(zoominfo_contact_id) WHERE TRIM(zoominfo_contact_id) != '';
+
+-- Derived NANP keys for Add Contact phone matching. Display phones stay on contacts.
+CREATE TABLE IF NOT EXISTS contact_phone_keys (
+    contact_id INTEGER NOT NULL,
+    slot TEXT NOT NULL CHECK (slot IN ('phone', 'alt_phone')),
+    nanp10 TEXT NOT NULL DEFAULT '',
+    last7 TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (contact_id, slot),
+    FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_contact_phone_keys_nanp10
+    ON contact_phone_keys(nanp10);
+CREATE INDEX IF NOT EXISTS idx_contact_phone_keys_last7
+    ON contact_phone_keys(last7);
+CREATE TRIGGER IF NOT EXISTS trg_contact_phone_keys_ai
+AFTER INSERT ON contacts
+BEGIN
+    INSERT OR IGNORE INTO contact_phone_keys (contact_id, slot, nanp10, last7)
+    SELECT NEW.id, 'phone',
+           northstar_phone_nanp10(NEW.phone),
+           northstar_phone_last7(NEW.phone)
+    WHERE northstar_phone_nanp10(NEW.phone) != ''
+       OR northstar_phone_last7(NEW.phone) != '';
+    INSERT OR IGNORE INTO contact_phone_keys (contact_id, slot, nanp10, last7)
+    SELECT NEW.id, 'alt_phone',
+           northstar_phone_nanp10(NEW.alt_phone),
+           northstar_phone_last7(NEW.alt_phone)
+    WHERE northstar_phone_nanp10(NEW.alt_phone) != ''
+       OR northstar_phone_last7(NEW.alt_phone) != '';
+END;
+CREATE TRIGGER IF NOT EXISTS trg_contact_phone_keys_au
+AFTER UPDATE OF phone, alt_phone ON contacts
+BEGIN
+    DELETE FROM contact_phone_keys WHERE contact_id = NEW.id;
+    INSERT OR IGNORE INTO contact_phone_keys (contact_id, slot, nanp10, last7)
+    SELECT NEW.id, 'phone',
+           northstar_phone_nanp10(NEW.phone),
+           northstar_phone_last7(NEW.phone)
+    WHERE northstar_phone_nanp10(NEW.phone) != ''
+       OR northstar_phone_last7(NEW.phone) != '';
+    INSERT OR IGNORE INTO contact_phone_keys (contact_id, slot, nanp10, last7)
+    SELECT NEW.id, 'alt_phone',
+           northstar_phone_nanp10(NEW.alt_phone),
+           northstar_phone_last7(NEW.alt_phone)
+    WHERE northstar_phone_nanp10(NEW.alt_phone) != ''
+       OR northstar_phone_last7(NEW.alt_phone) != '';
+END;
 CREATE INDEX IF NOT EXISTS idx_ccr_client_company
     ON client_company_relationships(client_id, company_id);
 CREATE INDEX IF NOT EXISTS idx_ccr_client_record_no

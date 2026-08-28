@@ -9,9 +9,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from db import isolate_for_tests
+from db import ensure_zoominfo_columns, get_connection, isolate_for_tests, migrate_schema
 
 isolate_for_tests()
+with get_connection() as conn:
+    ensure_zoominfo_columns(conn)
+    migrate_schema(conn)
 
 _client = None
 

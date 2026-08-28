@@ -58,7 +58,7 @@ def google_redirect_uri() -> str:
     """Must match the Authorized redirect URI in Google Cloud Console."""
     _reload_dotenv()
     return _blank(os.getenv("GOOGLE_OAUTH_REDIRECT_URI")) or (
-        "http://127.0.0.1:8006/api/email/google/callback"
+        "http://127.0.0.1:8007/api/email/google/callback"
     )
 
 
@@ -74,9 +74,9 @@ def oauth_token_encryption_key() -> str:
 def frontend_after_connect_base() -> str:
     """Where to send the browser after OAuth completes."""
     _reload_dotenv()
-    return _blank(os.getenv("NORTHSTAR_FRONTEND_ORIGIN")) or "http://127.0.0.1:5173"
+    return _blank(os.getenv("NORTHSTAR_FRONTEND_ORIGIN")) or "http://localhost:5174"
 
 
 def api_public_base() -> str:
     _reload_dotenv()
-    return _blank(os.getenv("NORTHSTAR_API_PUBLIC_BASE")) or "http://127.0.0.1:8006"
+    return _blank(os.getenv("NORTHSTAR_API_PUBLIC_BASE")) or "http://127.0.0.1:8007"

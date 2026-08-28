@@ -2572,6 +2572,183 @@ a.activity-item-link:hover p:first-of-type {
   line-height: 1.45;
 }
 
+.add-contact-modal {
+  width: min(42rem, 100%);
+  max-height: min(92vh, 52rem);
+  overflow: auto;
+}
+
+.add-company-modal {
+  width: min(42rem, 100%);
+  max-height: min(90vh, 48rem);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
+
+.add-company-modal__form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  max-height: min(90vh, 48rem);
+}
+
+.add-company-modal__header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  flex-shrink: 0;
+  padding: 0.85rem 0.95rem 0.55rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--card);
+}
+
+.add-company-modal__header h2 {
+  margin: 0 0 0.35rem;
+}
+
+.add-company-modal__header p {
+  margin: 0 0 0.45rem;
+}
+
+.add-company-modal__header .queue-source {
+  margin-bottom: 0.15rem;
+}
+
+.add-company-modal__body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0.75rem 0.95rem 1rem;
+}
+
+.add-company-modal__footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.7rem 0.95rem 0.85rem;
+  border-top: 1px solid var(--line);
+  background: var(--card);
+}
+
+.add-company-dup-check {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem 0.9rem;
+  margin: 0.75rem 0 0.85rem;
+}
+
+.add-company-dup-status {
+  margin: 0;
+  font-size: 0.86rem;
+  font-weight: 650;
+  color: var(--muted, #4a5568);
+}
+
+.add-company-dup-status--checking {
+  color: var(--ink);
+}
+
+.add-company-dup-status--matches,
+.add-company-dup-status--stale {
+  color: var(--down, #b42318);
+}
+
+.add-company-dup-status--none {
+  color: var(--up);
+}
+
+.add-company-modal .edit-textarea {
+  min-height: 4.5rem;
+}
+
+.add-company-modal .primary-btn:focus,
+.add-company-modal .primary-btn:focus-visible,
+.add-company-modal .secondary-btn:focus,
+.add-company-modal .secondary-btn:focus-visible {
+  outline: 2px solid var(--accent) !important;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 3px var(--accent-soft) !important;
+}
+
+.add-company-modal .edit-input:focus-visible,
+.add-company-modal .edit-textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.add-contact-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem 0.9rem;
+}
+
+.add-contact-company-hits,
+.add-contact-matches ul {
+  list-style: none;
+  margin: 0.45rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.add-contact-matches {
+  margin: 1rem 0;
+}
+
+.add-contact-matches h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+}
+
+.add-contact-matches li {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 0.55rem 0;
+  border-top: 1px solid var(--line);
+}
+
+.add-company-match-meta {
+  display: grid;
+  gap: 0.15rem;
+  font-size: 0.85rem;
+  color: var(--muted, #4a5568);
+}
+
+.add-company-match-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+.add-company-already-linked {
+  margin-top: 0.2rem;
+  font-weight: 700;
+  color: var(--navy);
+}
+
+@media (max-width: 640px) {
+  .add-contact-form {
+    grid-template-columns: 1fr;
+  }
+
+  .add-contact-matches li {
+    flex-direction: column;
+  }
+}
+
 .search-hit .client-badge-pill {
   vertical-align: middle;
 }
@@ -3578,3 +3755,18 @@ a.primary-btn:hover {
   gap: 0.75rem 1rem;
   margin-bottom: 0.75rem;
 }
+
+.administration-page .administration-section {
+  margin-top: 0.5rem;
+}
+
+.administration-page .administration-section h2 {
+  margin: 0 0 0.35rem;
+  font-size: 1.05rem;
+}
+
+.administration-page .queue-table .primary-btn,
+.administration-page .queue-table .link-btn {
+  margin: 0;
+}
+

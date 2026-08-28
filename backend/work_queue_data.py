@@ -15,6 +15,7 @@ from access import (
     get_default_user,
     get_user_by_id,
     list_clients_for_user,
+    require_write_client_id,
     resolve_dashboard_client_ids,
     user_can_access_client,
 )
@@ -149,10 +150,13 @@ def _classify_action(action: str) -> QueueKind | None:
 
 
 def _resolve_client_id(conn, client: str | None = None, client_id: int | None = None) -> int | None:
+    """Read helper. Writes must call require_write_client_id instead."""
     if client_id is not None:
         row = conn.execute("SELECT id FROM clients WHERE id = ?", (client_id,)).fetchone()
         return int(row["id"]) if row else None
-    name = (client or "Carmeco").strip()
+    if not client:
+        return None
+    name = client.strip()
     code = name.lower()
     if code in {"carmeco", "carmeco metal"}:
         code = "carmeco"
@@ -1530,11 +1534,12 @@ def _complete_linked_follow_up_source(conn, *, client_id: int, source: str, sour
 
 def complete_work_queue_item(body: WorkQueueCompleteRequest) -> dict:
     """Mark a queue source complete without deleting company history."""
+    from access import require_write_client_id
+
     user = get_default_user()
     if user is None:
         raise PermissionError("User not found.")
-    if not user_can_access_client(user.id, body.client_id) and not user.is_administrator:
-        raise PermissionError("Not authorized for this client.")
+    require_write_client_id(body.client_id, user_id=user.id)
 
     with get_connection() as conn:
         kind = _blank(body.source).lower()
@@ -1632,14 +1637,12 @@ def complete_follow_up_task(body: FollowUpTaskCompleteRequest) -> FollowUpTaskAc
 
     if not isinstance(body, FollowUpTaskCompleteRequest):
         body = FollowUpTaskCompleteRequest.model_validate(body)
-    client_id = int(body.client_id)
-    if client_id <= 0:
-        raise ValueError("client_id is required.")
+    from access import require_write_client_id
+
     user = get_default_user()
     if user is None:
         raise PermissionError("User not found.")
-    if not user_can_access_client(user.id, client_id) and not user.is_administrator:
-        raise PermissionError("Not authorized for this client.")
+    client_id = require_write_client_id(body.client_id, user_id=user.id)
     created_by = _blank(body.created_by) or _blank(user.full_name) or "Julie Magnani"
     notes = _blank(body.notes)
     activity_id: int | None = None
@@ -1746,9 +1749,12 @@ def reschedule_follow_up_task(body: FollowUpTaskRescheduleRequest) -> FollowUpTa
 
     if not isinstance(body, FollowUpTaskRescheduleRequest):
         body = FollowUpTaskRescheduleRequest.model_validate(body)
-    client_id = int(body.client_id)
-    if client_id <= 0:
-        raise ValueError("client_id is required.")
+    from access import require_write_client_id
+
+    user = get_default_user()
+    if user is None:
+        raise PermissionError("User not found.")
+    client_id = require_write_client_id(body.client_id, user_id=user.id)
     follow_date = _blank(body.follow_up_date)[:10]
     follow_time = _blank(body.follow_up_time)[:5]
     if not follow_date or not follow_time:
@@ -1756,11 +1762,6 @@ def reschedule_follow_up_task(body: FollowUpTaskRescheduleRequest) -> FollowUpTa
     follow_at = _follow_up_at_stamp(follow_date, follow_time)
     if not follow_at:
         raise ValueError("Follow-up date and time are required to reschedule.")
-    user = get_default_user()
-    if user is None:
-        raise PermissionError("User not found.")
-    if not user_can_access_client(user.id, client_id) and not user.is_administrator:
-        raise PermissionError("Not authorized for this client.")
     created_by = _blank(body.created_by) or _blank(user.full_name) or "Julie Magnani"
     notes = _blank(body.notes)
     follow_up_activity_id: int | None = None
@@ -2037,8 +2038,9 @@ def log_work_queue_call(body: WorkQueueLogCallRequest) -> WorkQueueLogCallResult
     user = get_default_user()
     if user is None:
         raise PermissionError("User not found.")
-    if not user_can_access_client(user.id, body.client_id) and not user.is_administrator:
-        raise PermissionError("Not authorized for this client.")
+    from access import require_write_client_id
+
+    require_write_client_id(body.client_id, user_id=user.id)
 
     record_no = body.external_record_no.strip()
     if not record_no:
@@ -2074,7 +2076,7 @@ def log_work_queue_call(body: WorkQueueLogCallRequest) -> WorkQueueLogCallResult
             raise LookupError("No client-company relationship for this company.")
         company_id = int(company["id"])
         relationship_id = int(rel["id"])
-        client_name = _blank(client["name"]) or _blank(client["code"]) or "Carmeco"
+        client_name = _blank(client["name"]) or _blank(client["code"]) or "Client"
         if appointment_payload and appointment_payload.get("idempotency_key"):
             existing = conn.execute(
                 """
@@ -2107,6 +2109,7 @@ def log_work_queue_call(body: WorkQueueLogCallRequest) -> WorkQueueLogCallResult
     activity = create_activity(
         ActivityCreateRequest(
             client=client_name,
+            client_id=int(body.client_id),
             external_record_no=record_no,
             user_id=user.id,
             contact_id=body.contact_id,
@@ -2129,6 +2132,7 @@ def log_work_queue_call(body: WorkQueueLogCallRequest) -> WorkQueueLogCallResult
         follow = create_activity(
             ActivityCreateRequest(
                 client=client_name,
+                client_id=int(body.client_id),
                 external_record_no=record_no,
                 user_id=user.id,
                 contact_id=body.contact_id,

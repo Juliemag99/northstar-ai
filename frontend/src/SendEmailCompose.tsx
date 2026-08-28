@@ -11,16 +11,11 @@ import {
   type EmailComposeContactOption,
   type EmailComposeSendPayload,
 } from './api/carmeco'
+import { sendEmailConnectionCaption } from './emailConnectionStatus'
 
 function display(value: string | null | undefined): string {
   const t = (value || '').trim()
   return t || '—'
-}
-
-function connectionLabel(status: string, connected: boolean): string {
-  if (connected) return 'Connected'
-  const s = (status || 'not_connected').replace(/_/g, ' ')
-  return `Not Connected — Preview Only (${s})`
 }
 
 function pickPreferredTemplate(
@@ -400,7 +395,7 @@ export default function SendEmailCompose({
             </select>
             {selectedAccount ? (
               <span className="queue-sub" style={{ display: 'block', marginTop: '0.25rem' }}>
-                {connectionLabel(selectedAccount.connection_status, connected)}
+                {sendEmailConnectionCaption(selectedAccount.connection_status, connected)}
               </span>
             ) : null}
           </label>
@@ -573,7 +568,7 @@ export default function SendEmailCompose({
               </div>
               <div>
                 <strong>Connection:</strong>{' '}
-                {connectionLabel(preview.connection_status, preview.connection_connected)}
+                {sendEmailConnectionCaption(preview.connection_status, preview.connection_connected)}
               </div>
               <div>
                 <strong>To:</strong>{' '}

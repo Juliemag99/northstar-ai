@@ -211,7 +211,7 @@ def main() -> int:
                 "company_ids": carmeco_ids[:2],
             },
         )
-        if mixed[0] != 400:
+        if mixed[0] not in {400, 422}:
             _fail(f"All My Clients bulk assign should be 400, got {mixed[0]}: {mixed[1]}")
 
         wrong_client = testdb.http_json(

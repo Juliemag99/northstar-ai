@@ -34,13 +34,9 @@ def _blank(value: Any) -> str:
 
 
 def _require_access(user_id: int, client_id: int) -> None:
-    user = get_user_by_id(user_id)
-    if user is None:
-        raise PermissionError("User not found.")
-    if user.is_administrator:
-        return
-    if not user_can_access_client(user_id, client_id):
-        raise PermissionError("Not authorized for this client.")
+    from access import require_write_client_id
+
+    require_write_client_id(client_id, user_id=user_id)
 
 
 def ensure_email_sent_schema(conn=None) -> None:

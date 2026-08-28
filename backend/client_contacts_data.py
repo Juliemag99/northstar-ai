@@ -112,10 +112,9 @@ def ensure_client_contacts_schema(conn=None) -> None:
 
 
 def _require_access(user_id: int, client_id: int) -> None:
-    from access import user_can_access_client
+    from access import require_write_client_id
 
-    if not user_can_access_client(user_id, client_id):
-        raise PermissionError("Not authorized for this client.")
+    require_write_client_id(client_id, user_id=user_id)
 
 
 def _require_edit(user_id: int, client_id: int) -> None:

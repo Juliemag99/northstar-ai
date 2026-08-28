@@ -533,13 +533,12 @@ def ensure_appointment_set_milestone(conn, *, activity_id: int, created_by: str)
 
 
 def _require_client_access(client_id: int):
-    from access import get_default_user, user_can_access_client
+    from access import get_default_user, require_write_client_id
 
     user = get_default_user()
     if user is None:
         raise PermissionError("User not found.")
-    if not user_can_access_client(user.id, client_id) and not user.is_administrator:
-        raise PermissionError("Not authorized for this client.")
+    require_write_client_id(client_id, user_id=user.id)
     return user
 
 

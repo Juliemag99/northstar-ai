@@ -71,6 +71,18 @@ _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("opportunity_score", "INTEGER NOT NULL DEFAULT 0"),
         ("source_summary", "TEXT NOT NULL DEFAULT ''"),
     ],
+    "companies": [
+        ("zoominfo_company_id", "TEXT NOT NULL DEFAULT ''"),
+        ("source", "TEXT NOT NULL DEFAULT ''"),
+        ("source_updated_at", "TEXT NOT NULL DEFAULT ''"),
+    ],
+    "contacts": [
+        ("linkedin_url", "TEXT NOT NULL DEFAULT ''"),
+        ("location", "TEXT NOT NULL DEFAULT ''"),
+        ("zoominfo_contact_id", "TEXT NOT NULL DEFAULT ''"),
+        ("source", "TEXT NOT NULL DEFAULT ''"),
+        ("source_updated_at", "TEXT NOT NULL DEFAULT ''"),
+    ],
 }
 
 
@@ -94,6 +106,9 @@ def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 8000")
+    from contact_phone import register_contact_phone_functions
+
+    register_contact_phone_functions(conn)
     return conn
 
 
@@ -254,7 +269,85 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
                 ON revenue_milestones(milestone_type)
             """
         )
+    _ensure_zoominfo_indexes(conn)
+    if _table_exists(conn, "contacts"):
+        # Bounded Add Contact name lookup. Does not change contact rows.
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_contacts_last_first_nocase
+                ON contacts(last_name COLLATE NOCASE, first_name COLLATE NOCASE)
+            """
+        )
+        from contact_phone import ensure_contact_phone_key_schema
+
+        # Derived phone keys only. Does not rewrite contacts.phone / alt_phone.
+        ensure_contact_phone_key_schema(conn)
     conn.commit()
+
+
+def _ensure_zoominfo_indexes(conn: sqlite3.Connection) -> None:
+    if (
+        _table_exists(conn, "companies")
+        and "zoominfo_company_id" in _table_columns(conn, "companies")
+    ):
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_companies_zoominfo_id
+                ON companies(zoominfo_company_id)
+                WHERE TRIM(zoominfo_company_id) != ''
+            """
+        )
+    if (
+        _table_exists(conn, "contacts")
+        and "zoominfo_contact_id" in _table_columns(conn, "contacts")
+    ):
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_zoominfo_id
+                ON contacts(zoominfo_contact_id)
+                WHERE TRIM(zoominfo_contact_id) != ''
+            """
+        )
+
+
+def ensure_zoominfo_columns(conn: sqlite3.Connection | None = None) -> None:
+    """Add ZoomInfo/source columns without the full schema backfill.
+
+    Isolated tests copy production before uvicorn startup, so TestClient would
+    otherwise INSERT into a companies table that still lacks `source`.
+    """
+    own = conn is None
+    if own:
+        conn = get_connection()
+    assert conn is not None
+    try:
+        specs = {
+            "companies": [
+                ("zoominfo_company_id", "TEXT NOT NULL DEFAULT ''"),
+                ("source", "TEXT NOT NULL DEFAULT ''"),
+                ("source_updated_at", "TEXT NOT NULL DEFAULT ''"),
+            ],
+            "contacts": [
+                ("linkedin_url", "TEXT NOT NULL DEFAULT ''"),
+                ("location", "TEXT NOT NULL DEFAULT ''"),
+                ("zoominfo_contact_id", "TEXT NOT NULL DEFAULT ''"),
+                ("source", "TEXT NOT NULL DEFAULT ''"),
+                ("source_updated_at", "TEXT NOT NULL DEFAULT ''"),
+            ],
+        }
+        for table, columns in specs.items():
+            if not _table_exists(conn, table):
+                continue
+            existing = _table_columns(conn, table)
+            for name, declaration in columns:
+                if name in existing:
+                    continue
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+        _ensure_zoominfo_indexes(conn)
+        conn.commit()
+    finally:
+        if own:
+            conn.close()
 
 
 def seed_default_users(conn: sqlite3.Connection) -> None:

@@ -1,5 +1,5 @@
 /** Contact Workspace page — master person + client-scoped operational workflow. */
-import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   assignSharedContact,
@@ -40,6 +40,8 @@ import {
   ASK_NORTHSTAR_PATH,
   isFromAskNorthStar,
 } from './askNorthStarReturn'
+import { SELECT_CLIENT_FOR_WRITE, requireWriteClientId } from './writeClient'
+import ZoomInfoUpdateModal from './ZoomInfoUpdateModal'
 
 const WORKSPACE_USER = 'Julie Magnani'
 
@@ -89,6 +91,7 @@ export default function ContactWorkspacePage({
   }) => void
 }) {
   const navigate = useNavigate()
+  const location = useLocation()
   const [searchParams] = useSearchParams()
   const fromAskNorthStar = isFromAskNorthStar(searchParams.get('from'))
   const clientIdParam = searchParams.get('client_id')
@@ -102,6 +105,12 @@ export default function ContactWorkspacePage({
   const [data, setData] = useState<ContactWorkspaceData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [saveNotice] = useState<string | null>(() => {
+    const state = location.state as { manualContactNotice?: string } | null
+    return state?.manualContactNotice?.trim() || null
+  })
+  const [zoomInfoOpen, setZoomInfoOpen] = useState(false)
+  const [zoomInfoMsg, setZoomInfoMsg] = useState<string | null>(null)
   const [sendEmailOpen, setSendEmailOpen] = useState(false)
   const [campaignRouteOffer, setCampaignRouteOffer] = useState<CampaignRouteOffer | null>(null)
   const [statuses, setStatuses] = useState<string[]>([])
@@ -246,14 +255,20 @@ export default function ContactWorkspacePage({
   }
 
   async function saveWorkflow() {
-    const workingId = data?.client_id || clientId || 0
-    if (!workingId || savingWorkflow) return
+    let writeId: number
+    try {
+      writeId = requireWriteClientId(clientId)
+    } catch {
+      setWorkflowError(SELECT_CLIENT_FOR_WRITE)
+      return
+    }
+    if (savingWorkflow) return
     setSavingWorkflow(true)
     setWorkflowMsg(null)
     setWorkflowError(null)
     try {
       const result = await updateContactWorkflow(contactId, {
-        client_id: workingId,
+        client_id: writeId,
         status,
         assigned_user_id: assignedUserId ? Number(assignedUserId) : 0,
         next_action: storedNextAction(nextSel, nextActionCatalog),
@@ -265,9 +280,9 @@ export default function ContactWorkspacePage({
       notifyClientViews(result.workspace)
       setWorkflowMsg(result.message || 'Workflow saved.')
       setEditingWorkflow(false)
-      if (isCampaignRouteStatus(status) && data?.company_id && workingId > 0) {
+      if (isCampaignRouteStatus(status) && data?.company_id && writeId > 0) {
         setCampaignRouteOffer({
-          clientId: workingId,
+          clientId: writeId,
           companyId: data.company_id ?? 0,
           contactId: contactId,
           source: 'status',
@@ -281,8 +296,14 @@ export default function ContactWorkspacePage({
   }
 
   async function saveAction() {
-    const workingId = data?.client_id || clientId || 0
-    if (!workingId || !actionKind || actionSaving) return
+    let writeId: number
+    try {
+      writeId = requireWriteClientId(clientId)
+    } catch {
+      setActionError(SELECT_CLIENT_FOR_WRITE)
+      return
+    }
+    if (!actionKind || actionSaving) return
     setActionSaving(true)
     setActionMsg(null)
     setActionError(null)
@@ -291,13 +312,13 @@ export default function ContactWorkspacePage({
       let result
       if (actionKind === 'complete-task') {
         result = await completeContactFollowUp(contactId, {
-          client_id: workingId,
+          client_id: writeId,
           notes: completeNote,
           created_by: WORKSPACE_USER,
         })
       } else if (actionKind === 'reschedule') {
         result = await rescheduleContactFollowUp(contactId, {
-          client_id: workingId,
+          client_id: writeId,
           follow_up_date: rescheduleDate,
           follow_up_time: rescheduleTime,
           created_by: WORKSPACE_USER,
@@ -311,7 +332,7 @@ export default function ContactWorkspacePage({
         const body =
           isCall
             ? {
-                client_id: workingId,
+                client_id: writeId,
                 activity_type: 'Call',
                 status: callStatus,
                 outcome: callStatus,
@@ -339,13 +360,13 @@ export default function ContactWorkspacePage({
               }
             : actionKind === 'note'
               ? {
-                  client_id: workingId,
+                  client_id: writeId,
                   activity_type: 'Note',
                   notes: noteText,
                   created_by: WORKSPACE_USER,
                 }
               : {
-                  client_id: workingId,
+                  client_id: writeId,
                   activity_type: 'Follow-Up',
                   notes: followNotes,
                   next_action: storedNextAction(followNextSel, nextActionCatalog) || 'Follow-Up',
@@ -380,12 +401,12 @@ export default function ContactWorkspacePage({
       setRescheduleTime('')
       if (
         data?.company_id &&
-        workingId > 0 &&
+        writeId > 0 &&
         (routedKind === 'call' || routedKind === 'call-complete') &&
         (isAppointmentSetStatus(routedStatus) || isCampaignRouteStatus(routedStatus))
       ) {
         setCampaignRouteOffer({
-          clientId: workingId,
+          clientId: writeId,
           companyId: data.company_id ?? 0,
           contactId: contactId,
           source: isAppointmentSetStatus(routedStatus) ? 'appointment' : 'status',
@@ -472,13 +493,19 @@ export default function ContactWorkspacePage({
   }
 
   async function addToActiveClient(addCompany: boolean) {
-    const workingId = clientId || data?.client_id || 0
-    if (!workingId || assignSaving) return
+    let writeId: number
+    try {
+      writeId = requireWriteClientId(clientId)
+    } catch {
+      setAssignError(SELECT_CLIENT_FOR_WRITE)
+      return
+    }
+    if (assignSaving) return
     setAssignSaving(true)
     setAssignError(null)
     try {
       const result = await assignSharedContact(contactId, {
-        client_id: workingId,
+        client_id: writeId,
         add_company: addCompany,
         user: WORKSPACE_USER,
       })
@@ -623,7 +650,7 @@ export default function ContactWorkspacePage({
         data.client_id ? `?client_id=${data.client_id}` : ''
       }`
     : null
-  const workingClientId = data.client_id || clientId || 0
+  const workingClientId = clientId != null && clientId > 0 ? clientId : 0
   const hasContactEmail = Boolean((data.email || '').trim())
   const timeline = data.timeline || []
   const reps = data.reps || []
@@ -669,12 +696,30 @@ export default function ContactWorkspacePage({
           <p className="workspace-working-for">
             <strong>Working For:</strong> {display(data.client_name)}
           </p>
+          {workingClientId <= 0 ? (
+            <p className="data-status" role="status">
+              {SELECT_CLIENT_FOR_WRITE}
+            </p>
+          ) : null}
+          {saveNotice ? (
+            <p className="save-confirm" role="status">
+              {saveNotice}
+            </p>
+          ) : null}
+          {zoomInfoMsg ? (
+            <p className="save-confirm" role="status">
+              {zoomInfoMsg}
+            </p>
+          ) : null}
         </div>
         <div className="heading-controls">
           {workingClientId > 0 ? (
             <>
               <button type="button" className="primary-btn" onClick={() => setSendEmailOpen(true)}>
                 Send Email
+              </button>
+              <button type="button" className="ghost-btn" onClick={() => setZoomInfoOpen(true)}>
+                Update from ZoomInfo
               </button>
               {data.company_id ? (
                 <button
@@ -701,6 +746,14 @@ export default function ContactWorkspacePage({
           )}
         </div>
       </div>
+
+      <ZoomInfoUpdateModal
+        open={zoomInfoOpen}
+        onClose={() => setZoomInfoOpen(false)}
+        contactId={contactId}
+        clientId={workingClientId > 0 ? workingClientId : null}
+        onApplied={(message) => setZoomInfoMsg(message)}
+      />
 
       {sendEmailOpen && workingClientId > 0 ? (
         <SendEmailCompose

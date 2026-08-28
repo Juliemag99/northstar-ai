@@ -233,7 +233,10 @@ export default function Appointments({
   }
 
   async function saveAction() {
-    if (!scoped || activeClientId == null || !actionFor || !actionKind || savingId) return
+    if (!scoped || activeClientId == null || !actionFor || !actionKind || savingId) {
+      if (!scoped) setError('Choose a specific client before saving. All My Clients cannot be used for writes.')
+      return
+    }
     if (actionKind === 'reschedule' && !appointmentDetailsAreValid(reschedule)) {
       setError('Appointment date and time are required, or choose Date/Time TBD.')
       return
@@ -316,6 +319,11 @@ export default function Appointments({
         <div>
           <h1>Appointments</h1>
           <p>{activeClientName} live appointments with dates, contacts, and outcomes.</p>
+          {!scoped ? (
+            <p className="data-status" role="status">
+              Choose a specific client before saving. All My Clients cannot be used for writes.
+            </p>
+          ) : null}
         </div>
       </div>
 

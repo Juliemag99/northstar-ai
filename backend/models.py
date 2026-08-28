@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Annotated
+
 from pydantic import BaseModel, Field
+
+# Writes must send an explicit client. 0 (All My Clients) is never valid.
+PositiveClientId = Annotated[int, Field(gt=0)]
 
 
 class ActiveClient(BaseModel):
@@ -191,21 +196,21 @@ CarmecoStatusList = ClientStatusList
 
 class StatusUpdateRequest(BaseModel):
     client: str = ""
-    client_id: int | None = None
+    client_id: PositiveClientId
     status: str
     user: str = "Julie Magnani"
 
 
 class NotesUpdateRequest(BaseModel):
-    client: str = "Carmeco"
-    client_id: int | None = None
+    client: str = ""
+    client_id: PositiveClientId
     note_text: str = ""
     user: str = "Julie Magnani"
 
 
 class FieldUpdateResponse(BaseModel):
     external_record_no: str
-    client: str = "Carmeco"
+    client: str = ""
     client_id: int = 0
     field_name: str
     old_value: str = ""
@@ -237,8 +242,8 @@ class Activity(BaseModel):
 
 
 class ActivityCreateRequest(BaseModel):
-    client: str = "Carmeco"
-    client_id: int | None = None
+    client: str = ""
+    client_id: PositiveClientId
     external_record_no: str
     user_id: int | None = None
     contact_id: int | None = None
@@ -252,7 +257,7 @@ class ActivityCreateRequest(BaseModel):
 
 
 class ActivityListResponse(BaseModel):
-    client: str = "Carmeco"
+    client: str = ""
     count: int = 0
     activities: list[Activity] = Field(default_factory=list)
 
@@ -331,7 +336,7 @@ class WorkQueueItem(BaseModel):
 
 
 class WorkQueueSummary(BaseModel):
-    client: str = "Carmeco"
+    client: str = ""
     calls_due_today: int = 0
     follow_ups_due: int = 0
     new_assignments: int = 0
@@ -435,7 +440,7 @@ class WorkQueueListResponse(BaseModel):
 
 
 class WorkQueueCompleteRequest(BaseModel):
-    client_id: int
+    client_id: PositiveClientId
     source: str
     source_id: int | None = None
     company_id: int | None = None
@@ -444,7 +449,7 @@ class WorkQueueCompleteRequest(BaseModel):
 class FollowUpTaskCompleteRequest(BaseModel):
     """Complete one open follow-up task (contact or company-level)."""
 
-    client_id: int
+    client_id: PositiveClientId
     source: str
     source_id: int
     company_id: int
@@ -456,7 +461,7 @@ class FollowUpTaskCompleteRequest(BaseModel):
 class FollowUpTaskRescheduleRequest(BaseModel):
     """Update the same open follow-up task — never create a duplicate."""
 
-    client_id: int
+    client_id: PositiveClientId
     source: str
     source_id: int
     company_id: int
@@ -482,7 +487,7 @@ class FollowUpTaskActionResult(BaseModel):
 class WorkQueueLogCallRequest(BaseModel):
     """Log a call from Work Queue Company Workspace (client-scoped)."""
 
-    client_id: int
+    client_id: PositiveClientId
     external_record_no: str
     contact_id: int | None = None
     outcome: str = ""
@@ -512,7 +517,7 @@ class WorkQueueLogCallResult(BaseModel):
 class OutreachLogRequest(BaseModel):
     """Log outreach from Company Workspace (client-scoped)."""
 
-    client_id: int
+    client_id: PositiveClientId
     external_record_no: str
     contact_id: int | None = None
     outreach_type: str = "Call"  # Call | Email | Other
@@ -681,7 +686,8 @@ class RevenueMilestone(BaseModel):
 
 
 class MilestoneCreateRequest(BaseModel):
-    client: str = "Carmeco"
+    client: str = ""
+    client_id: PositiveClientId
     external_record_no: str
     milestone_type: str
     milestone_date: str = ""
@@ -695,7 +701,8 @@ class MilestoneCreateRequest(BaseModel):
 
 
 class SetHotRequest(BaseModel):
-    client: str = "Carmeco"
+    client: str = ""
+    client_id: PositiveClientId
     external_record_no: str
     is_hot: bool = True
     notes: str = ""
@@ -835,7 +842,7 @@ class CrossClientOpportunityList(BaseModel):
 
 
 class OpportunityDismissRequest(BaseModel):
-    target_client_id: int
+    target_client_id: PositiveClientId
     company_id: int
     reason: str
     notes: str = ""
@@ -843,7 +850,7 @@ class OpportunityDismissRequest(BaseModel):
 
 
 class OpportunityAddRequest(BaseModel):
-    target_client_id: int
+    target_client_id: PositiveClientId
     company_id: int
     status: str = "New"
     created_by: str = "Julie Magnani"
@@ -854,7 +861,7 @@ class OpportunityAddRequest(BaseModel):
 
 
 class OpportunityReviewRequest(BaseModel):
-    target_client_id: int
+    target_client_id: PositiveClientId
     company_id: int
     notes: str = ""
     reviewed_by: str = "Julie Magnani"
@@ -2114,10 +2121,15 @@ class ContactWorkspace(BaseModel):
     timeline: list[ContactTimelineItem] = Field(default_factory=list)
     company_timeline: list[ContactTimelineItem] = Field(default_factory=list)
     reps: list[ContactRepOption] = Field(default_factory=list)
+    linkedin_url: str = ""
+    location: str = ""
+    zoominfo_contact_id: str = ""
+    source: str = ""
+    source_updated_at: str = ""
 
 
 class ContactWorkflowUpdate(BaseModel):
-    client_id: int
+    client_id: PositiveClientId
     status: str | None = None
     assigned_user_id: int | None = None
     next_action: str | None = None
@@ -2143,7 +2155,7 @@ WorkQueueLogCallRequest.model_rebuild()
 
 
 class ContactActivityCreate(BaseModel):
-    client_id: int
+    client_id: PositiveClientId
     activity_type: str
     notes: str = ""
     outcome: str = ""
@@ -2158,7 +2170,7 @@ class ContactActivityCreate(BaseModel):
 
 
 class ContactAssignRequest(BaseModel):
-    client_id: int
+    client_id: PositiveClientId
     add_company: bool = False
     user: str = "Julie Magnani"
 
@@ -2174,14 +2186,14 @@ class ContactOpenFollowUp(BaseModel):
 
 
 class ContactFollowUpCompleteRequest(BaseModel):
-    client_id: int
+    client_id: PositiveClientId
     notes: str = ""
     status: str | None = None
     created_by: str = "Julie Magnani"
 
 
 class ContactFollowUpRescheduleRequest(BaseModel):
-    client_id: int
+    client_id: PositiveClientId
     follow_up_date: str
     follow_up_time: str
     notes: str = ""
@@ -2270,7 +2282,7 @@ class AppointmentActionResult(BaseModel):
 
 
 class AppointmentRescheduleRequest(BaseModel):
-    client_id: int
+    client_id: PositiveClientId
     appointment_date: str = ""
     start_time: str = ""
     timezone: str = "America/Chicago"
@@ -2283,7 +2295,7 @@ class AppointmentRescheduleRequest(BaseModel):
 
 
 class AppointmentCancelRequest(BaseModel):
-    client_id: int
+    client_id: PositiveClientId
     reason: str = ""
     notes: str = ""
     new_status: str = ""
@@ -2294,7 +2306,7 @@ class AppointmentCancelRequest(BaseModel):
 
 
 class AppointmentCompleteRequest(BaseModel):
-    client_id: int
+    client_id: PositiveClientId
     grade: str = ""
     outcome: str = ""
     follow_up_notes: str = ""
@@ -2360,7 +2372,7 @@ class CrmAddRelationshipPreview(BaseModel):
 
 
 class CrmAddPreviewRequest(BaseModel):
-    client_id: int
+    client_id: PositiveClientId
     company: CrmAddCompanyInput
     contacts: list[CrmAddContactInput] = Field(default_factory=list)
     research_run_id: int | None = None
@@ -2400,7 +2412,7 @@ class CrmAddContactConfirmItem(BaseModel):
 
 
 class CrmAddConfirmRequest(BaseModel):
-    client_id: int
+    client_id: PositiveClientId
     company: CrmAddCompanyInput
     contacts: list[CrmAddContactConfirmItem] = Field(default_factory=list)
     company_decision: str = "auto"  # auto | create_new | use_existing
@@ -2495,7 +2507,7 @@ class CampaignWorkspace(BaseModel):
 
 
 class CampaignCreateRequest(BaseModel):
-    client_id: int
+    client_id: PositiveClientId
     campaign_name: str
     description: str = ""
     category: str = ""
@@ -2559,7 +2571,7 @@ class CampaignRouteSuggestion(BaseModel):
 
 
 class CampaignRouteConfirmRequest(BaseModel):
-    client_id: int
+    client_id: PositiveClientId
     company_id: int
     contact_id: int | None = None
     campaign_id: int
@@ -2567,7 +2579,7 @@ class CampaignRouteConfirmRequest(BaseModel):
 
 
 class CampaignRouteDeferRequest(BaseModel):
-    client_id: int
+    client_id: PositiveClientId
     company_id: int
     contact_id: int | None = None
     source: str = ""
@@ -2603,7 +2615,7 @@ class UnassignedOpportunityList(BaseModel):
 
 
 class UnassignedBulkAssignRequest(BaseModel):
-    client_id: int
+    client_id: PositiveClientId
     campaign_id: int
     company_ids: list[int] = Field(default_factory=list)
     select_all_matching: bool = False
@@ -2757,3 +2769,275 @@ class ReportRecordsResponse(BaseModel):
     limit: int = 50
     offset: int = 0
     items: list[ReportRecordRow] = Field(default_factory=list)
+
+
+class CompanyLookupItem(BaseModel):
+    id: int
+    company_name: str
+    external_record_no: str = ""
+
+
+class CompanyLookupResponse(BaseModel):
+    companies: list[CompanyLookupItem] = Field(default_factory=list)
+
+
+class ManualContactPreviewRequest(BaseModel):
+    client_id: PositiveClientId
+    company_id: int = Field(gt=0)
+    first_name: str
+    last_name: str
+    title: str = ""
+    email: str = ""
+    phone: str = ""
+    alt_phone: str = ""
+
+
+class ManualContactMatch(BaseModel):
+    contact_id: int
+    first_name: str = ""
+    last_name: str = ""
+    title: str = ""
+    email: str = ""
+    phone: str = ""
+    alt_phone: str = ""
+    company_id: int
+    company_name: str = ""
+    reasons: list[str] = Field(default_factory=list)
+    confidence: str = "high"
+    already_assigned: bool = False
+    same_company: bool = True
+
+
+class ManualContactPreviewResponse(BaseModel):
+    matches: list[ManualContactMatch] = Field(default_factory=list)
+    can_create: bool = True
+    requires_contact_info_confirmation: bool = False
+    message: str = ""
+
+
+class ManualContactSaveRequest(BaseModel):
+    client_id: PositiveClientId
+    company_id: int = Field(gt=0)
+    action: str
+    existing_contact_id: int | None = None
+    first_name: str = ""
+    last_name: str = ""
+    title: str = ""
+    email: str = ""
+    phone: str = ""
+    alt_phone: str = ""
+    confirm_without_contact_info: bool = False
+    created_by: str = "Julie Magnani"
+    source: str = "manual"
+    zoominfo_contact_id: str = ""
+    linkedin_url: str = ""
+    location: str = ""
+
+
+class ManualContactSaveResult(BaseModel):
+    ok: bool = True
+    action: str = ""
+    message: str = ""
+    contact_id: int
+    company_id: int
+    client_id: int
+    activity_id: int | None = None
+    already_assigned: bool = False
+
+
+class ManualCompanyClientRel(BaseModel):
+    client_id: int
+    client_name: str = ""
+    status: str = ""
+
+
+class ManualCompanyMatch(BaseModel):
+    company_id: int
+    company_name: str = ""
+    external_record_no: str = ""
+    website: str = ""
+    address: str = ""
+    city: str = ""
+    state: str = ""
+    zip: str = ""
+    phone: str = ""
+    reasons: list[str] = Field(default_factory=list)
+    confidence: str = "high"
+    already_assigned: bool = False
+    client_relationships: list[ManualCompanyClientRel] = Field(default_factory=list)
+    score: int = 0
+    ai_assessment: str = ""
+    ai_explanation: str = ""
+    ai_confidence: str = ""
+    ai_available: bool = False
+
+
+class ManualCompanyPreviewRequest(BaseModel):
+    client_id: PositiveClientId
+    company_name: str
+    website: str = ""
+    address: str = ""
+    city: str = ""
+    state: str = ""
+    zip: str = ""
+    phone: str = ""
+    industry: str = ""
+    employee_size: str = ""
+    sales_volume: str = ""
+    external_record_no: str = ""
+    notes: str = ""
+
+
+class ManualCompanyPreviewResponse(BaseModel):
+    matches: list[ManualCompanyMatch] = Field(default_factory=list)
+    can_create: bool = True
+    requires_create_confirmation: bool = False
+    message: str = ""
+    ai_available: bool = False
+
+
+class ManualCompanySaveRequest(BaseModel):
+    client_id: PositiveClientId
+    action: str
+    existing_company_id: int | None = None
+    company_name: str = ""
+    website: str = ""
+    address: str = ""
+    city: str = ""
+    state: str = ""
+    zip: str = ""
+    phone: str = ""
+    industry: str = ""
+    employee_size: str = ""
+    sales_volume: str = ""
+    external_record_no: str = ""
+    notes: str = ""
+    confirm_create_despite_match: bool = False
+    created_by: str = "Julie Magnani"
+    source: str = "manual"
+    zoominfo_company_id: str = ""
+
+
+class ManualCompanySaveResult(BaseModel):
+    ok: bool = True
+    action: str = ""
+    message: str = ""
+    company_id: int
+    client_id: int
+    external_record_no: str = ""
+    activity_id: int | None = None
+    already_assigned: bool = False
+
+
+class ZoomInfoSnapshot(BaseModel):
+    first_name: str = ""
+    last_name: str = ""
+    title: str = ""
+    email: str = ""
+    phone: str = ""
+    alt_phone: str = ""
+    mobile_phone: str = ""
+    company_name: str = ""
+    zoominfo_company_id: str = ""
+    zoominfo_contact_id: str = ""
+    linkedin_url: str = ""
+    location: str = ""
+    website: str = ""
+    address: str = ""
+    city: str = ""
+    state: str = ""
+    zip: str = ""
+    industry: str = ""
+    employee_size: str = ""
+    sales_volume: str = ""
+
+
+class ZoomInfoFieldChoice(BaseModel):
+    field: str
+    label: str = ""
+    northstar_value: str = ""
+    zoominfo_value: str = ""
+    keep_northstar: bool = True
+    blank_zoominfo: bool = False
+    different_company: bool = False
+    applyable: bool = True
+
+
+class ZoomInfoContactPreviewRequest(BaseModel):
+    client_id: PositiveClientId
+    zoominfo: ZoomInfoSnapshot | None = None
+
+
+class ZoomInfoContactPreviewResponse(BaseModel):
+    available: bool = True
+    status: str = ""
+    contact_id: int
+    client_id: int
+    company_id: int | None = None
+    company_name: str = ""
+    fields: list[ZoomInfoFieldChoice] = Field(default_factory=list)
+    different_company: bool = False
+    zoominfo_company_name: str = ""
+    matches: list[ManualContactMatch] = Field(default_factory=list)
+    retrieved_at: str = ""
+
+
+class ZoomInfoContactApplyRequest(BaseModel):
+    client_id: PositiveClientId
+    apply_fields: list[str] = Field(default_factory=list)
+    zoominfo: ZoomInfoSnapshot
+    confirm_company_relink: bool = False
+    target_company_id: int | None = None
+    created_by: str = "Julie Magnani"
+
+
+class ZoomInfoContactApplyResult(BaseModel):
+    ok: bool = True
+    message: str = ""
+    contact_id: int
+    client_id: int
+    company_id: int | None = None
+    changed_fields: list[str] = Field(default_factory=list)
+    activity_id: int | None = None
+    company_relinked: bool = False
+
+
+class ZoomInfoAddPreviewRequest(BaseModel):
+    client_id: PositiveClientId
+    company_id: int | None = None
+    zoominfo: ZoomInfoSnapshot
+    kind: str = "contact"
+
+
+class ZoomInfoAddPreviewResponse(BaseModel):
+    kind: str
+    client_id: int
+    company_id: int | None = None
+    matches: list[dict] = Field(default_factory=list)
+    can_create: bool = True
+    requires_create_confirmation: bool = False
+    message: str = ""
+
+
+class ZoomInfoAddSaveRequest(BaseModel):
+    client_id: PositiveClientId
+    company_id: int | None = None
+    action: str
+    existing_company_id: int | None = None
+    existing_contact_id: int | None = None
+    zoominfo: ZoomInfoSnapshot
+    kind: str = "contact"
+    confirm_create_despite_match: bool = False
+    created_by: str = "Julie Magnani"
+
+
+class ZoomInfoAddResult(BaseModel):
+    ok: bool = True
+    action: str = ""
+    message: str = ""
+    kind: str = ""
+    company_id: int | None = None
+    contact_id: int | None = None
+    client_id: int
+    external_record_no: str = ""
+    activity_id: int | None = None

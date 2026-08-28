@@ -33,6 +33,7 @@ import {
 } from './api/carmeco'
 import { pathAfterActiveClientChange } from './activeClientNavigation'
 import { ASK_NORTHSTAR_PATH, isFromAskNorthStar, withAskReturnParam } from './askNorthStarReturn'
+import { SELECT_CLIENT_FOR_WRITE } from './writeClient'
 import type {
   ActiveClient,
   ActivitySummary,
@@ -67,10 +68,13 @@ import {
   type NextActionSelection,
 } from './nextAction'
 import Contacts from './Contacts'
+import AddContactModal from './AddContactModal'
+import AddCompanyModal from './AddCompanyModal'
 import Tasks from './Tasks'
 import Appointments from './Appointments'
 import Activities from './Activities'
 import Reports from './Reports'
+import Administration from './Administration'
 import Campaigns from './Campaigns'
 import CampaignWorkspacePage from './CampaignWorkspace'
 import CampaignRoutePrompt, { type CampaignRouteOffer } from './CampaignRoutePrompt'
@@ -815,6 +819,8 @@ function App() {
   const [workspace, setWorkspace] = useState<CompanyWorkspace | null>(null)
   const [workspaceLoading, setWorkspaceLoading] = useState(false)
   const [workspaceError, setWorkspaceError] = useState<string | null>(null)
+  const [addContactOpen, setAddContactOpen] = useState(false)
+  const [addCompanyOpen, setAddCompanyOpen] = useState(false)
   const [sendEmailOpen, setSendEmailOpen] = useState(false)
   const [campaignRouteOffer, setCampaignRouteOffer] = useState<CampaignRouteOffer | null>(null)
   const [sendEmailPreferredContactId, setSendEmailPreferredContactId] = useState<
@@ -1065,7 +1071,7 @@ function App() {
         const activityClient =
           availableClients.find((c) => c.client_id === workspaceClientId)?.client_name ||
           client?.name ||
-          'Carmeco'
+          ''
         const [data, activities, banner, shared] = await Promise.all([
           fetchCompanyByRecordNo(recordNo, workspaceClientId),
           fetchCompanyActivities(recordNo, activityClient, workspaceClientId),
@@ -1298,8 +1304,7 @@ function App() {
     (selectedClientId != null && selectedClientId > 0 && Number.isFinite(selectedClientId)
       ? selectedClientId
       : null) ??
-    (activeClientId != null && activeClientId > 0 ? activeClientId : null) ??
-    (client?.client_id && client.client_id > 0 ? client.client_id : null)
+    (activeClientId != null && activeClientId > 0 ? activeClientId : null)
   const workspaceClientName =
     availableClients.find((c) => c.client_id === workspaceClientId)?.client_name ||
     clientName
@@ -1423,7 +1428,7 @@ function App() {
     !showResearchCompany &&
     !showContactWorkspace &&
     !showCampaignWorkspace &&
-    activeNav === 'prospects'
+    (activeNav === 'prospects' || activeNav === 'companies')
   const showAppointments =
     !showCompanyWorkspace &&
     !showResearchCompany &&
@@ -1465,6 +1470,11 @@ function App() {
     !showResearchCompany &&
     !showContactWorkspace &&
     activeNav === 'reports'
+  const showAdministration =
+    !showCompanyWorkspace &&
+    !showResearchCompany &&
+    !showContactWorkspace &&
+    activeNav === 'administration'
   const showCrossClientOpportunities =
     !showCompanyWorkspace &&
     !showResearchCompany &&
@@ -1480,6 +1490,7 @@ function App() {
     !showResearchCompany &&
     !showContactWorkspace &&
     activeNav !== 'prospects' &&
+    activeNav !== 'companies' &&
     activeNav !== 'appointments' &&
     activeNav !== 'activities' &&
     activeNav !== 'work-queue' &&
@@ -1490,7 +1501,8 @@ function App() {
     activeNav !== 'tasks' &&
     activeNav !== 'reports' &&
     activeNav !== 'clients' &&
-    activeNav !== 'campaigns'
+    activeNav !== 'campaigns' &&
+    activeNav !== 'administration'
   const showCampaigns =
     !showCompanyWorkspace &&
     !showResearchCompany &&
@@ -1587,6 +1599,10 @@ function App() {
 
   async function saveStatus() {
     if (!selectedRecordNo || !statusDirty || statusSaving) return
+    if (workspaceClientId == null || workspaceClientId <= 0) {
+      setStatusSaveError(SELECT_CLIENT_FOR_WRITE)
+      return
+    }
     setStatusSaving(true)
     setStatusSaveMsg(null)
     setStatusSaveError(null)
@@ -1722,7 +1738,8 @@ function App() {
       })
       const activities = await fetchCompanyActivities(
         selectedRecordNo,
-        workQueueContext.client_name || workQueueContext.client_code || client?.name || 'Carmeco',
+        workQueueContext.client_name || workQueueContext.client_code || '',
+        workQueueContext.client_id,
       )
       setWorkspaceActivities(activities)
       if (callStatus) {
@@ -1784,7 +1801,11 @@ function App() {
   }
 
   async function saveOutreach(andNext: boolean) {
-    if (!selectedRecordNo || workspaceClientId == null || workspaceClientId <= 0 || outreachSaving) {
+    if (workspaceClientId == null || workspaceClientId <= 0) {
+      setOutreachError(SELECT_CLIENT_FOR_WRITE)
+      return
+    }
+    if (!selectedRecordNo || outreachSaving) {
       return
     }
     setOutreachSaving(true)
@@ -1887,6 +1908,10 @@ function App() {
 
   async function saveNewNote() {
     if (!selectedRecordNo || !noteDirty || noteSaving) return
+    if (workspaceClientId == null || workspaceClientId <= 0) {
+      setNoteSaveError(SELECT_CLIENT_FOR_WRITE)
+      return
+    }
     setNoteSaving(true)
     setNoteSaveMsg(null)
     setNoteSaveError(null)
@@ -1896,7 +1921,7 @@ function App() {
         notes: noteDraft,
         created_by: WORKSPACE_USER,
         client: workspaceClientName,
-        client_id: workspaceClientId ?? undefined,
+        client_id: workspaceClientId,
       })
       setWorkspaceActivities((prev) => [created, ...prev.filter((a) => a.activity_id !== created.activity_id)])
       setNewNoteText('')
@@ -1927,6 +1952,10 @@ function App() {
 
   async function saveMilestone() {
     if (!selectedRecordNo || !milestoneDate || milestoneSaving) return
+    if (workspaceClientId == null || workspaceClientId <= 0) {
+      setMilestoneSaveError(SELECT_CLIENT_FOR_WRITE)
+      return
+    }
     if (milestoneType === 'WebLead' && workspace?.contacts.length && !milestoneContactId) {
       setMilestoneSaveError('Select a contact for this WebLead.')
       return
@@ -1937,6 +1966,7 @@ function App() {
     try {
       await createMilestone({
         client: workspaceClientName,
+        client_id: workspaceClientId,
         external_record_no: selectedRecordNo,
         milestone_type: milestoneType,
         milestone_date: milestoneDate,
@@ -1987,12 +2017,17 @@ function App() {
 
   async function toggleHot() {
     if (!selectedRecordNo || !workspace || hotSaving) return
+    if (workspaceClientId == null || workspaceClientId <= 0) {
+      setMilestoneSaveError(SELECT_CLIENT_FOR_WRITE)
+      return
+    }
     setHotSaving(true)
     setMilestoneSaveMsg(null)
     setMilestoneSaveError(null)
     try {
       const next = await setCompanyHot({
         client: workspaceClientName,
+        client_id: workspaceClientId,
         external_record_no: selectedRecordNo,
         is_hot: !workspace.is_hot,
         created_by: WORKSPACE_USER,
@@ -2024,6 +2059,7 @@ function App() {
   }
 
   function closeCompanyWorkspace() {
+    setAddContactOpen(false)
     if (fromAskNorthStar) {
       navigate(ASK_NORTHSTAR_PATH)
       return
@@ -2334,6 +2370,7 @@ function App() {
             !showContacts &&
             !showTasks &&
             !showReports &&
+            !showAdministration &&
             !showAppointments &&
             !showContactWorkspace &&
             !showCompanyWorkspace && (
@@ -2345,6 +2382,7 @@ function App() {
             !showContacts &&
             !showTasks &&
             !showReports &&
+            !showAdministration &&
             !showAppointments &&
             !showContactWorkspace &&
             !showCompanyWorkspace && (
@@ -2364,6 +2402,16 @@ function App() {
 
           {!error && showCompanyWorkspace && (
             <>
+              {workspace ? (
+                <AddContactModal
+                  open={addContactOpen}
+                  onClose={() => setAddContactOpen(false)}
+                  clientId={workspaceClientId}
+                  clientName={workspaceClientName}
+                  lockedCompanyId={workspace.id}
+                  lockedCompanyName={workspace.company_name}
+                />
+              ) : null}
               <div className="page-heading page-heading--split">
                 <div>
                   <button type="button" className="link-btn back-link" onClick={closeCompanyWorkspace}>
@@ -2373,6 +2421,16 @@ function App() {
                   <p className="workspace-working-for">
                     <strong>Working For:</strong> {workspaceClientName}
                   </p>
+                  {workspaceClientId == null || workspaceClientId <= 0 ? (
+                    <p className="data-status" role="status">
+                      {SELECT_CLIENT_FOR_WRITE}
+                    </p>
+                  ) : null}
+                  {(location.state as { companySaveNotice?: string } | null)?.companySaveNotice ? (
+                    <p className="save-confirm" role="status">
+                      {(location.state as { companySaveNotice?: string }).companySaveNotice}
+                    </p>
+                  ) : null}
                   <p>
                     Record No.: {workspace?.external_record_no || '—'}
                     {' · '}
@@ -2657,7 +2715,7 @@ function App() {
                           <dt>Client</dt>
                           <dd>
                             <strong>
-                              {displayOrDash(workQueueContext?.client_name || client?.name || 'Carmeco')}
+                              {displayOrDash(workQueueContext?.client_name || workspaceClientName || clientName)}
                             </strong>
                           </dd>
                         </div>
@@ -3138,9 +3196,23 @@ function App() {
                       <h2 id="contacts-heading">
                         Contacts ({workspace.contacts.length})
                       </h2>
-                      <span className="queue-source">
-                        Linked by Record No. {workspace.external_record_no}
-                      </span>
+                      <div className="heading-controls">
+                        <span className="queue-source">
+                          Linked by Record No. {workspace.external_record_no}
+                        </span>
+                        <button
+                          type="button"
+                          className="primary-btn"
+                          onClick={() => {
+                            if (workspaceClientId == null || workspaceClientId <= 0) {
+                              return
+                            }
+                            setAddContactOpen(true)
+                          }}
+                        >
+                          Add Contact
+                        </button>
+                      </div>
                     </div>
                     {workspace.contacts.length === 0 ? (
                       <p className="empty-state">No contacts linked to this Record No.</p>
@@ -3585,16 +3657,43 @@ function App() {
 
           {!loading && !error && showProspects && (
             <>
+              <AddCompanyModal
+                open={addCompanyOpen}
+                onClose={() => setAddCompanyOpen(false)}
+                clientId={activeClientId}
+                clientName={clientName}
+              />
               <div className="page-heading page-heading--split">
                 <div>
-                  <h1>{prospectFilterMeta?.heading ?? 'Prospects'}</h1>
+                  <h1>
+                    {activeNav === 'companies'
+                      ? 'Companies'
+                      : prospectFilterMeta?.heading ?? 'Prospects'}
+                  </h1>
                   <p>
-                    {prospectFilterMeta?.description ??
-                      `${clientName} companies from the production import — status, primary contact, and last update.`}
+                    {activeNav === 'companies'
+                      ? `${clientName} companies assigned to this client. Add a company to create or link a shared master record.`
+                      : prospectFilterMeta?.description ??
+                        `${clientName} companies from the production import — status, primary contact, and last update.`}
                   </p>
+                  {activeClientId == null || activeClientId <= 0 ? (
+                    <p className="data-status" role="status">
+                      {SELECT_CLIENT_FOR_WRITE}
+                    </p>
+                  ) : null}
                 </div>
-                {prospectFilterMeta && (
-                  <div className="heading-controls">
+                <div className="heading-controls">
+                  <button
+                    type="button"
+                    className="primary-btn"
+                    onClick={() => {
+                      if (activeClientId == null || activeClientId <= 0) return
+                      setAddCompanyOpen(true)
+                    }}
+                  >
+                    Add Company
+                  </button>
+                  {prospectFilterMeta && (
                     <button
                       type="button"
                       className="link-btn clear-filter-btn"
@@ -3602,8 +3701,8 @@ function App() {
                     >
                       Clear Filter
                     </button>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
 
               <section
@@ -3743,6 +3842,13 @@ function App() {
             <Reports
               activeClientId={activeClientId}
               activeClientName={clientName}
+            />
+          )}
+
+          {showAdministration && (
+            <Administration
+              activeClientId={activeClientId}
+              availableClients={availableClients}
             />
           )}
 

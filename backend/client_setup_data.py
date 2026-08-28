@@ -15,7 +15,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from access import get_default_user, get_user_by_id, list_clients_for_user, user_can_access_client
+from access import get_default_user, get_user_by_id, list_clients_for_user, require_write_client_id, user_can_access_client
 from db import get_connection
 from models import (
     ClientCampaignUpdate,
@@ -1152,6 +1152,7 @@ def update_client_overview(
     user = get_user_by_id(user_id) if user_id is not None else get_default_user()
     if user is None:
         raise PermissionError("User not found.")
+    require_write_client_id(client_id, user_id=user.id)
     if not user_can_edit_client_setup(user.id, client_id):
         raise PermissionError("Not authorized to edit client setup.")
 
@@ -1262,6 +1263,7 @@ def update_client_sells(
     user = get_user_by_id(user_id) if user_id is not None else get_default_user()
     if user is None:
         raise PermissionError("User not found.")
+    require_write_client_id(client_id, user_id=user.id)
     if not user_can_edit_client_setup(user.id, client_id):
         raise PermissionError("Not authorized to edit client setup.")
 
@@ -1347,6 +1349,7 @@ def create_campaign(
     user = get_user_by_id(user_id) if user_id is not None else get_default_user()
     if user is None:
         raise PermissionError("User not found.")
+    require_write_client_id(client_id, user_id=user.id)
     if not user_can_edit_client_setup(user.id, client_id):
         raise PermissionError("Not authorized to edit client setup.")
     name = _blank(body.campaign_name)
@@ -1457,6 +1460,7 @@ def update_campaign(
     user = get_user_by_id(user_id) if user_id is not None else get_default_user()
     if user is None:
         raise PermissionError("User not found.")
+    require_write_client_id(client_id, user_id=user.id)
     if not user_can_edit_client_setup(user.id, client_id):
         raise PermissionError("Not authorized to edit client setup.")
 
@@ -1557,6 +1561,7 @@ def set_default_campaign(
     user = get_user_by_id(user_id) if user_id is not None else get_default_user()
     if user is None:
         raise PermissionError("User not found.")
+    require_write_client_id(client_id, user_id=user.id)
     if not user_can_edit_client_setup(user.id, client_id):
         raise PermissionError("Not authorized to edit client setup.")
 
@@ -1610,6 +1615,7 @@ def delete_campaign(
     user = get_user_by_id(user_id) if user_id is not None else get_default_user()
     if user is None:
         raise PermissionError("User not found.")
+    require_write_client_id(client_id, user_id=user.id)
     if not user_can_edit_client_setup(user.id, client_id):
         raise PermissionError("Not authorized to edit client setup.")
 

@@ -47,7 +47,15 @@ def _table_exists(conn, name: str) -> bool:
     return row is not None
 
 
+def _resolve_client_for_write(conn, client_id: object):
+    from access import require_write_client_id
+
+    cid = require_write_client_id(client_id, conn=conn)
+    return conn.execute("SELECT * FROM clients WHERE id = ?", (cid,)).fetchone()
+
+
 def _resolve_client(conn, client_name: str = "Carmeco"):
+    """Read helper. Writes must use _resolve_client_for_write."""
     code = client_name.strip().lower()
     if code in {"carmeco", "carmeco metal"}:
         code = "carmeco"
@@ -235,7 +243,7 @@ def create_milestone(body: MilestoneCreateRequest) -> RevenueMilestone:
         raise LookupError("Database not found.")
 
     with get_connection() as conn:
-        client_row = _resolve_client(conn, body.client)
+        client_row = _resolve_client_for_write(conn, body.client_id)
         if client_row is None:
             raise ValueError("Unknown client.")
         company = conn.execute(
@@ -388,7 +396,7 @@ def set_company_hot(body: SetHotRequest) -> dict:
         raise ValueError("external_record_no is required.")
 
     with get_connection() as conn:
-        client_row = _resolve_client(conn, body.client)
+        client_row = _resolve_client_for_write(conn, body.client_id)
         if client_row is None:
             raise ValueError("Unknown client.")
         company = conn.execute(

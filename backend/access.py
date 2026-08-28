@@ -143,6 +143,54 @@ def list_clients_for_user(
     ]
 
 
+WRITE_CLIENT_REQUIRED_MSG = (
+    "client_id is required and must be a positive integer. "
+    "All My Clients cannot be used for writes."
+)
+
+
+class WriteClientIdError(ValueError):
+    """Missing, zero, or unknown client_id on a client-scoped write."""
+
+
+def require_write_client_id(
+    client_id: object,
+    *,
+    conn=None,
+    user_id: int | None = None,
+) -> int:
+    """Require an explicit existing client for writes. Never infer Carmeco."""
+    if client_id is None:
+        raise WriteClientIdError(WRITE_CLIENT_REQUIRED_MSG)
+    try:
+        cid = int(client_id)
+    except (TypeError, ValueError) as exc:
+        raise WriteClientIdError(WRITE_CLIENT_REQUIRED_MSG) from exc
+    if cid <= 0:
+        raise WriteClientIdError(WRITE_CLIENT_REQUIRED_MSG)
+
+    def _lookup(db) -> object:
+        return db.execute("SELECT id FROM clients WHERE id = ?", (cid,)).fetchone()
+
+    if conn is not None:
+        row = _lookup(conn)
+    else:
+        if not _db_exists():
+            raise WriteClientIdError(f"client_id {cid} does not exist.")
+        with get_connection() as owned:
+            row = _lookup(owned)
+    if row is None:
+        raise WriteClientIdError(f"client_id {cid} does not exist.")
+
+    uid = user_id
+    if uid is None:
+        user = get_default_user()
+        uid = int(user.id) if user is not None else None
+    if uid is not None and not user_can_access_client(uid, cid):
+        raise PermissionError("Not authorized for this client.")
+    return cid
+
+
 def user_can_access_client(user_id: int, client_id: int) -> bool:
     """True if the user is assigned to the client, or is an administrator."""
     if not _db_exists():

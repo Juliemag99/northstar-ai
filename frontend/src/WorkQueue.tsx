@@ -10,6 +10,7 @@ import {
   fetchWorkQueue,
   fetchWorkQueueClients,
 } from './api/carmeco'
+import { requireWriteClientId } from './writeClient'
 import NextActionFields from './NextActionFields'
 import {
   emptyNextActionCatalog,
@@ -398,8 +399,10 @@ export default function WorkQueue({
     const notes = window.prompt('Note text')
     if (!notes?.trim()) return
     try {
+      const clientId = requireWriteClientId(item.client_id)
       await createCompanyActivity({
-        client: item.client_code || item.client_name || 'Carmeco',
+        client: item.client_name || item.client_code || '',
+        client_id: clientId,
         external_record_no: item.external_record_no,
         activity_type: 'Note',
         notes: notes.trim(),
@@ -468,7 +471,8 @@ export default function WorkQueue({
         }
       } else {
         await createCompanyActivity({
-          client: item.client_code || item.client_name || 'Carmeco',
+          client: item.client_name || item.client_code || '',
+          client_id: requireWriteClientId(item.client_id),
           external_record_no: item.external_record_no,
           activity_type: 'Follow-Up',
           notes: nextAction,

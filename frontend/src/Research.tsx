@@ -1,6 +1,8 @@
 import { Link } from 'react-router-dom'
 import { useMemo, useState } from 'react'
 import type { ProspectListItem } from './types/carmeco'
+import AddCompanyModal from './AddCompanyModal'
+import { SELECT_CLIENT_FOR_WRITE } from './writeClient'
 
 function display(value: string | null | undefined): string {
   return value?.trim() || '—'
@@ -25,6 +27,7 @@ export default function Research({
   loading?: boolean
 }) {
   const [query, setQuery] = useState('')
+  const [addOpen, setAddOpen] = useState(false)
   const canResearch = activeClientId != null && activeClientId > 0
 
   const filtered = useMemo(() => {
@@ -58,8 +61,25 @@ export default function Research({
             research page.
           </p>
         </div>
+        <div className="heading-controls">
+          <button
+            type="button"
+            className="primary-btn"
+            onClick={() => {
+              if (!canResearch) return
+              setAddOpen(true)
+            }}
+          >
+            Add Company
+          </button>
+        </div>
       </div>
-
+      <AddCompanyModal
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        clientId={activeClientId}
+        clientName={activeClientName}
+      />
       {!canResearch ? (
         <section className="panel" aria-label="Select Working For client">
           <div className="panel-header">
@@ -67,7 +87,7 @@ export default function Research({
           </div>
           <p>
             Select a Working For client in the sidebar to research companies in that client&apos;s
-            context.
+            context. {SELECT_CLIENT_FOR_WRITE}
           </p>
         </section>
       ) : (

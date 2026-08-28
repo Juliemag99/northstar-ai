@@ -1,8 +1,9 @@
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from access import (
+    WriteClientIdError,
     dashboard_scope_summary,
     get_default_user,
     get_user_by_id,
@@ -61,6 +62,23 @@ from models import (
     ContactActivityCreate,
     ContactAssignRequest,
     ContactAssignResult,
+    CompanyLookupResponse,
+    ManualContactPreviewRequest,
+    ManualContactPreviewResponse,
+    ManualContactSaveRequest,
+    ManualContactSaveResult,
+    ManualCompanyPreviewRequest,
+    ManualCompanyPreviewResponse,
+    ManualCompanySaveRequest,
+    ManualCompanySaveResult,
+    ZoomInfoAddPreviewRequest,
+    ZoomInfoAddPreviewResponse,
+    ZoomInfoAddResult,
+    ZoomInfoAddSaveRequest,
+    ZoomInfoContactApplyRequest,
+    ZoomInfoContactApplyResult,
+    ZoomInfoContactPreviewRequest,
+    ZoomInfoContactPreviewResponse,
     ContactFollowUpCompleteRequest,
     ContactFollowUpRescheduleRequest,
     ContactWorkflowResult,
@@ -199,6 +217,18 @@ from client_engagement_import import (
     map_engagement_import,
     start_engagement_import,
     update_sheet_classifications,
+)
+from manual_contact_data import (
+    lookup_companies_for_client,
+    preview_manual_contact,
+    save_manual_contact,
+)
+from manual_company_data import preview_manual_company, save_manual_company
+from zoominfo_crm_data import (
+    apply_zoominfo_contact_update,
+    preview_zoominfo_add,
+    preview_zoominfo_contact_update,
+    save_zoominfo_add,
 )
 from client_workspace_data import (
     assign_shared_contact,
@@ -342,6 +372,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(WriteClientIdError)
+async def write_client_id_error_handler(_request, exc: WriteClientIdError):
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
 
 
 @app.on_event("startup")
@@ -500,6 +535,20 @@ def patch_company_notes(record_no: str, body: NotesUpdateRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return FieldUpdateResponse(**result)
+
+
+@app.get("/api/companies/lookup", response_model=CompanyLookupResponse)
+def lookup_companies_api(
+    client_id: int = Query(..., description="Active Client id — required, must be > 0."),
+    q: str = Query(default="", description="Company name or Record No."),
+):
+    """Search companies assigned to the Active Client for Add Contact."""
+    try:
+        return CompanyLookupResponse(**lookup_companies_for_client(client_id, q))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/companies/{company_id}", response_model=CompanyWorkspace)
@@ -2193,7 +2242,7 @@ def google_oauth_callback_api(code: str = "", state: str = "", error: str = ""):
 
     if error:
         dest = (
-            f"{frontend_after_connect_base()}/clients"
+            f"{frontend_after_connect_base()}/administration"
             f"?email_oauth=error&detail={quote(error[:180])}"
         )
         return RedirectResponse(url=dest, status_code=302)
@@ -2204,7 +2253,7 @@ def google_oauth_callback_api(code: str = "", state: str = "", error: str = ""):
         return RedirectResponse(url=result["frontend_redirect"], status_code=302)
     except Exception as exc:
         dest = (
-            f"{frontend_after_connect_base()}/clients"
+            f"{frontend_after_connect_base()}/administration"
             f"?email_oauth=error&detail={quote(str(exc)[:180])}"
         )
         return RedirectResponse(url=dest, status_code=302)
@@ -2715,6 +2764,124 @@ def list_contacts_api(
         offset=int(result["offset"]),
         limit=int(result["limit"]),
     )
+
+
+@app.post("/api/contacts/manual/preview", response_model=ManualContactPreviewResponse)
+def preview_manual_contact_api(body: ManualContactPreviewRequest):
+    """Read-only duplicate check before creating or linking a CRM contact."""
+    try:
+        return preview_manual_contact(body)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/contacts/manual", response_model=ManualContactSaveResult)
+def save_manual_contact_api(body: ManualContactSaveRequest):
+    """Create one shared master contact or link an existing one to this client/company."""
+    try:
+        return save_manual_contact(body)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/companies/manual/preview", response_model=ManualCompanyPreviewResponse)
+def preview_manual_company_api(body: ManualCompanyPreviewRequest):
+    """Read-only duplicate check before creating or linking a CRM company."""
+    try:
+        return preview_manual_company(body)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/companies/manual", response_model=ManualCompanySaveResult)
+def save_manual_company_api(body: ManualCompanySaveRequest):
+    """Create one shared master company or link it to this client."""
+    try:
+        return save_manual_company(body)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post(
+    "/api/contacts/{contact_id}/zoominfo/preview",
+    response_model=ZoomInfoContactPreviewResponse,
+)
+def preview_zoominfo_contact_api(contact_id: int, body: ZoomInfoContactPreviewRequest):
+    """Compare NorthStar vs ZoomInfo values. Does not write."""
+    try:
+        return preview_zoominfo_contact_update(contact_id, body)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post(
+    "/api/contacts/{contact_id}/zoominfo/apply",
+    response_model=ZoomInfoContactApplyResult,
+)
+def apply_zoominfo_contact_api(contact_id: int, body: ZoomInfoContactApplyRequest):
+    """Apply only the ZoomInfo fields the user selected. Cancel is a no-op (do not call)."""
+    try:
+        return apply_zoominfo_contact_update(contact_id, body)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/zoominfo/add/preview", response_model=ZoomInfoAddPreviewResponse)
+def preview_zoominfo_add_api(body: ZoomInfoAddPreviewRequest):
+    """Duplicate check before adding a ZoomInfo company or contact. Never auto-creates."""
+    try:
+        return ZoomInfoAddPreviewResponse(**preview_zoominfo_add(body))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/zoominfo/add", response_model=ZoomInfoAddResult)
+def save_zoominfo_add_api(body: ZoomInfoAddSaveRequest):
+    """Create or link a ZoomInfo company/contact after an explicit user decision."""
+    try:
+        return save_zoominfo_add(body)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/contacts/{contact_id}", response_model=ContactWorkspace)

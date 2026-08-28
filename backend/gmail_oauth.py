@@ -249,8 +249,8 @@ def complete_google_callback(
                 "Corrective action: reconnect using the correct Google identity."
             ),
             "frontend_redirect": (
-                f"{frontend_after_connect_base()}/clients/{client_id}/knowledge"
-                f"?email_oauth=mismatch&account_id={account_id}"
+                f"{frontend_after_connect_base()}/administration"
+                f"?email_oauth=mismatch&account_id={account_id}&client_id={client_id}"
             ),
         }
 
@@ -290,8 +290,8 @@ def complete_google_callback(
         "provider_connection_ref": ref,
         "message": f"Connected as {connected_email}",
         "frontend_redirect": (
-            f"{frontend_after_connect_base()}/clients/{client_id}/knowledge"
-            f"?email_oauth=connected&account_id={account_id}"
+            f"{frontend_after_connect_base()}/administration"
+            f"?email_oauth=connected&account_id={account_id}&client_id={client_id}"
         ),
     }
 
