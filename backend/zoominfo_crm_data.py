@@ -103,6 +103,53 @@ def _assert_other_ccrs_unchanged(conn, company_id: int, client_id: int, before: 
         raise RuntimeError("Refusing to overwrite another client's relationship.")
 
 
+def _refresh_current_client_contact_links(
+    conn,
+    *,
+    contact_id: int,
+    client_id: int,
+    relationship_id: int,
+    created_by: str,
+) -> None:
+    """Point this client's contact assignment at the destination company CCR.
+
+    Other clients' contact_client_relationships and workflows are left unchanged.
+    """
+    existing = conn.execute(
+        """
+        SELECT id FROM contact_client_relationships
+        WHERE contact_id = ? AND client_id = ?
+        """,
+        (contact_id, client_id),
+    ).fetchone()
+    if existing is None:
+        conn.execute(
+            """
+            INSERT INTO contact_client_relationships (
+                contact_id, client_id, relationship_id, created_at, created_by
+            ) VALUES (?, ?, ?, datetime('now'), ?)
+            """,
+            (contact_id, client_id, relationship_id, created_by),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE contact_client_relationships
+            SET relationship_id = ?
+            WHERE contact_id = ? AND client_id = ?
+            """,
+            (relationship_id, contact_id, client_id),
+        )
+    conn.execute(
+        """
+        UPDATE contact_client_workflows
+        SET relationship_id = ?
+        WHERE contact_id = ? AND client_id = ?
+        """,
+        (relationship_id, contact_id, client_id),
+    )
+
+
 def _snapshot_client_scoped(conn, client_id: int, contact_id: int, company_id: int) -> dict:
     return {
         "workflow": [
@@ -329,14 +376,18 @@ def apply_zoominfo_contact_update(
             ).fetchone()
             if row is None:
                 raise LookupError("Contact not found.")
-            company_id = int(row["company_id"])
+            original_company_id = int(row["company_id"])
+            company_id = original_company_id
             company_row = conn.execute(
                 "SELECT id, company_name, external_record_no FROM companies WHERE id = ?",
                 (company_id,),
             ).fetchone()
             company_name = _blank(company_row["company_name"]) if company_row else ""
-            scoped_before = _snapshot_client_scoped(conn, client_id, contact_id, company_id)
+            scoped_before = _snapshot_client_scoped(
+                conn, client_id, contact_id, original_company_id
+            )
             other_before = scoped_before["other_ccr"]
+            dest_other_before: list[dict] | None = None
 
             zi_company = _blank(body.zoominfo.company_name)
             different = bool(zi_company) and zi_company.lower() != company_name.lower()
@@ -353,21 +404,32 @@ def apply_zoominfo_contact_update(
                 ).fetchone()
                 if target is None:
                     raise LookupError("Target company not found.")
+                dest_company_id = int(target["id"])
+                dest_other_before = _snapshot_other_ccrs(
+                    conn, dest_company_id, client_id
+                )
                 from crm_add_data import ensure_client_relationship
 
-                ensure_client_relationship(
+                dest_rel_id, _created, _status = ensure_client_relationship(
                     conn,
                     client_id=client_id,
-                    company_id=int(target["id"]),
+                    company_id=dest_company_id,
                     external_record_no=_blank(target["external_record_no"]),
                     user_id=int(user.id),
                     provenance_note=f"Contact relinked from ZoomInfo by {created_by}.",
                 )
                 conn.execute(
                     "UPDATE contacts SET company_id = ? WHERE id = ?",
-                    (int(target["id"]), contact_id),
+                    (dest_company_id, contact_id),
                 )
-                company_id = int(target["id"])
+                _refresh_current_client_contact_links(
+                    conn,
+                    contact_id=contact_id,
+                    client_id=client_id,
+                    relationship_id=int(dest_rel_id),
+                    created_by=created_by,
+                )
+                company_id = dest_company_id
                 company_name = _blank(target["company_name"])
                 company_relinked = True
             elif different and "company" in apply_set:
@@ -484,8 +546,18 @@ def apply_zoominfo_contact_update(
             ).fetchone()
             if rel is None:
                 raise LookupError("Company is not assigned to this client.")
-            _assert_other_ccrs_unchanged(conn, company_id, client_id, other_before)
-            scoped_after = _snapshot_client_scoped(conn, client_id, contact_id, company_id)
+            _assert_other_ccrs_unchanged(
+                conn, original_company_id, client_id, other_before
+            )
+            if dest_other_before is not None:
+                _assert_other_ccrs_unchanged(
+                    conn, company_id, client_id, dest_other_before
+                )
+            # Notes, campaigns, and other-client CCRs stay on the original company.
+            # Compare those guards against the origin, not the destination.
+            scoped_after = _snapshot_client_scoped(
+                conn, client_id, contact_id, original_company_id
+            )
             if scoped_after["workflow"] != scoped_before["workflow"]:
                 raise RuntimeError("ZoomInfo update must not change contact workflow.")
             if scoped_after["notes"] != scoped_before["notes"]:
