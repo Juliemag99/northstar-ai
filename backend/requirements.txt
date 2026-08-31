@@ -7,3 +7,4 @@ python-docx
 openpyxl
 python-dotenv
 cryptography
+argon2-cffi

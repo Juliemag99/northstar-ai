@@ -51,6 +51,10 @@ _TEST_ISOLATED = False
 _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "users": [
         ("is_internal_northstar", "INTEGER NOT NULL DEFAULT 1"),
+        ("password_hash", "TEXT NOT NULL DEFAULT ''"),
+        ("password_updated_at", "TEXT NOT NULL DEFAULT ''"),
+        ("failed_login_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("locked_until", "TEXT NOT NULL DEFAULT ''"),
     ],
     "client_company_relationships": [
         ("assigned_user_id", "INTEGER"),
@@ -282,6 +286,9 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
 
         # Derived phone keys only. Does not rewrite contacts.phone / alt_phone.
         ensure_contact_phone_key_schema(conn)
+    from auth_sessions import ensure_staff_auth_schema
+
+    ensure_staff_auth_schema(conn)
     conn.commit()
 
 

@@ -21,7 +21,12 @@ CREATE TABLE IF NOT EXISTS users (
     -- Future external/client-facing users should be set to 0 (own-client only).
     is_internal_northstar INTEGER NOT NULL DEFAULT 1,
     active INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Staff auth (Phase 0). Empty password_hash means the user cannot log in.
+    password_hash TEXT NOT NULL DEFAULT '',
+    password_updated_at TEXT NOT NULL DEFAULT '',
+    failed_login_count INTEGER NOT NULL DEFAULT 0,
+    locked_until TEXT NOT NULL DEFAULT ''
 );
 
 -- Many-to-many: a user may work for many clients; a client may have many users
@@ -236,6 +241,30 @@ CREATE INDEX IF NOT EXISTS idx_user_client_user
     ON user_client_assignments(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_client_client
     ON user_client_assignments(client_id);
+
+-- Opaque staff sessions. Cookie stores the raw token; this table stores SHA-256.
+CREATE TABLE IF NOT EXISTS staff_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash TEXT NOT NULL UNIQUE,
+    user_id INTEGER NOT NULL,
+    csrf_secret TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    revoked_at TEXT NOT NULL DEFAULT '',
+    ip TEXT NOT NULL DEFAULT '',
+    user_agent TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_staff_sessions_user
+    ON staff_sessions(user_id, revoked_at);
+
+CREATE INDEX IF NOT EXISTS idx_staff_sessions_expires
+    ON staff_sessions(expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_staff_sessions_token_hash
+    ON staff_sessions(token_hash);
 
 -- Field-level audit for Carmeco status / notes edits (client-scoped)
 CREATE TABLE IF NOT EXISTS field_audit_log (
