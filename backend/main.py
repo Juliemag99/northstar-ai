@@ -9,6 +9,7 @@ from access import (
     get_user_by_id,
     list_clients_for_user,
 )
+from auth_http import add_staff_csrf_middleware, staff_auth_router
 from activities_data import (
     create_activity,
     list_activities_due_today,
@@ -359,6 +360,10 @@ app = FastAPI(
     version="1.9.1",
     description="NorthStar AI Revenue Development Platform — multi-client",
 )
+
+# CSRF is inner so CORS can still label 403s. No 401 route gate (Checkpoint B).
+add_staff_csrf_middleware(app)
+app.include_router(staff_auth_router)
 
 app.add_middleware(
     CORSMiddleware,

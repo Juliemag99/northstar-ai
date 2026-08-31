@@ -122,9 +122,11 @@ def test_unauthenticated_app_unchanged() -> None:
 
     main_src = Path(__file__).with_name("main.py").read_text(encoding="utf-8")
     if "AUTH_ENFORCE" in main_src:
-        _fail("Phase 0 must not wire AUTH_ENFORCE into the application.")
-    if "/api/auth/" in main_src or "bootstrap_staff_admin" in main_src:
-        _fail("Phase 0 must not add login routes.")
+        _fail("Keep AUTH_ENFORCE fail-safe in auth_http, not main.py.")
+    if "bootstrap_staff_admin" in main_src:
+        _fail("Bootstrap CLI must not be imported by the HTTP app.")
+    if "Authentication required." in main_src:
+        _fail("Checkpoint A must not add global 401 route-protection middleware.")
 
 
 def test_idempotent_migration() -> None:
