@@ -1,11 +1,13 @@
 import { useState, type FormEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { GENERIC_LOGIN_ERROR } from './api/auth'
 import { useAuth } from './auth/useAuth'
+import { safeReturnPath } from './auth/safeReturnPath'
 
 export default function Login() {
   const navigate = useNavigate()
-  const { login, authAvailable } = useAuth()
+  const [searchParams] = useSearchParams()
+  const { login, authAvailable, authEnforced } = useAuth()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [pending, setPending] = useState(false)
@@ -23,7 +25,7 @@ export default function Login() {
     try {
       await login(email, password)
       setPassword('')
-      navigate('/')
+      navigate(safeReturnPath(searchParams.get('next')) ?? '/')
     } catch {
       setError(GENERIC_LOGIN_ERROR)
       setPassword('')
@@ -76,14 +78,16 @@ export default function Login() {
             {pending ? 'Signing in…' : 'Sign in'}
           </button>
         </form>
-        <button
-          type="button"
-          className="link-btn login-continue"
-          onClick={continueWithoutSigningIn}
-          disabled={pending}
-        >
-          Continue without signing in
-        </button>
+        {!authEnforced && (
+          <button
+            type="button"
+            className="link-btn login-continue"
+            onClick={continueWithoutSigningIn}
+            disabled={pending}
+          >
+            Continue without signing in
+          </button>
+        )}
       </div>
     </div>
   )

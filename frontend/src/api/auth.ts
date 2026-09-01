@@ -50,14 +50,20 @@ function parseUser(value: unknown): StaffUser | null {
 }
 
 function parseAuthPayload(payload: Record<string, unknown>): ParsedAuth {
-  const authenticated = payload.authenticated === true
+  if (
+    typeof payload.authenticated !== 'boolean' ||
+    typeof payload.auth_available !== 'boolean' ||
+    typeof payload.auth_enforced !== 'boolean'
+  ) {
+    throw new Error('Unable to load the current session.')
+  }
   const rawCsrf = typeof payload.csrf_token === 'string' ? payload.csrf_token.trim() : ''
   return {
-    authenticated,
+    authenticated: payload.authenticated,
     user: parseUser(payload.user),
-    authAvailable: payload.auth_available === true,
-    authEnforced: payload.auth_enforced === true,
-    csrfToken: authenticated ? rawCsrf : '',
+    authAvailable: payload.auth_available,
+    authEnforced: payload.auth_enforced,
+    csrfToken: payload.authenticated ? rawCsrf : '',
   }
 }
 

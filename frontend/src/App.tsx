@@ -83,7 +83,6 @@ import Research from './Research'
 import ResearchCompany from './ResearchCompany'
 import SendEmailCompose from './SendEmailCompose'
 import AppointmentDetailsFields from './AppointmentDetailsFields'
-import Login from './Login'
 import { useAuth } from './auth/useAuth'
 import {
   APPOINTMENT_SET_STATUSES,
@@ -750,7 +749,7 @@ function App() {
   const location = useLocation()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
-  const { authenticated, user, authAvailable, logout } = useAuth()
+  const { authenticated, user, authAvailable, authEnforced, logout } = useAuth()
   const displayName =
     authenticated && user?.full_name.trim() ? user.full_name.trim() : WORKSPACE_USER
   const displayInitials = staffInitials(authenticated, displayName)
@@ -2113,10 +2112,9 @@ function App() {
     } catch {
       /* Session is cleared locally even if the request fails. */
     }
-  }
-
-  if (location.pathname === '/login') {
-    return <Login />
+    if (authEnforced) {
+      navigate('/login')
+    }
   }
 
   return (
