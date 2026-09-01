@@ -83,6 +83,8 @@ import Research from './Research'
 import ResearchCompany from './ResearchCompany'
 import SendEmailCompose from './SendEmailCompose'
 import AppointmentDetailsFields from './AppointmentDetailsFields'
+import Login from './Login'
+import { useAuth } from './auth/useAuth'
 import {
   APPOINTMENT_SET_STATUSES,
   appointmentDetailsAreValid,
@@ -95,6 +97,7 @@ import {
 import './App.css'
 
 const WORKSPACE_USER = 'Julie Magnani'
+const WORKSPACE_INITIALS = 'JR'
 const ACTIVE_CLIENT_STORAGE_KEY = 'northstar_active_client_id'
 const OUTREACH_ACTIVITY_ONLY_OUTCOMES = ['No Answer', 'Spoke With Contact', 'Follow-Up'] as const
 const OUTREACH_TYPES = ['Call', 'Email', 'Other'] as const
@@ -443,6 +446,19 @@ function greetingForNow(date = new Date()): string {
   return 'Good evening'
 }
 
+function staffInitials(authenticated: boolean, fullName: string): string {
+  if (!authenticated) return WORKSPACE_INITIALS
+  const parts = fullName.trim().split(/\s+/).filter(Boolean)
+  if (parts.length === 0) return WORKSPACE_INITIALS
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase()
+  return `${parts[0][0] ?? ''}${parts[parts.length - 1][0] ?? ''}`.toUpperCase()
+}
+
+function greetingFirstName(authenticated: boolean, fullName: string): string {
+  if (!authenticated) return 'Julie'
+  return fullName.trim().split(/\s+/).filter(Boolean)[0] || 'Julie'
+}
+
 function formatToday(date = new Date()): string {
   return date.toLocaleDateString('en-US', {
     weekday: 'short',
@@ -686,6 +702,7 @@ function InfoRow({ label, value }: { label: string; value: string }) {
 }
 
 function navIdFromPath(pathname: string): string {
+  if (pathname === '/login') return 'login'
   if (matchPath({ path: '/companies/:recordNo/research', end: true }, pathname)) {
     return 'research'
   }
@@ -733,6 +750,11 @@ function App() {
   const location = useLocation()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
+  const { authenticated, user, authAvailable, logout } = useAuth()
+  const displayName =
+    authenticated && user?.full_name.trim() ? user.full_name.trim() : WORKSPACE_USER
+  const displayInitials = staffInitials(authenticated, displayName)
+  const greetingName = greetingFirstName(authenticated, displayName)
   const activeNav = navIdFromPath(location.pathname)
   const companyMatch = matchPath(
     { path: '/companies/:recordNo', end: true },
@@ -1502,7 +1524,8 @@ function App() {
     activeNav !== 'reports' &&
     activeNav !== 'clients' &&
     activeNav !== 'campaigns' &&
-    activeNav !== 'administration'
+    activeNav !== 'administration' &&
+    activeNav !== 'login'
   const showCampaigns =
     !showCompanyWorkspace &&
     !showResearchCompany &&
@@ -2079,6 +2102,23 @@ function App() {
     setSidebarOpen(false)
   }
 
+  function goToSignIn() {
+    navigate('/login')
+    setSidebarOpen(false)
+  }
+
+  async function onSignOut() {
+    try {
+      await logout()
+    } catch {
+      /* Session is cleared locally even if the request fails. */
+    }
+  }
+
+  if (location.pathname === '/login') {
+    return <Login />
+  }
+
   return (
     <div className={`dashboard ${sidebarCollapsed ? 'dashboard--collapsed' : ''}`}>
       {sidebarOpen && (
@@ -2181,15 +2221,24 @@ function App() {
         <div className="sidebar-footer">
           <div className="user-chip">
             <span className="user-avatar" aria-hidden="true">
-              JR
+              {displayInitials}
             </span>
             {!sidebarCollapsed && (
               <div>
-                <strong>Julie Magnani</strong>
+                <strong>{displayName}</strong>
                 <span>Account Executive</span>
               </div>
             )}
           </div>
+          {authenticated ? (
+            <button type="button" className="link-btn user-chip-action" onClick={() => void onSignOut()}>
+              Sign out
+            </button>
+          ) : authAvailable ? (
+            <button type="button" className="link-btn user-chip-action" onClick={goToSignIn}>
+              Sign in
+            </button>
+          ) : null}
         </div>
       </aside>
 
@@ -2347,14 +2396,23 @@ function App() {
             <button type="button" className="icon-btn" aria-label="Help" title="Help">
               <span aria-hidden="true">?</span>
             </button>
-            <div className="topbar-user" title="Julie Magnani">
+            <div className="topbar-user" title={displayName}>
               <span className="user-avatar user-avatar--sm" aria-hidden="true">
-                JR
+                {displayInitials}
               </span>
               <div className="topbar-user__text">
-                <strong>Julie Magnani</strong>
+                <strong>{displayName}</strong>
                 <span>{clientName}</span>
               </div>
+              {authenticated ? (
+                <button type="button" className="link-btn" onClick={() => void onSignOut()}>
+                  Sign out
+                </button>
+              ) : authAvailable ? (
+                <button type="button" className="link-btn" onClick={goToSignIn}>
+                  Sign in
+                </button>
+              ) : null}
             </div>
           </div>
         </header>
@@ -3908,7 +3966,7 @@ function App() {
               <div className="page-heading page-heading--split">
                 <div>
                   <h1>
-                    {greeting}, Julie
+                    {greeting}, {greetingName}
                   </h1>
                   <p>
                     Today&apos;s {clientName} work — priority outreach, follow-ups, and plant intro

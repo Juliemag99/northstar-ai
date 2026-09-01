@@ -1,5 +1,6 @@
 import { type NextActionCatalog } from '../nextAction'
 import { requireWriteClientId } from '../writeClient'
+import { apiFetch as fetch } from './http'
 import type {
   ActiveClient,
   ActivitySummary,

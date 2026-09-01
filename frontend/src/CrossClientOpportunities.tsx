@@ -1,5 +1,6 @@
 import { Link, useSearchParams } from 'react-router-dom'
 import { useEffect, useMemo, useState } from 'react'
+import { apiFetch } from './api/http'
 import {
   addOpportunityToTarget,
   companyWorkspaceHref,
@@ -98,7 +99,7 @@ function signalsBySource(opportunity: CrossClientOpportunity): Array<{ client: s
 }
 
 function loadTargetClients(activeClient: ActiveClient | null): Promise<TargetClient[]> {
-  return fetch('/api/users/default')
+  return apiFetch('/api/users/default')
     .then((response) => {
       if (!response.ok) throw new Error('Unable to load users')
       return response.json() as Promise<Record<string, unknown>>
@@ -106,7 +107,7 @@ function loadTargetClients(activeClient: ActiveClient | null): Promise<TargetCli
     .then(async (user) => {
       const userId = Number(user.id ?? user.user_id)
       if (!Number.isFinite(userId)) throw new Error('No default user')
-      const response = await fetch(`/api/users/${userId}/clients`)
+      const response = await apiFetch(`/api/users/${userId}/clients`)
       if (!response.ok) throw new Error('Unable to load clients')
       const raw = await response.json() as unknown
       const items = Array.isArray(raw) ? raw : (raw as { clients?: unknown[] }).clients ?? []
@@ -119,7 +120,7 @@ function loadTargetClients(activeClient: ActiveClient | null): Promise<TargetCli
     })
     .catch(async () => {
       try {
-        const response = await fetch('/api/users/1/clients')
+        const response = await apiFetch('/api/users/1/clients')
         if (response.ok) {
           const raw = await response.json() as unknown
           const items = Array.isArray(raw) ? raw : (raw as { clients?: unknown[] }).clients ?? []
