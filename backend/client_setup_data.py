@@ -15,7 +15,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from access import get_default_user, get_user_by_id, list_clients_for_user, require_write_client_id, user_can_access_client
+from access import DEFAULT_USER_EMAIL, get_default_user, get_user_by_id, list_clients_for_user, require_write_client_id, user_can_access_client
 from db import get_connection
 from models import (
     ClientCampaignUpdate,
@@ -428,7 +428,7 @@ def user_can_edit_client_setup(user_id: int, client_id: int) -> bool:
     # Explicit authorized Client Setup editors (ICP config — not CRM mutation)
     email = _blank(user.email).lower()
     if email in {
-        "julie.magnani@northstargroup.com",
+        DEFAULT_USER_EMAIL.lower(),
         "admin@northstargroup.com",
     }:
         return True

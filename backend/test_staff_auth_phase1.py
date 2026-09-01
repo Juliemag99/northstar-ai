@@ -498,9 +498,6 @@ def test_enforcement_fail_safe() -> None:
     try:
         if auth_enforcement_active():
             _fail("Enforcement must default to off.")
-        os.environ[ENFORCE_FLAG] = "1"
-        if auth_enforcement_active():
-            _fail("Enforce flag without a Julie password hash must stay inactive.")
 
         with get_connection() as conn:
             row = conn.execute(
@@ -514,6 +511,14 @@ def test_enforcement_fail_safe() -> None:
                 _fail("Julie row missing from isolated testdb.")
             snapshot = dict(row)
             julie_id = int(row["id"])
+            conn.execute("UPDATE users SET password_hash = '' WHERE id = ?", (julie_id,))
+            conn.commit()
+
+        os.environ[ENFORCE_FLAG] = "1"
+        if auth_enforcement_active():
+            _fail("Enforce flag without a Julie password hash must stay inactive.")
+
+        with get_connection() as conn:
             conn.execute(
                 "UPDATE users SET password_hash = ? WHERE id = ?",
                 (hash_password(password, email=DEFAULT_USER_EMAIL), julie_id),
@@ -565,17 +570,45 @@ def test_enforcement_fail_safe() -> None:
             _fail("Enforcement leaked on after fail-safe tests.")
 
 
-def test_live_database_not_migrated() -> None:
-    live = sqlite3.connect(str(PRODUCTION_DB_PATH))
+def test_live_database_email_cut_over() -> None:
+    from pathlib import Path
+
+    if os.environ.get(ENFORCE_FLAG, "").strip() == "1":
+        _fail("NORTHSTAR_AUTH_ENFORCE must remain disabled.")
+
+    uri = Path(PRODUCTION_DB_PATH).resolve().as_uri() + "?mode=ro"
+    live = sqlite3.connect(uri, uri=True)
     try:
-        names = {str(row[1]) for row in live.execute("PRAGMA table_info(users)").fetchall()}
-        sessions = live.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'staff_sessions'"
+        live.execute("PRAGMA query_only = ON")
+        row = live.execute(
+            "SELECT id, email, password_hash FROM users WHERE id = 1"
         ).fetchone()
+        if row is None:
+            _fail("Live user id 1 missing.")
+        if str(row[1] or "").strip() != "juliem@n-star.us":
+            _fail("Live user id 1 email is not juliem@n-star.us.")
+        if not str(row[2] or "").strip():
+            _fail("Julie password is not set.")
+
+        old_count = live.execute(
+            "SELECT COUNT(*) FROM users WHERE lower(email) = lower(?)",
+            ("julie.magnani@northstargroup.com",),
+        ).fetchone()[0]
+        if int(old_count) != 0:
+            _fail("Old Julie email still present in live users.")
+
+        new_count = live.execute(
+            "SELECT COUNT(*) FROM users WHERE lower(email) = lower(?)",
+            ("juliem@n-star.us",),
+        ).fetchone()[0]
+        if int(new_count) != 1:
+            _fail("Expected exactly one juliem@n-star.us user.")
+
+        user_count = live.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        if int(user_count) != 3:
+            _fail("Live user count is not 3.")
     finally:
         live.close()
-    if "password_hash" in names or sessions is not None:
-        _fail("Live northstar.db was migrated; Phase 1 must use isolated copies only.")
 
 
 def test_no_route_protection_middleware() -> None:
@@ -597,7 +630,7 @@ def main() -> int:
     test_csrf_and_unauthenticated_writes()
     test_lockout_and_reset()
     test_enforcement_fail_safe()
-    test_live_database_not_migrated()
+    test_live_database_email_cut_over()
     test_no_route_protection_middleware()
     print("test_staff_auth_phase1: ok")
     return 0

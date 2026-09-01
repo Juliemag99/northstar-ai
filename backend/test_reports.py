@@ -21,6 +21,7 @@ from campaigns_data import (
     create_operational_campaign,
     ensure_campaigns_schema,
 )
+from access import DEFAULT_USER_EMAIL
 from db import get_connection
 from models import CampaignCreateRequest, CampaignMemberAddRequest
 
@@ -292,7 +293,8 @@ def main() -> None:
         flora_before = _snapshot_flora(conn)
         whirlpool_before = _snapshot_whirlpool(conn)
         julie = conn.execute(
-            "SELECT id FROM users WHERE email = 'julie.magnani@northstargroup.com'"
+            "SELECT id FROM users WHERE lower(email) = lower(?)",
+            (DEFAULT_USER_EMAIL,),
         ).fetchone()
         if julie is None:
             _fail("Julie Magnani user not found.")

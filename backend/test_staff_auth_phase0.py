@@ -83,6 +83,16 @@ def _copy_production_isolated() -> tuple[sqlite3.Connection, str]:
     finally:
         src.close()
     conn = get_connection(Path(name))
+    conn.execute(
+        """
+        UPDATE users
+        SET email = ?
+        WHERE id = 1
+          AND lower(trim(COALESCE(email, ''))) != lower(?)
+        """,
+        (DEFAULT_USER_EMAIL, DEFAULT_USER_EMAIL),
+    )
+    conn.commit()
     return conn, name
 
 
@@ -103,10 +113,10 @@ def test_unauthenticated_app_unchanged() -> None:
     user = get_default_user()
     if user is None:
         _fail("Default user should still resolve without login.")
+    if user.id != 1:
+        _fail("Default user must remain user id 1.")
     if user.email.lower() != DEFAULT_USER_EMAIL:
         _fail(f"Default user drifted: {user.email}")
-    if user.is_administrator:
-        _fail("Julie must remain non-administrator until a later bootstrap on live data.")
 
     health_code, health = testdb.http_json("GET", "/health")
     if health_code != 200:
@@ -552,17 +562,43 @@ def test_bootstrap_protections() -> None:
             os.environ[PASSWORD_ENV] = previous_pw
 
 
-def test_live_database_not_migrated() -> None:
-    live = sqlite3.connect(str(PRODUCTION_DB_PATH))
+def test_live_database_email_cut_over() -> None:
+    if os.environ.get("NORTHSTAR_AUTH_ENFORCE", "").strip() == "1":
+        _fail("NORTHSTAR_AUTH_ENFORCE must remain disabled.")
+
+    uri = Path(PRODUCTION_DB_PATH).resolve().as_uri() + "?mode=ro"
+    live = sqlite3.connect(uri, uri=True)
     try:
-        names = {str(row[1]) for row in live.execute("PRAGMA table_info(users)").fetchall()}
-        sessions = live.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'staff_sessions'"
+        live.execute("PRAGMA query_only = ON")
+        row = live.execute(
+            "SELECT id, email, password_hash FROM users WHERE id = 1"
         ).fetchone()
+        if row is None:
+            _fail("Live user id 1 missing.")
+        if str(row[1] or "").strip() != "juliem@n-star.us":
+            _fail("Live user id 1 email is not juliem@n-star.us.")
+        if not str(row[2] or "").strip():
+            _fail("Julie password is not set.")
+
+        old_count = live.execute(
+            "SELECT COUNT(*) FROM users WHERE lower(email) = lower(?)",
+            ("julie.magnani@northstargroup.com",),
+        ).fetchone()[0]
+        if int(old_count) != 0:
+            _fail("Old Julie email still present in live users.")
+
+        new_count = live.execute(
+            "SELECT COUNT(*) FROM users WHERE lower(email) = lower(?)",
+            ("juliem@n-star.us",),
+        ).fetchone()[0]
+        if int(new_count) != 1:
+            _fail("Expected exactly one juliem@n-star.us user.")
+
+        user_count = live.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        if int(user_count) != 3:
+            _fail("Live user count is not 3.")
     finally:
         live.close()
-    if "password_hash" in names or sessions is not None:
-        _fail("Live northstar.db was migrated; Phase 0 must use isolated copies only.")
 
 
 def main() -> int:
@@ -572,7 +608,7 @@ def main() -> int:
     test_sessions()
     test_bootstrap()
     test_bootstrap_protections()
-    test_live_database_not_migrated()
+    test_live_database_email_cut_over()
     print("test_staff_auth_phase0: ok")
     return 0
 

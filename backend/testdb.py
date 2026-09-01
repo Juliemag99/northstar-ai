@@ -9,12 +9,30 @@ from __future__ import annotations
 
 from typing import Any
 
-from db import ensure_zoominfo_columns, get_connection, isolate_for_tests, migrate_schema
+from db import (
+    DEFAULT_USER_EMAIL,
+    ensure_zoominfo_columns,
+    get_connection,
+    isolate_for_tests,
+    migrate_schema,
+)
 
 isolate_for_tests()
 with get_connection() as conn:
     ensure_zoominfo_columns(conn)
     migrate_schema(conn)
+    # Isolated copies of live data still have the pre-cutover email. Align id 1
+    # to the canonical staff email so default-user lookups match application code.
+    conn.execute(
+        """
+        UPDATE users
+        SET email = ?
+        WHERE id = 1
+          AND lower(trim(COALESCE(email, ''))) != lower(?)
+        """,
+        (DEFAULT_USER_EMAIL, DEFAULT_USER_EMAIL),
+    )
+    conn.commit()
 
 _client = None
 

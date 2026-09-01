@@ -9,15 +9,13 @@ Architecture rules:
 
 from __future__ import annotations
 
-from db import DB_PATH, get_connection
+from db import DB_PATH, DEFAULT_USER_EMAIL, get_connection
 from models import (
     ClientAssignment,
     ClientCompanyWorkItem,
     DashboardScopeSummary,
     NorthStarUser,
 )
-
-DEFAULT_USER_EMAIL = "julie.magnani@northstargroup.com"
 
 
 def _blank(value: object | None) -> str:

@@ -16,6 +16,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from db import DEFAULT_USER_EMAIL
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATABASE_DIR = REPO_ROOT / "database"
 DB_PATH = DATABASE_DIR / "northstar.db"
@@ -573,7 +575,8 @@ def run_import() -> ImportReport:
 
     # Assign Julie to Brown
     julie = conn.execute(
-        "SELECT id FROM users WHERE email = 'julie.magnani@northstargroup.com'"
+        "SELECT id FROM users WHERE lower(email) = lower(?)",
+        (DEFAULT_USER_EMAIL,),
     ).fetchone()
     if julie:
         conn.execute(

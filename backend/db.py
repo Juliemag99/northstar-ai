@@ -12,6 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DATABASE_DIR = REPO_ROOT / "database"
 PRODUCTION_DB_PATH = DATABASE_DIR / "northstar.db"
 SCHEMA_PATH = DATABASE_DIR / "schema.sql"
+DEFAULT_USER_EMAIL = "juliem@n-star.us"
 
 
 class _DatabasePath:
@@ -362,12 +363,16 @@ def seed_default_users(conn: sqlite3.Connection) -> None:
     if not _table_exists(conn, "users") or not _table_exists(conn, "clients"):
         return
 
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO users (email, full_name, is_administrator, active)
-        VALUES ('julie.magnani@northstargroup.com', 'Julie Magnani', 0, 1)
-        """
-    )
+    # Never insert a second Julie. Live id 1 is the staff account even before
+    # the email cutover; a missing id 1 is a fresh empty database.
+    if conn.execute("SELECT 1 FROM users WHERE id = 1").fetchone() is None:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO users (email, full_name, is_administrator, active)
+            VALUES (?, 'Julie Magnani', 0, 1)
+            """,
+            (DEFAULT_USER_EMAIL,),
+        )
     # NorthStar management user for All Clients / cross-client authorization tests
     conn.execute(
         """
@@ -375,10 +380,12 @@ def seed_default_users(conn: sqlite3.Connection) -> None:
         VALUES ('admin@northstargroup.com', 'NorthStar Admin', 1, 1)
         """
     )
-    user = conn.execute(
-        "SELECT id FROM users WHERE email = ?",
-        ("julie.magnani@northstargroup.com",),
-    ).fetchone()
+    user = conn.execute("SELECT id FROM users WHERE id = 1").fetchone()
+    if user is None:
+        user = conn.execute(
+            "SELECT id FROM users WHERE lower(email) = lower(?)",
+            (DEFAULT_USER_EMAIL,),
+        ).fetchone()
     if user is None:
         conn.commit()
         return

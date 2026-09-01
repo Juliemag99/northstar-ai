@@ -28,9 +28,9 @@ from pathlib import Path
 
 from auth_passwords import hash_password, password_issue
 from auth_sessions import ensure_staff_auth_schema, revoke_staff_sessions_for_user
-from db import PRODUCTION_DB_PATH, get_connection
+from db import DEFAULT_USER_EMAIL, PRODUCTION_DB_PATH, get_connection
 
-FIRST_ADMIN_EMAIL = "julie.magnani@northstargroup.com"
+FIRST_ADMIN_EMAIL = DEFAULT_USER_EMAIL
 FIRST_ADMIN_NAME = "Julie Magnani"
 ALLOW_FLAG = "NORTHSTAR_ALLOW_ADMIN_BOOTSTRAP"
 PASSWORD_ENV = "NORTHSTAR_BOOTSTRAP_PASSWORD"
