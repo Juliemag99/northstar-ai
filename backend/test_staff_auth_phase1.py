@@ -535,11 +535,13 @@ def test_enforcement_fail_safe() -> None:
 
         os.environ[ENFORCE_FLAG] = "1"
         users = testdb.http_json("GET", "/api/users/default")
-        if users[0] != 200:
-            _fail("Checkpoint A must not 401-protect routes when the flag is on.")
+        if users[0] != 401:
+            _fail("Protected routes must 401 when enforcement is active.")
+        if users[1].get("detail") != "Authentication required.":
+            _fail("Protected 401 detail must stay generic.")
         me = testdb.http_json("GET", "/api/auth/me")
         if me[0] != 200 or me[1].get("authenticated") is not False:
-            _fail("Unauthenticated /me must still work in Checkpoint A.")
+            _fail("Unauthenticated /me must still work when enforcement is on.")
         if me[1].get("auth_enforced") is not True:
             _fail("/me should report auth_enforced true when fail-safe is active.")
         if me[1].get("auth_available") is not True:
@@ -611,14 +613,14 @@ def test_live_database_email_cut_over() -> None:
         live.close()
 
 
-def test_no_route_protection_middleware() -> None:
+def test_no_enforce_flag_in_main() -> None:
     from pathlib import Path
 
     main_src = Path(__file__).with_name("main.py").read_text(encoding="utf-8")
-    if "Authentication required." in main_src:
-        _fail("Global 401 route protection must wait for Checkpoint B.")
     if "AUTH_ENFORCE" in main_src:
         _fail("AUTH_ENFORCE must not be wired in main.py.")
+    if "Authentication required." in main_src:
+        _fail("Protected 401 detail must live in auth_http, not main.py.")
 
 
 def main() -> int:
@@ -631,7 +633,7 @@ def main() -> int:
     test_lockout_and_reset()
     test_enforcement_fail_safe()
     test_live_database_email_cut_over()
-    test_no_route_protection_middleware()
+    test_no_enforce_flag_in_main()
     print("test_staff_auth_phase1: ok")
     return 0
 

@@ -361,7 +361,8 @@ app = FastAPI(
     description="NorthStar AI Revenue Development Platform — multi-client",
 )
 
-# CSRF is inner so CORS can still label 403s. No 401 route gate (Checkpoint B).
+# CORS is outermost. CSRF then staff-session enforcement wrap routes.
+# CSRF stays inside CORS so 403s keep CORS labels.
 add_staff_csrf_middleware(app)
 app.include_router(staff_auth_router)
 

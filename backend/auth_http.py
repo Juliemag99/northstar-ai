@@ -1,7 +1,7 @@
-"""Phase 1 Checkpoint A — staff login, logout, and current-user HTTP.
+"""Staff login, logout, current-user HTTP, CSRF, and optional 401 enforcement.
 
-Optional authentication. NORTHSTAR_AUTH_ENFORCE fail-safe lives here; global
-401 route protection is Checkpoint B and is not installed yet.
+Optional authentication. NORTHSTAR_AUTH_ENFORCE fail-safe lives here: the flag
+activates route protection only when Julie has a password hash.
 
 CSRF: when a valid northstar_session cookie is present, mutating requests
 must send X-CSRF-Token matching the session csrf_secret. Unauthenticated
@@ -37,11 +37,21 @@ ENFORCE_FLAG = "NORTHSTAR_AUTH_ENFORCE"
 SESSION_COOKIE = "northstar_session"
 CSRF_HEADER = "X-CSRF-Token"
 LOGIN_FAILED_DETAIL = "Invalid email or password."
+AUTH_REQUIRED_DETAIL = "Authentication required."
 CSRF_FAILED_DETAIL = "CSRF token missing or invalid."
 LOCKOUT_THRESHOLD = 5
 LOCKOUT_MINUTES = 15
 WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 LOGIN_PATH = "/api/auth/login"
+UNAUTHENTICATED_EXACT = frozenset(
+    {
+        ("POST", "/api/auth/login"),
+        ("GET", "/api/auth/me"),
+        ("POST", "/api/auth/logout"),
+        ("GET", "/api/email/google/callback"),
+        ("GET", "/health"),
+    }
+)
 
 staff_auth_router = APIRouter(tags=["auth"])
 
@@ -154,11 +164,15 @@ def default_user_password_available() -> bool:
 def auth_enforcement_active() -> bool:
     """True only when the env flag is 1 and Julie has a password hash.
 
-    Defaults off. Does not install route protection (Checkpoint B).
+    Defaults off. A missing or unreadable password hash cannot activate
+    enforcement. Session-lookup failures while this is True fail closed.
     """
     if os.environ.get(ENFORCE_FLAG, "").strip() != "1":
         return False
-    return default_user_password_available()
+    try:
+        return default_user_password_available()
+    except Exception:
+        return False
 
 
 def _auth_state() -> dict[str, bool]:
@@ -245,6 +259,24 @@ def _login_failed() -> NoReturn:
     raise HTTPException(status_code=401, detail=LOGIN_FAILED_DETAIL)
 
 
+def _unauthenticated_allowed(method: str, path: str) -> bool:
+    if method == "OPTIONS":
+        return True
+    return (method, path) in UNAUTHENTICATED_EXACT
+
+
+def _valid_active_staff_session(request: Request) -> bool:
+    session = lookup_request_session(request, touch=False)
+    if session is None:
+        return False
+    user = get_user_by_id(int(session["user_id"]))
+    return user is not None and bool(user.active)
+
+
+def _auth_required_response() -> JSONResponse:
+    return JSONResponse(status_code=401, content={"detail": AUTH_REQUIRED_DETAIL})
+
+
 class StaffCsrfMiddleware(BaseHTTPMiddleware):
     """Require X-CSRF-Token on writes only when a valid staff session exists."""
 
@@ -265,7 +297,28 @@ class StaffCsrfMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+class StaffAuthEnforceMiddleware(BaseHTTPMiddleware):
+    """401-protect routes only when auth_enforcement_active() is true."""
+
+    async def dispatch(self, request: Request, call_next):
+        if not auth_enforcement_active():
+            return await call_next(request)
+        method = request.method.upper()
+        path = request.url.path
+        if _unauthenticated_allowed(method, path):
+            return await call_next(request)
+        try:
+            if _valid_active_staff_session(request):
+                return await call_next(request)
+        except Exception:
+            return _auth_required_response()
+        return _auth_required_response()
+
+
 def add_staff_csrf_middleware(app) -> None:
+    # Add order is inner-first: last added runs first. main.py then wraps CORS
+    # outermost, so the request stack is CORS → CSRF → enforcement → routes.
+    app.add_middleware(StaffAuthEnforceMiddleware)
     app.add_middleware(StaffCsrfMiddleware)
 
 
