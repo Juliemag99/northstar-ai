@@ -3041,3 +3041,57 @@ class ZoomInfoAddResult(BaseModel):
     client_id: int
     external_record_no: str = ""
     activity_id: int | None = None
+
+
+class CrmImportRowView(BaseModel):
+    row_id: int = 0
+    source_row_number: int
+    values: dict[str, str] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+    has_blocking_error: bool = False
+
+
+class CrmImportBatchView(BaseModel):
+    batch_id: int
+    client_id: int
+    status: str
+    original_filename: str = ""
+    file_type: str = ""
+    worksheet_name: str = ""
+    file_size_bytes: int = 0
+    sha256: str = ""
+    headers: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    error_message: str = ""
+    total_rows: int = 0
+    source_row_count: int = 0
+    blank_row_count: int = 0
+    error_row_count: int = 0
+    reusable: bool = False
+    expires_at: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    cancelled_at: str = ""
+    uploaded_by_user_id: int | None = None
+    uploaded_by_name: str = ""
+    sample_rows: list[CrmImportRowView] = Field(default_factory=list)
+
+
+class CrmImportUploadResult(BaseModel):
+    kind: str
+    needs_worksheet: bool = False
+    visible_sheets: list[str] = Field(default_factory=list)
+    filename: str = ""
+    file_type: str = ""
+    message: str = ""
+    batch: CrmImportBatchView | None = None
+
+
+class CrmImportRowsPage(BaseModel):
+    batch_id: int
+    client_id: int
+    offset: int
+    limit: int
+    total: int
+    rows: list[CrmImportRowView] = Field(default_factory=list)

@@ -3782,6 +3782,47 @@ a.primary-btn:hover {
   margin: 0;
 }
 
+.administration-import-controls {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0.85rem 0 1rem;
+}
+
+.administration-import-preview h3 {
+  margin: 1rem 0 0.5rem;
+  font-size: 1rem;
+}
+
+.administration-import-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 0.45rem 1rem;
+  margin: 0 0 0.85rem;
+}
+
+.administration-import-meta div {
+  margin: 0;
+}
+
+.administration-import-meta dt {
+  font-size: 0.78rem;
+  color: var(--muted, #5b6573);
+}
+
+.administration-import-meta dd {
+  margin: 0.1rem 0 0;
+}
+
+.administration-import-warnings {
+  margin: 0 0 0.85rem;
+  padding-left: 1.2rem;
+}
+
+.administration-import-table {
+  max-height: 28rem;
+  overflow: auto;
+}
+
 .login-page {
   min-height: 100vh;
   display: grid;

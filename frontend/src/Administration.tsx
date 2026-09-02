@@ -14,6 +14,7 @@ import {
 } from './emailConnectionStatus'
 import { useAuth } from './auth/useAuth'
 import { staffCanAdminister } from './auth/staffCanAdminister'
+import AdministrationImport from './AdministrationImport'
 
 type AssignedClient = {
   client_id: number
@@ -79,6 +80,7 @@ export default function Administration({
     null,
   )
   const loadGen = useRef(0)
+  const [adminTab, setAdminTab] = useState<'email' | 'import'>('email')
 
   const allMyClients = activeClientId == null || activeClientId <= 0
   const connectClientId = allMyClients ? scopedClientId : activeClientId
@@ -218,6 +220,47 @@ export default function Administration({
         <p>Manage NorthStar email connections. Gmail OAuth does not store passwords.</p>
       </div>
 
+      <div className="setup-campaign-tabs" role="tablist" aria-label="Administration sections">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={adminTab === 'email'}
+          className={
+            adminTab === 'email'
+              ? 'setup-campaign-tab setup-campaign-tab--active'
+              : 'setup-campaign-tab'
+          }
+          onClick={() => setAdminTab('email')}
+        >
+          Email Connections
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={adminTab === 'import'}
+          className={
+            adminTab === 'import'
+              ? 'setup-campaign-tab setup-campaign-tab--active'
+              : 'setup-campaign-tab'
+          }
+          onClick={() => setAdminTab('import')}
+        >
+          Company & contact import
+        </button>
+      </div>
+
+      {adminTab === 'import' ? (
+        <AdministrationImport
+          allMyClients={allMyClients}
+          connectClientId={canConnect ? connectClientId : 0}
+          scopedClientId={scopedClientId}
+          availableClients={availableClients}
+          onScopedClientId={setScopedClientId}
+          clientName={scopedClientName}
+        />
+      ) : null}
+
+      {adminTab === 'email' ? (
       <section className="administration-section" aria-labelledby="email-connections-heading">
         <h2 id="email-connections-heading">Email Connections</h2>
         <p className="queue-sub">
@@ -335,6 +378,7 @@ export default function Administration({
           </div>
         ) : null}
       </section>
+      ) : null}
     </div>
   )
 }

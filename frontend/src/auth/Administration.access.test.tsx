@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import Administration from '../Administration'
@@ -71,5 +71,9 @@ describe('Administration access', () => {
   it('renders Administration for an authenticated administrator', () => {
     renderAdmin(authValue({ authenticated: true, user: adminUser }))
     expect(screen.getByRole('heading', { name: 'Administration' })).toBeTruthy()
+    expect(screen.getByRole('tab', { name: 'Company & contact import' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('tab', { name: 'Company & contact import' }))
+    expect(screen.getByRole('heading', { name: 'Company & contact import' })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'Email Connections' })).toBeNull()
   })
 })

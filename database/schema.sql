@@ -813,6 +813,52 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_appointments_idempotency
     ON appointments(client_id, idempotency_key)
     WHERE TRIM(idempotency_key) != '';
 
+-- Administrator company/contact import staging (Checkpoint B). Preview only.
+CREATE TABLE IF NOT EXISTS crm_import_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id INTEGER NOT NULL,
+    uploaded_by_user_id INTEGER,
+    uploaded_by_name TEXT NOT NULL DEFAULT '',
+    original_filename TEXT NOT NULL DEFAULT '',
+    file_type TEXT NOT NULL DEFAULT '',
+    worksheet_name TEXT NOT NULL DEFAULT '',
+    file_size_bytes INTEGER NOT NULL DEFAULT 0,
+    sha256 TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'previewed',
+    error_message TEXT NOT NULL DEFAULT '',
+    headers_json TEXT NOT NULL DEFAULT '[]',
+    warnings_json TEXT NOT NULL DEFAULT '[]',
+    total_rows INTEGER NOT NULL DEFAULT 0,
+    source_row_count INTEGER NOT NULL DEFAULT 0,
+    blank_row_count INTEGER NOT NULL DEFAULT 0,
+    error_row_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT '',
+    cancelled_at TEXT NOT NULL DEFAULT '',
+    expires_at TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE,
+    FOREIGN KEY (uploaded_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS crm_import_rows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL,
+    client_id INTEGER NOT NULL,
+    source_row_number INTEGER NOT NULL DEFAULT 0,
+    raw_json TEXT NOT NULL DEFAULT '{}',
+    warnings_json TEXT NOT NULL DEFAULT '[]',
+    errors_json TEXT NOT NULL DEFAULT '[]',
+    is_blank INTEGER NOT NULL DEFAULT 0,
+    has_blocking_error INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (batch_id) REFERENCES crm_import_batches(id) ON DELETE CASCADE,
+    FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_crm_import_rows_batch
+    ON crm_import_rows(batch_id, source_row_number);
+CREATE INDEX IF NOT EXISTS idx_crm_import_batches_client
+    ON crm_import_batches(client_id, status, expires_at);
+
 -- Full-text search index for companies, contacts, legacy notes, and activities
 CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
     doc_type,

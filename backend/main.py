@@ -117,6 +117,8 @@ from models import (
     ClientEmailSignatureUpdate,
     ClientEmailSignatureView,
     ClientEmailTemplateUpdate,
+    CrmImportRowsPage,
+    CrmImportUploadResult,
     ClientEmailTemplateView,
     ClientExtractionBulkRejectRequest,
     ClientExtractionBulkResolveRequest,
@@ -307,6 +309,15 @@ from gmail_oauth import (
     complete_google_callback,
     disconnect_google_account,
     oauth_status,
+)
+from crm_import_staging import (
+    BatchNotReusable,
+    CLIENT_REQUIRED,
+    MAX_FILE_BYTES,
+    cancel_crm_import,
+    get_crm_import_batch,
+    list_crm_import_rows,
+    upload_crm_import,
 )
 from gmail_send import send_client_email
 from fastapi.responses import RedirectResponse
@@ -2448,6 +2459,88 @@ def preview_client_email_api(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _require_admin_client(request: Request, client_id: int):
+    actor = require_administrator(request)
+    if client_id <= 0:
+        raise HTTPException(status_code=400, detail=CLIENT_REQUIRED)
+    require_client_access(request, client_id)
+    return actor
+
+
+@app.post(
+    "/api/clients/{client_id}/admin/imports",
+    response_model=CrmImportUploadResult,
+)
+async def upload_admin_crm_import_api(
+    client_id: int,
+    request: Request,
+    file: UploadFile = File(...),
+    worksheet: str = Form(default=""),
+):
+    actor = _require_admin_client(request, client_id)
+    content = await file.read(MAX_FILE_BYTES + 1)
+    if len(content) > MAX_FILE_BYTES:
+        raise HTTPException(status_code=400, detail="This file is too large to upload.")
+    try:
+        return upload_crm_import(
+            client_id=client_id,
+            actor=actor,
+            filename=file.filename or "upload.csv",
+            content=content,
+            worksheet=worksheet or "",
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/clients/{client_id}/admin/imports/{batch_id}")
+def get_admin_crm_import_api(client_id: int, batch_id: int, request: Request):
+    _require_admin_client(request, client_id)
+    try:
+        return get_crm_import_batch(client_id, batch_id, include_sample=True)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get(
+    "/api/clients/{client_id}/admin/imports/{batch_id}/rows",
+    response_model=CrmImportRowsPage,
+)
+def list_admin_crm_import_rows_api(
+    client_id: int,
+    batch_id: int,
+    request: Request,
+    offset: int = 0,
+    limit: int = 25,
+):
+    _require_admin_client(request, client_id)
+    try:
+        return list_crm_import_rows(client_id, batch_id, offset=offset, limit=limit)
+    except BatchNotReusable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.delete("/api/clients/{client_id}/admin/imports/{batch_id}")
+def cancel_admin_crm_import_api(client_id: int, batch_id: int, request: Request):
+    actor = _require_admin_client(request, client_id)
+    try:
+        return cancel_crm_import(client_id, batch_id, actor=actor)
+    except BatchNotReusable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.put(

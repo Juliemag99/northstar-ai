@@ -469,6 +469,9 @@ def ensure_schema(db_path: Path | None = None) -> None:
         from campaigns_data import ensure_campaigns_schema
 
         ensure_campaigns_schema(conn)
+        from crm_import_staging import ensure_crm_import_schema
+
+        ensure_crm_import_schema(conn)
 
     # Build/refresh FTS index after schema is ready
     from search_data import rebuild_search_index
