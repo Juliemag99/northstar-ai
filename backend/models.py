@@ -3102,3 +3102,93 @@ class CrmImportRowsPage(BaseModel):
     limit: int
     total: int
     rows: list[CrmImportRowView] = Field(default_factory=list)
+
+
+class CrmImportDryRunRequest(BaseModel):
+    offset: int = 0
+    limit: int = 100
+
+
+class CrmImportDryRunCompanyPossible(BaseModel):
+    company_id: int
+    company_name: str = ""
+    external_record_no: str = ""
+    reasons: list[str] = Field(default_factory=list)
+
+
+class CrmImportDryRunContactPossible(BaseModel):
+    contact_id: int
+    display_name: str = ""
+    reasons: list[str] = Field(default_factory=list)
+
+
+class CrmImportDryRunCompanyPlan(BaseModel):
+    action: str = "none"
+    reasons: list[str] = Field(default_factory=list)
+    company_id: int | None = None
+    proposed_key: str | None = None
+    created_at_source_row: int | None = None
+    name: str = ""
+    possibles: list[CrmImportDryRunCompanyPossible] = Field(default_factory=list)
+
+
+class CrmImportDryRunContactPlan(BaseModel):
+    action: str = "none"
+    reasons: list[str] = Field(default_factory=list)
+    contact_id: int | None = None
+    proposed_key: str | None = None
+    created_at_source_row: int | None = None
+    display_name: str = ""
+    possibles: list[CrmImportDryRunContactPossible] = Field(default_factory=list)
+
+
+class CrmImportDryRunRelationshipPlan(BaseModel):
+    action: str = "none"
+    relationship_id: int | None = None
+    proposed_key: str | None = None
+
+
+class CrmImportDryRunRow(BaseModel):
+    row_id: int
+    source_row_number: int
+    validity: str
+    validity_detail: str = ""
+    mapped: dict[str, str] = Field(default_factory=dict)
+    company: CrmImportDryRunCompanyPlan = Field(default_factory=CrmImportDryRunCompanyPlan)
+    contact: CrmImportDryRunContactPlan = Field(default_factory=CrmImportDryRunContactPlan)
+    relationship: CrmImportDryRunRelationshipPlan = Field(
+        default_factory=CrmImportDryRunRelationshipPlan
+    )
+
+
+class CrmImportDryRunCounts(BaseModel):
+    blocking_error: int = 0
+    invalid_mapping_data: int = 0
+    ok: int = 0
+    create_company: int = 0
+    use_existing_company: int = 0
+    possible_company_match: int = 0
+    create_contact: int = 0
+    use_existing_contact: int = 0
+    possible_contact_match: int = 0
+    insufficient_contact_data: int = 0
+    no_contact_data: int = 0
+    contact_deferred: int = 0
+    create_client_relationship: int = 0
+    relationship_already_exists: int = 0
+    relationship_deferred: int = 0
+    importable_rows: int = 0
+    needs_review_rows: int = 0
+
+
+class CrmImportDryRunResponse(BaseModel):
+    batch_id: int
+    client_id: int
+    planner_version: str
+    plan_fingerprint: str
+    mapping_updated_at: str = ""
+    total_rows: int
+    offset: int
+    limit: int
+    counts: CrmImportDryRunCounts = Field(default_factory=CrmImportDryRunCounts)
+    rows: list[CrmImportDryRunRow] = Field(default_factory=list)

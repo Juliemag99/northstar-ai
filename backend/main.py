@@ -118,6 +118,8 @@ from models import (
     ClientEmailSignatureView,
     ClientEmailTemplateUpdate,
     CrmImportBatchView,
+    CrmImportDryRunRequest,
+    CrmImportDryRunResponse,
     CrmImportMappingRequest,
     CrmImportRowsPage,
     CrmImportUploadResult,
@@ -322,6 +324,7 @@ from crm_import_staging import (
     save_crm_import_mapping,
     upload_crm_import,
 )
+from crm_import_plan import dry_run_crm_import
 from gmail_send import send_client_email
 from fastapi.responses import RedirectResponse
 from extraction_review_bulk import (
@@ -2563,6 +2566,35 @@ def save_admin_crm_import_mapping_api(
             batch_id,
             actor=actor,
             mapping=body.mapping,
+        )
+    except BatchNotReusable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post(
+    "/api/clients/{client_id}/admin/imports/{batch_id}/dry-run",
+    response_model=CrmImportDryRunResponse,
+)
+def dry_run_admin_crm_import_api(
+    client_id: int,
+    batch_id: int,
+    request: Request,
+    body: CrmImportDryRunRequest | None = None,
+):
+    _require_admin_client(request, client_id)
+    req = body or CrmImportDryRunRequest()
+    try:
+        return dry_run_crm_import(
+            client_id,
+            batch_id,
+            offset=req.offset,
+            limit=req.limit,
         )
     except BatchNotReusable as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
