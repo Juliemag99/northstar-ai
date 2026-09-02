@@ -88,6 +88,11 @@ _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("source", "TEXT NOT NULL DEFAULT ''"),
         ("source_updated_at", "TEXT NOT NULL DEFAULT ''"),
     ],
+    "crm_import_batches": [
+        ("mapping_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("mapping_updated_at", "TEXT NOT NULL DEFAULT ''"),
+        ("mapping_updated_by_user_id", "INTEGER"),
+    ],
 }
 
 

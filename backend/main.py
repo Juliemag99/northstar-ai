@@ -117,6 +117,8 @@ from models import (
     ClientEmailSignatureUpdate,
     ClientEmailSignatureView,
     ClientEmailTemplateUpdate,
+    CrmImportBatchView,
+    CrmImportMappingRequest,
     CrmImportRowsPage,
     CrmImportUploadResult,
     ClientEmailTemplateView,
@@ -317,6 +319,7 @@ from crm_import_staging import (
     cancel_crm_import,
     get_crm_import_batch,
     list_crm_import_rows,
+    save_crm_import_mapping,
     upload_crm_import,
 )
 from gmail_send import send_client_email
@@ -2541,6 +2544,34 @@ def cancel_admin_crm_import_api(client_id: int, batch_id: int, request: Request)
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.put(
+    "/api/clients/{client_id}/admin/imports/{batch_id}/mapping",
+    response_model=CrmImportBatchView,
+)
+def save_admin_crm_import_mapping_api(
+    client_id: int,
+    batch_id: int,
+    body: CrmImportMappingRequest,
+    request: Request,
+):
+    actor = _require_admin_client(request, client_id)
+    try:
+        return save_crm_import_mapping(
+            client_id,
+            batch_id,
+            actor=actor,
+            mapping=body.mapping,
+        )
+    except BatchNotReusable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.put(

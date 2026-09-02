@@ -65,6 +65,33 @@ NEED_WORKSHEET = "This workbook has multiple sheets. Choose one visible sheet to
 HIDDEN_SHEET = "Hidden worksheets cannot be imported. Choose a visible sheet."
 BATCH_NOT_REUSABLE = "This import batch can no longer be previewed."
 CLIENT_REQUIRED = "Choose a specific client before uploading."
+MAPPING_COMPANY_REQUIRED = "Map a Company name column before continuing."
+MAPPING_UNKNOWN_FIELD = "That destination field is not supported."
+MAPPING_HEADER_MISSING = "That source column is not in this spreadsheet."
+MAPPING_EMPTY_HEADER = "Each mapped column must have a name."
+MAPPING_DUPLICATE_HEADER = "Each source column can map to only one field."
+MAPPING_NAME_CONFLICT = (
+    "Use either a full name column or first and last name columns, not both."
+)
+MAPPING_NO_ROWS = "This import has no staged rows to map."
+
+CANONICAL_MAPPING_FIELDS = frozenset(
+    {
+        "company_name",
+        "website",
+        "phone",
+        "address",
+        "city",
+        "state",
+        "zip",
+        "contact_first_name",
+        "contact_last_name",
+        "contact_full_name",
+        "contact_title",
+        "contact_email",
+        "contact_phone",
+    }
+)
 
 
 class BatchNotReusable(ValueError):
@@ -136,6 +163,11 @@ def _json_dict(value: object) -> dict[str, str]:
     return {str(k): "" if v is None else str(v) for k, v in parsed.items()}
 
 
+def _json_mapping(value: object) -> dict[str, str]:
+    parsed = _json_dict(value)
+    return {str(k): str(v) for k, v in parsed.items() if str(k).strip() and str(v).strip()}
+
+
 def _is_formula_text(text: str) -> bool:
     stripped = text.lstrip()
     return stripped.startswith("=")
@@ -172,8 +204,12 @@ def ensure_crm_import_schema(conn=None) -> None:
                 updated_at TEXT NOT NULL DEFAULT '',
                 cancelled_at TEXT NOT NULL DEFAULT '',
                 expires_at TEXT NOT NULL DEFAULT '',
+                mapping_json TEXT NOT NULL DEFAULT '{}',
+                mapping_updated_at TEXT NOT NULL DEFAULT '',
+                mapping_updated_by_user_id INTEGER,
                 FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE,
-                FOREIGN KEY (uploaded_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+                FOREIGN KEY (uploaded_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+                FOREIGN KEY (mapping_updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL
             );
 
             CREATE TABLE IF NOT EXISTS crm_import_rows (
@@ -196,6 +232,17 @@ def ensure_crm_import_schema(conn=None) -> None:
                 ON crm_import_batches(client_id, status, expires_at);
             """
         )
+        existing = {
+            str(r["name"])
+            for r in conn.execute("PRAGMA table_info(crm_import_batches)").fetchall()
+        }
+        for name, declaration in (
+            ("mapping_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("mapping_updated_at", "TEXT NOT NULL DEFAULT ''"),
+            ("mapping_updated_by_user_id", "INTEGER"),
+        ):
+            if name not in existing:
+                conn.execute(f"ALTER TABLE crm_import_batches ADD COLUMN {name} {declaration}")
         if owns:
             conn.commit()
     finally:
@@ -580,6 +627,21 @@ def _batch_view(conn, row, *, include_sample: bool) -> CrmImportBatchView:
             else None
         ),
         uploaded_by_name=_blank(row["uploaded_by_name"]),
+        mapping=_json_mapping(
+            row["mapping_json"]
+            if reusable and "mapping_json" in row.keys()
+            else "{}"
+        )
+        if reusable
+        else {},
+        mapping_updated_at=_blank(row["mapping_updated_at"]) if "mapping_updated_at" in row.keys() else "",
+        mapping_updated_by_user_id=(
+            int(row["mapping_updated_by_user_id"])
+            if reusable
+            and "mapping_updated_by_user_id" in row.keys()
+            and row["mapping_updated_by_user_id"] is not None
+            else None
+        ),
         sample_rows=sample,
     )
 
@@ -807,3 +869,100 @@ def cancel_crm_import(client_id: int, batch_id: int, *, actor: NorthStarUser) ->
             (STATUS_CANCELLED, now, now, batch_id, client_id),
         )
     return get_crm_import_batch(client_id, batch_id, include_sample=False)
+
+
+def _exact_header(headers: list[str], submitted: str) -> str | None:
+    for header in headers:
+        if header == submitted:
+            return header
+    for header in headers:
+        if header.strip() == submitted:
+            return header
+    return None
+
+
+def _normalize_mapping(raw: dict[str, str], headers: list[str]) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        raise ValueError(MAPPING_UNKNOWN_FIELD)
+    normalized: dict[str, str] = {}
+    used_headers: dict[str, str] = {}
+    for dest_raw, src_raw in raw.items():
+        dest = _blank(dest_raw)
+        if dest not in CANONICAL_MAPPING_FIELDS:
+            raise ValueError(MAPPING_UNKNOWN_FIELD)
+        submitted = _blank(src_raw)
+        if not submitted:
+            raise ValueError(MAPPING_EMPTY_HEADER)
+        exact = _exact_header(headers, submitted)
+        if exact is None:
+            raise ValueError(MAPPING_HEADER_MISSING)
+        prior = used_headers.get(exact)
+        if prior and prior != dest:
+            raise ValueError(MAPPING_DUPLICATE_HEADER)
+        used_headers[exact] = dest
+        normalized[dest] = exact
+    if "company_name" not in normalized:
+        raise ValueError(MAPPING_COMPANY_REQUIRED)
+    if "contact_full_name" in normalized and (
+        "contact_first_name" in normalized or "contact_last_name" in normalized
+    ):
+        raise ValueError(MAPPING_NAME_CONFLICT)
+    return normalized
+
+
+def save_crm_import_mapping(
+    client_id: int,
+    batch_id: int,
+    *,
+    actor: NorthStarUser,
+    mapping: dict[str, str],
+) -> CrmImportBatchView:
+    if actor is None or not bool(actor.active) or not bool(actor.is_administrator):
+        raise PermissionError("Not authorized.")
+    from db import get_connection
+
+    now = _iso(_now())
+    with get_connection() as conn:
+        ensure_crm_import_schema(conn)
+        purge_expired_staging_rows(conn)
+        row = _load_batch_row(conn, client_id, batch_id)
+        if row is None:
+            raise LookupError("Import batch not found.")
+        if _blank(row["status"]) != USABLE_STATUS:
+            raise BatchNotReusable(BATCH_NOT_REUSABLE)
+        remaining = int(
+            conn.execute(
+                "SELECT COUNT(*) AS n FROM crm_import_rows WHERE batch_id = ? AND client_id = ?",
+                (batch_id, client_id),
+            ).fetchone()["n"]
+        )
+        if remaining <= 0:
+            raise BatchNotReusable(MAPPING_NO_ROWS)
+        headers = _json_list(row["headers_json"])
+        normalized = _normalize_mapping(mapping or {}, headers)
+        log.info(
+            "crm import mapping client_id=%s batch_id=%s fields=%s",
+            client_id,
+            batch_id,
+            ",".join(sorted(normalized)),
+        )
+        conn.execute(
+            """
+            UPDATE crm_import_batches SET
+                mapping_json = ?,
+                mapping_updated_at = ?,
+                mapping_updated_by_user_id = ?,
+                updated_at = ?
+            WHERE id = ? AND client_id = ?
+            """,
+            (
+                json.dumps(normalized, separators=(",", ":")),
+                now,
+                int(actor.id),
+                now,
+                batch_id,
+                client_id,
+            ),
+        )
+    return get_crm_import_batch(client_id, batch_id, include_sample=True)
+

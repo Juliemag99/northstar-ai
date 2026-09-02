@@ -3075,7 +3075,14 @@ class CrmImportBatchView(BaseModel):
     cancelled_at: str = ""
     uploaded_by_user_id: int | None = None
     uploaded_by_name: str = ""
+    mapping: dict[str, str] = Field(default_factory=dict)
+    mapping_updated_at: str = ""
+    mapping_updated_by_user_id: int | None = None
     sample_rows: list[CrmImportRowView] = Field(default_factory=list)
+
+
+class CrmImportMappingRequest(BaseModel):
+    mapping: dict[str, str] = Field(default_factory=dict)
 
 
 class CrmImportUploadResult(BaseModel):

@@ -836,8 +836,12 @@ CREATE TABLE IF NOT EXISTS crm_import_batches (
     updated_at TEXT NOT NULL DEFAULT '',
     cancelled_at TEXT NOT NULL DEFAULT '',
     expires_at TEXT NOT NULL DEFAULT '',
+    mapping_json TEXT NOT NULL DEFAULT '{}',
+    mapping_updated_at TEXT NOT NULL DEFAULT '',
+    mapping_updated_by_user_id INTEGER,
     FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE,
-    FOREIGN KEY (uploaded_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+    FOREIGN KEY (uploaded_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (mapping_updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS crm_import_rows (

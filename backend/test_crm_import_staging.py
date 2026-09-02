@@ -33,6 +33,13 @@ from crm_import_staging import (
     CLIENT_REQUIRED,
     EXTRA_SOURCE_COLUMNS,
     FILE_TOO_LARGE,
+    MAPPING_COMPANY_REQUIRED,
+    MAPPING_DUPLICATE_HEADER,
+    MAPPING_EMPTY_HEADER,
+    MAPPING_HEADER_MISSING,
+    MAPPING_NAME_CONFLICT,
+    MAPPING_NO_ROWS,
+    MAPPING_UNKNOWN_FIELD,
     MAX_CELL_CHARS,
     MAX_COLUMNS,
     NEED_WORKSHEET,
@@ -48,6 +55,7 @@ from main import app
 UPLOAD = "/api/clients/{client_id}/admin/imports"
 BATCH = "/api/clients/{client_id}/admin/imports/{batch_id}"
 ROWS = "/api/clients/{client_id}/admin/imports/{batch_id}/rows"
+MAPPING = "/api/clients/{client_id}/admin/imports/{batch_id}/mapping"
 
 CRM_TABLES = (
     "companies",
@@ -216,6 +224,28 @@ def _xlsx_bytes(
     bio = io.BytesIO()
     wb.save(bio)
     return bio.getvalue()
+
+
+def _row_fingerprint(batch_id: int) -> tuple[int, int, int]:
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS n,
+                   COALESCE(SUM(length(raw_json)), 0) AS bytes,
+                   COALESCE(SUM(source_row_number), 0) AS nums
+            FROM crm_import_rows WHERE batch_id = ?
+            """,
+            (batch_id,),
+        ).fetchone()
+    return int(row["n"]), int(row["bytes"]), int(row["nums"])
+
+
+def _mapping_columns() -> set[str]:
+    with get_connection() as conn:
+        ensure_crm_import_schema(conn)
+        names = {str(r["name"]) for r in conn.execute("PRAGMA table_info(crm_import_batches)")}
+        conn.commit()
+    return names
 
 
 def _upload(http: TestClient, client_id: int, csrf: str, filename: str, content: bytes, worksheet: str = ""):
@@ -687,6 +717,218 @@ def test_expired_batch_purges_rows_and_cannot_be_reused() -> None:
         session.close()
 
 
+def _put_mapping(session: _Session, batch_id: int, mapping: dict[str, str], client_id: int | None = None):
+    return session.http.put(
+        MAPPING.format(
+            client_id=session.assigned_id if client_id is None else client_id,
+            batch_id=batch_id,
+        ),
+        headers={CSRF_HEADER: session.csrf},
+        json={"mapping": mapping},
+    )
+
+
+def test_mapping_schema_is_idempotent() -> None:
+    from db import migrate_schema
+
+    with get_connection() as conn:
+        ensure_crm_import_schema(conn)
+        ensure_crm_import_schema(conn)
+        migrate_schema(conn)
+        conn.commit()
+        names = {str(r["name"]) for r in conn.execute("PRAGMA table_info(crm_import_batches)")}
+    for column in ("mapping_json", "mapping_updated_at", "mapping_updated_by_user_id"):
+        if column not in names:
+            _fail(f"crm_import_batches missing {column}.")
+
+
+def test_mapping_auth_and_scope() -> None:
+    assigned_id, _other = _client_ids()
+    http = _client()
+    anon = http.put(
+        MAPPING.format(client_id=assigned_id, batch_id=1),
+        json={"mapping": {"company_name": "Company"}},
+    )
+    if anon.status_code != 401:
+        _fail(f"Anonymous mapping must be 401, got {anon.status_code}.")
+    if anon.json().get("detail") != AUTH_REQUIRED_DETAIL:
+        _fail("Anonymous mapping 401 detail was not generic.")
+    password = _secret_password()
+    email = f"import.staff.map.{secrets.token_hex(4)}@example.test"
+    user_id = _create_user(email=email, password=password, administrator=0)
+    _assign(user_id, assigned_id)
+    try:
+        login = _login(http, email, password)
+        csrf = _csrf(login)
+        denied = http.put(
+            MAPPING.format(client_id=assigned_id, batch_id=1),
+            headers={CSRF_HEADER: csrf},
+            json={"mapping": {"company_name": "Company"}},
+        )
+        if denied.status_code != 403:
+            _fail(f"Non-admin mapping must be 403, got {denied.status_code}.")
+        if denied.json().get("detail") != ADMIN_REQUIRED_DETAIL:
+            _fail("Non-admin mapping 403 detail was not generic.")
+    finally:
+        _delete_user(user_id)
+
+
+def test_mapping_persists_and_does_not_write_crm_or_rows() -> None:
+    session = _Session()
+    try:
+        content = _csv_bytes(
+            ["Company", "Email", "First", "Last"],
+            [["Acme", "a@example.test", "Ada", "Lovelace"]],
+        )
+        uploaded = _upload(session.http, session.assigned_id, session.csrf, "map.csv", content)
+        batch = uploaded.json()["batch"]
+        batch_id = batch["batch_id"]
+        before_rows = _row_fingerprint(batch_id)
+        if before_rows[0] != 1:
+            _fail("Preview must stage one row before mapping.")
+        resp = _put_mapping(
+            session,
+            batch_id,
+            {
+                "company_name": "  Company  ",
+                "contact_email": "Email",
+                "contact_first_name": "First",
+                "contact_last_name": "Last",
+            },
+        )
+        if resp.status_code != 200:
+            _fail(f"Valid mapping must be 200, got {resp.status_code}: {resp.text}")
+        view = resp.json()
+        _assert_no_secrets(view, session.password, session.csrf)
+        mapping = view.get("mapping") or {}
+        if mapping.get("company_name") != "Company":
+            _fail("Trimmed mapping must persist the exact headers_json value.")
+        if mapping.get("contact_email") != "Email":
+            _fail("contact_email must persist the Email header.")
+        if view.get("mapping_updated_by_user_id") != session.user_id:
+            _fail("Mapping must record the session administrator.")
+        if not view.get("mapping_updated_at"):
+            _fail("mapping_updated_at must be set.")
+        if _row_fingerprint(batch_id) != before_rows:
+            _fail("Saving a mapping must not alter crm_import_rows.")
+        detail = session.http.get(BATCH.format(client_id=session.assigned_id, batch_id=batch_id))
+        if (detail.json().get("mapping") or {}).get("company_name") != "Company":
+            _fail("GET batch must return the persisted mapping.")
+        session.assert_frozen("Mapping save")
+    finally:
+        session.close()
+
+
+def test_mapping_validation_rules() -> None:
+    session = _Session()
+    try:
+        content = _csv_bytes(
+            ["Company", "Email", "Full Name", "First"],
+            [["Acme", "a@example.test", "Ada Lovelace", "Ada"]],
+        )
+        batch_id = _upload(
+            session.http, session.assigned_id, session.csrf, "rules.csv", content
+        ).json()["batch"]["batch_id"]
+        before_rows = _row_fingerprint(batch_id)
+        cases = (
+            ({}, MAPPING_COMPANY_REQUIRED),
+            ({"contact_email": "Email"}, MAPPING_COMPANY_REQUIRED),
+            ({"company_name": "Company", "nickname": "Email"}, MAPPING_UNKNOWN_FIELD),
+            ({"company_name": "NotAHeader"}, MAPPING_HEADER_MISSING),
+            ({"company_name": "   "}, MAPPING_EMPTY_HEADER),
+            ({"company_name": "Company", "website": "Company"}, MAPPING_DUPLICATE_HEADER),
+            (
+                {
+                    "company_name": "Company",
+                    "contact_full_name": "Full Name",
+                    "contact_first_name": "First",
+                },
+                MAPPING_NAME_CONFLICT,
+            ),
+        )
+        for mapping, expected in cases:
+            resp = _put_mapping(session, batch_id, mapping)
+            if resp.status_code != 400:
+                _fail(f"Invalid mapping {mapping!r} must be 400, got {resp.status_code}.")
+            if expected not in str(resp.json().get("detail")):
+                _fail(f"Invalid mapping {mapping!r} must explain {expected}.")
+        ok_first = _put_mapping(
+            session,
+            batch_id,
+            {"company_name": "Company", "contact_first_name": "First"},
+        )
+        if ok_first.status_code != 200:
+            _fail("First name without last name must be allowed.")
+        ok_last = _put_mapping(
+            session,
+            batch_id,
+            {"company_name": "Company", "contact_last_name": "First"},
+        )
+        if ok_last.status_code != 200:
+            _fail("Last name without first name must be allowed.")
+        if _row_fingerprint(batch_id) != before_rows:
+            _fail("Rejected mappings must not alter staged rows.")
+        other = _put_mapping(
+            session,
+            batch_id,
+            {"company_name": "Company"},
+            client_id=session.other_id,
+        )
+        if other.status_code != 404:
+            _fail(f"Mapping must be client-scoped, got {other.status_code}.")
+        session.assert_frozen("Mapping validation")
+    finally:
+        session.close()
+
+
+def test_mapping_refuses_cancelled_expired_and_empty_batches() -> None:
+    session = _Session()
+    try:
+        content = _csv_bytes(["Company"], [["Acme"]])
+        batch_id = _upload(
+            session.http, session.assigned_id, session.csrf, "refuse.csv", content
+        ).json()["batch"]["batch_id"]
+        session.http.delete(
+            BATCH.format(client_id=session.assigned_id, batch_id=batch_id),
+            headers={CSRF_HEADER: session.csrf},
+        )
+        cancelled = _put_mapping(session, batch_id, {"company_name": "Company"})
+        if cancelled.status_code != 409:
+            _fail(f"Cancelled mapping must be 409, got {cancelled.status_code}.")
+        if BATCH_NOT_REUSABLE not in str(cancelled.json().get("detail")):
+            _fail("Cancelled mapping must not be reusable.")
+
+        empty_id = _upload(
+            session.http,
+            session.assigned_id,
+            session.csrf,
+            "empty.csv",
+            _csv_bytes(["Company"], []),
+        ).json()["batch"]["batch_id"]
+        empty = _put_mapping(session, empty_id, {"company_name": "Company"})
+        if empty.status_code != 409:
+            _fail(f"Zero-row mapping must be 409, got {empty.status_code}.")
+        if MAPPING_NO_ROWS not in str(empty.json().get("detail")):
+            _fail("Zero-row mapping must explain that there are no staged rows.")
+
+        live_id = _upload(
+            session.http, session.assigned_id, session.csrf, "expire-map.csv", content
+        ).json()["batch"]["batch_id"]
+        past = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with get_connection() as conn:
+            conn.execute(
+                "UPDATE crm_import_batches SET expires_at = ? WHERE id = ?",
+                (past, live_id),
+            )
+            conn.commit()
+        expired = _put_mapping(session, live_id, {"company_name": "Company"})
+        if expired.status_code != 409:
+            _fail(f"Expired mapping must be 409, got {expired.status_code}.")
+        session.assert_frozen("Mapping refusal")
+    finally:
+        session.close()
+
+
 def main() -> int:
     os.environ.pop("NORTHSTAR_AUTH_ENFORCE", None)
     test_unauthenticated_and_non_admin_are_denied()
@@ -701,6 +943,11 @@ def main() -> int:
     test_single_visible_sheet_autoselects()
     test_cancel_keeps_audit_and_cannot_be_reused()
     test_expired_batch_purges_rows_and_cannot_be_reused()
+    test_mapping_schema_is_idempotent()
+    test_mapping_auth_and_scope()
+    test_mapping_persists_and_does_not_write_crm_or_rows()
+    test_mapping_validation_rules()
+    test_mapping_refuses_cancelled_expired_and_empty_batches()
     print("test_crm_import_staging: ok")
     return 0
 
