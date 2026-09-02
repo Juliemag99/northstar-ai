@@ -8,6 +8,7 @@ from __future__ import annotations
 import testdb
 import sys
 
+from access import get_default_user
 from client_email_accounts_data import preview_client_email, _crm_first_name
 from db import get_connection
 from models import ClientEmailPreviewRequest, OutreachLogRequest
@@ -30,6 +31,7 @@ def _crm_counts(conn) -> dict[str, int]:
 
 def main() -> int:
     client_id = 1
+    uid = int(get_default_user().id)
     created: list[int] = []
     with get_connection() as conn:
         before = _crm_counts(conn)
@@ -131,6 +133,7 @@ def main() -> int:
             contact_id=int(contact["id"]),
             template_id=int(tmpl["id"]),
         ),
+        user_id=uid,
     )
     assert first.lower() in (preview.message_body or preview.body or "").lower() or (
         f"Hi {first}" in (preview.message_body or preview.body or "")

@@ -9,8 +9,12 @@ from urllib.parse import urlencode
 
 import httpx
 
-from access import get_default_user, get_user_by_id
-from client_email_accounts_data import get_email_account, ensure_client_email_accounts_schema
+from access import get_user_by_id
+from client_email_accounts_data import (
+    get_email_account,
+    get_email_account_bound,
+    ensure_client_email_accounts_schema,
+)
 from client_setup_data import user_can_edit_client_setup
 from db import get_connection
 from email_oauth_credentials import (
@@ -23,6 +27,7 @@ from email_oauth_credentials import (
     store_oauth_state,
     upsert_google_credential,
 )
+from models import NorthStarUser
 from google_oauth_config import (
     GMAIL_OAUTH_SCOPES,
     GOOGLE_AUTH_URI,
@@ -69,16 +74,12 @@ def oauth_status() -> dict[str, Any]:
     }
 
 
-def begin_google_connect(
-    account_id: int, *, user_id: int | None = None
-) -> dict[str, Any]:
+def begin_google_connect(account_id: int, *, actor: NorthStarUser) -> dict[str, Any]:
     """Validate account, set connecting, return Google authorization URL."""
     if not google_oauth_configured():
         raise RuntimeError(oauth_status()["message"])
-
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
-    if user is None:
-        raise PermissionError("User not found.")
+    if actor is None or not bool(actor.active) or not bool(actor.is_administrator):
+        raise PermissionError("Not authorized to connect email accounts for this client.")
 
     ensure_client_email_accounts_schema()
     ensure_email_oauth_credentials_schema()
@@ -92,8 +93,8 @@ def begin_google_connect(
     if not row:
         raise LookupError("Sender account not found.")
     client_id = int(row["client_id"])
-    _require_edit(user.id, client_id)
-    account = get_email_account(client_id, account_id, user_id=user.id)
+    _require_edit(int(actor.id), client_id)
+    account = get_email_account(client_id, account_id, user_id=int(actor.id))
 
     provider = _blank(account.provider).lower()
     if provider not in {"google", "gmail", "other", ""}:
@@ -107,7 +108,7 @@ def begin_google_connect(
             SET provider = 'Google', connection_status = 'connecting', updated_at = ?, updated_by = ?
             WHERE id = ? AND client_id = ?
             """,
-            (_now(), _blank(user.full_name) or _blank(user.email), account_id, client_id),
+            (_now(), _blank(actor.full_name) or _blank(actor.email), account_id, client_id),
         )
 
     state = secrets.token_urlsafe(32)
@@ -115,7 +116,7 @@ def begin_google_connect(
         state=state,
         client_id=client_id,
         email_account_id=account_id,
-        user_id=user.id,
+        user_id=int(actor.id),
     )
 
     params = {
@@ -179,9 +180,23 @@ def complete_google_callback(
     if not st:
         raise ValueError("Invalid or expired OAuth state. Start Connect again.")
 
-    client_id = int(st["client_id"])
-    account_id = int(st["email_account_id"])
-    account = get_email_account(client_id, account_id)
+    try:
+        client_id = int(st["client_id"])
+        account_id = int(st["email_account_id"])
+        initiator_id = int(st.get("user_id") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Invalid or expired OAuth state. Start Connect again.") from exc
+    if client_id <= 0 or account_id <= 0 or initiator_id <= 0:
+        raise ValueError("Invalid or expired OAuth state. Start Connect again.")
+
+    initiator = get_user_by_id(initiator_id)
+    if initiator is None or not bool(initiator.active) or not bool(initiator.is_administrator):
+        raise ValueError("Invalid or expired OAuth state. Start Connect again.")
+
+    try:
+        account = get_email_account_bound(client_id, account_id)
+    except LookupError as exc:
+        raise ValueError("Invalid or expired OAuth state. Start Connect again.") from exc
 
     try:
         with httpx.Client(timeout=30.0) as client:
@@ -297,13 +312,12 @@ def complete_google_callback(
 
 
 def disconnect_google_account(
-    client_id: int, account_id: int, *, user_id: int | None = None
+    client_id: int, account_id: int, *, actor: NorthStarUser
 ) -> dict[str, Any]:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
-    if user is None:
-        raise PermissionError("User not found.")
-    _require_edit(user.id, client_id)
-    account = get_email_account(client_id, account_id, user_id=user.id)
+    if actor is None or not bool(actor.active) or not bool(actor.is_administrator):
+        raise PermissionError("Not authorized to connect email accounts for this client.")
+    _require_edit(int(actor.id), client_id)
+    account = get_email_account(client_id, account_id, user_id=int(actor.id))
 
     cred = get_active_credential_for_account(account_id, client_id=client_id)
     refresh = ""
@@ -331,7 +345,7 @@ def disconnect_google_account(
                 updated_at = ?, updated_by = ?
             WHERE id = ? AND client_id = ?
             """,
-            (_now(), _blank(user.full_name) or _blank(user.email), account_id, client_id),
+            (_now(), _blank(actor.full_name) or _blank(actor.email), account_id, client_id),
         )
 
     return {

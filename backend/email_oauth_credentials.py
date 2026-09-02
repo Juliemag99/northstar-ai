@@ -128,9 +128,12 @@ def store_oauth_state(
     state: str,
     client_id: int,
     email_account_id: int,
-    user_id: int | None,
+    user_id: int,
     ttl_seconds: int = 600,
 ) -> None:
+    initiator_id = int(user_id)
+    if initiator_id <= 0:
+        raise ValueError("OAuth state requires an initiating administrator.")
     ensure_email_oauth_credentials_schema()
     now = datetime.now(timezone.utc)
     expires = now.timestamp() + max(60, ttl_seconds)
@@ -149,7 +152,7 @@ def store_oauth_state(
                 (state, client_id, email_account_id, user_id, created_at, expires_at)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (state, client_id, email_account_id, user_id, _now(), expires_at),
+            (state, client_id, email_account_id, initiator_id, _now(), expires_at),
         )
 
 

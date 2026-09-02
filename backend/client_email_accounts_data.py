@@ -15,7 +15,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from access import get_default_user, get_user_by_id, user_can_access_client
+from access import get_user_by_id
 from client_setup_data import user_can_edit_client_setup
 from db import get_connection
 from models import (
@@ -29,6 +29,7 @@ from models import (
     ClientEmailSignatureUpdate,
     ClientEmailSignatureView,
     EmailPreviewAppointmentOption,
+    NorthStarUser,
     PlaceholderResolution,
 )
 
@@ -198,6 +199,16 @@ def _blank(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _actor_from_user_id(user_id: int | None) -> NorthStarUser:
+    """Authorize from an explicit session user id. Never fall back to Julie."""
+    if user_id is None:
+        raise PermissionError("Authentication required.")
+    user = get_user_by_id(int(user_id))
+    if user is None or not bool(user.active):
+        raise PermissionError("User not found.")
+    return user
 
 
 def _require_access(user_id: int, client_id: int) -> None:
@@ -392,7 +403,7 @@ def _account_view(conn, row: Any) -> ClientEmailAccountView:
 def list_email_accounts(
     client_id: int, *, user_id: int | None = None, include_inactive: bool = True
 ) -> list[ClientEmailAccountView]:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = _actor_from_user_id(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)
@@ -419,10 +430,23 @@ def list_email_accounts(
         return [_account_view(conn, r) for r in rows]
 
 
+def get_email_account_bound(client_id: int, account_id: int) -> ClientEmailAccountView:
+    """Load an account by client + id only. No user lookup (OAuth callback)."""
+    ensure_client_email_accounts_schema()
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM client_email_accounts WHERE id = ? AND client_id = ?",
+            (int(account_id), int(client_id)),
+        ).fetchone()
+        if not row:
+            raise LookupError("Sender account not found for this client.")
+        return _account_view(conn, row)
+
+
 def get_email_account(
     client_id: int, account_id: int, *, user_id: int | None = None
 ) -> ClientEmailAccountView:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = _actor_from_user_id(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)
@@ -441,7 +465,7 @@ def suggest_email_account_setup(
     client_id: int, *, user_id: int | None = None
 ) -> ClientEmailAccountSuggestion:
     """Suggest sender + rep from approved Client Operations. Never creates rows."""
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = _actor_from_user_id(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)
@@ -520,7 +544,7 @@ def upsert_email_account(
     account_id: int | None = None,
     user_id: int | None = None,
 ) -> ClientEmailAccountView:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = _actor_from_user_id(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -648,7 +672,7 @@ def upsert_email_account(
 def deactivate_email_account(
     client_id: int, account_id: int, *, user_id: int | None = None
 ) -> ClientEmailAccountView:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = _actor_from_user_id(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -681,7 +705,7 @@ def connect_email_account_stub(
     client_id: int, account_id: int, *, user_id: int | None = None
 ) -> dict[str, Any]:
     """Architecture stub — provider OAuth not implemented. Does not store secrets."""
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = _actor_from_user_id(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -709,7 +733,7 @@ def upsert_email_account_assignment(
     assignment_id: int | None = None,
     user_id: int | None = None,
 ) -> ClientEmailAccountAssignmentView:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = _actor_from_user_id(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -812,7 +836,7 @@ def upsert_email_account_assignment(
 def list_email_signatures(
     client_id: int, *, user_id: int | None = None, include_inactive: bool = True
 ) -> list[ClientEmailSignatureView]:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = _actor_from_user_id(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)
@@ -846,7 +870,7 @@ def upsert_email_signature(
     signature_id: int | None = None,
     user_id: int | None = None,
 ) -> ClientEmailSignatureView:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = _actor_from_user_id(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -952,7 +976,7 @@ def upsert_email_signature(
 def deactivate_email_signature(
     client_id: int, signature_id: int, *, user_id: int | None = None
 ) -> ClientEmailSignatureView:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = _actor_from_user_id(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -984,7 +1008,7 @@ def list_preview_contacts(
     client_id: int, *, user_id: int | None = None, limit: int = 100
 ) -> list[dict[str, Any]]:
     """CRM prospect contacts for the client that have an email (read-only)."""
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = _actor_from_user_id(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)
@@ -1186,7 +1210,7 @@ def list_preview_appointments(
 
     Primary source: client_sales_events (imported Appointment Scheduled/Rescheduled/etc.).
     """
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = _actor_from_user_id(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)
@@ -1568,7 +1592,7 @@ def preview_client_email(
     user_id: int | None = None,
 ) -> ClientEmailPreviewResult:
     """Read-only render / compose draft. Never sends email or writes CRM events."""
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = _actor_from_user_id(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)

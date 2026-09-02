@@ -66,10 +66,13 @@ def main() -> int:
         paths = {getattr(route, "path", "") for route in client.app.routes}
         if CALLBACK_PATH not in paths:
             _fail("FastAPI is missing GET /api/email/google/callback.")
-        status_code, status = testdb.http_json("GET", "/api/email/google/status")
-        if status_code != 200:
-            _fail(f"GET /api/email/google/status failed ({status_code}).")
-        reported = str(status.get("redirect_uri") or "")
+        status_code, _status = testdb.http_json("GET", "/api/email/google/status")
+        if status_code != 401:
+            _fail(
+                "GET /api/email/google/status must require an administrator session "
+                f"(got {status_code})."
+            )
+        reported = google_redirect_uri()
         if reported != EXPECTED_REDIRECT:
             _fail("OAuth status redirect_uri must be the 8007 callback URL.")
         if CALLBACK_PATH not in reported:

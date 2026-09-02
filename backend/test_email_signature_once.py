@@ -5,6 +5,7 @@ from __future__ import annotations
 import testdb
 import sys
 
+from access import get_default_user
 from client_email_accounts_data import (
     _compose_body_with_signature,
     _normalize_email_plain_text,
@@ -53,6 +54,7 @@ def main() -> int:
     assert msg3.rstrip().endswith("Carmeco")
 
     client_id = 1
+    uid = int(get_default_user().id)
     with get_connection() as conn:
         before = {
             "companies": conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0],
@@ -86,7 +88,7 @@ def main() -> int:
             "thank you again,"
         ), t["template_name"]
 
-    sigs = list_email_signatures(client_id)
+    sigs = list_email_signatures(client_id, user_id=uid)
     active = [s for s in sigs if s.active]
     assert active
     assert "Revenue Specialist" in active[0].signature_body
@@ -101,6 +103,7 @@ def main() -> int:
                 contact_id=int(bryan["id"]),
                 template_id=tmpl_id,
             ),
+            user_id=uid,
         )
         assert r.body.count("Tyler Sullivan") == 1, (name, r.body[-300:])
         assert "Revenue Specialist" in r.body
@@ -111,7 +114,7 @@ def main() -> int:
         print(f"OK {name}: one signature, placement={r.signature_placement}")
 
     # Working For isolation: Brown (client 2) must not resolve Carmeco signature via Carmeco account
-    brown_accounts = list_email_accounts(2)
+    brown_accounts = list_email_accounts(2, user_id=uid)
     if brown_accounts:
         # Preview with Carmeco account on Carmeco client only — cross-client blocked by get_email_account
         pass

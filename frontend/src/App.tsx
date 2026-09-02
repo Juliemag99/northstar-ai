@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Link,
   matchPath,
+  Navigate,
   useLocation,
   useNavigate,
   useSearchParams,
@@ -84,6 +85,7 @@ import ResearchCompany from './ResearchCompany'
 import SendEmailCompose from './SendEmailCompose'
 import AppointmentDetailsFields from './AppointmentDetailsFields'
 import { useAuth } from './auth/useAuth'
+import { staffCanAdminister } from './auth/staffCanAdminister'
 import {
   APPOINTMENT_SET_STATUSES,
   appointmentDetailsAreValid,
@@ -750,6 +752,10 @@ function App() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const { authenticated, user, authAvailable, authEnforced, logout } = useAuth()
+  const canAdminister = staffCanAdminister(authenticated, user)
+  const visibleNavItems = navItems.filter(
+    (item) => item.id !== 'administration' || canAdminister,
+  )
   const displayName =
     authenticated && user?.full_name.trim() ? user.full_name.trim() : WORKSPACE_USER
   const displayInitials = staffInitials(authenticated, displayName)
@@ -2198,7 +2204,7 @@ function App() {
         )}
 
         <nav className="sidebar-nav" aria-label="Primary">
-          {navItems.map((item) => (
+          {visibleNavItems.map((item) => (
             <button
               key={item.id}
               type="button"
@@ -3901,12 +3907,15 @@ function App() {
             />
           )}
 
-          {showAdministration && (
+          {showAdministration &&
+            (canAdminister ? (
             <Administration
               activeClientId={activeClientId}
               availableClients={availableClients}
             />
-          )}
+            ) : (
+              <Navigate to="/" replace />
+            ))}
 
           {!loading && !error && showWorkQueue && (
             <WorkQueue

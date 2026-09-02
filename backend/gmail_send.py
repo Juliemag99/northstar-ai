@@ -10,9 +10,8 @@ from typing import Any
 
 import httpx
 
-from access import get_default_user, get_user_by_id, user_can_access_client
+from access import get_user_by_id
 from client_email_accounts_data import get_email_account
-from client_setup_data import user_can_edit_client_setup
 from db import get_connection
 from email_oauth_credentials import load_decrypted_tokens, update_access_token
 from google_oauth_config import GMAIL_API_SEND_URI, GOOGLE_TOKEN_URI, google_client_id, google_client_secret
@@ -247,13 +246,12 @@ def send_client_email(
     user_id: int | None = None,
 ) -> ClientEmailSendResult:
     """Send via Gmail API after human confirmation. Creates Email Sent only on success."""
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
-    if user is None:
+    if user_id is None:
+        raise PermissionError("Authentication required.")
+    user = get_user_by_id(int(user_id))
+    if user is None or not bool(user.active):
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)
-    # Sending requires edit-level client access (same as connect)
-    if not user_can_edit_client_setup(user.id, client_id) and not user.is_administrator:
-        raise PermissionError("Not authorized to send email for this client.")
 
     _validate_send_guards(body)
 

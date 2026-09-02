@@ -5,6 +5,7 @@ from __future__ import annotations
 import testdb
 import sys
 
+from access import get_default_user
 from client_email_accounts_data import (
     _clean_meeting_with,
     _crm_first_name,
@@ -31,6 +32,7 @@ def _crm_counts(conn) -> dict[str, int]:
 
 def main() -> int:
     client_id = 1
+    uid = int(get_default_user().id)
     assert _crm_first_name("Bryan", "Bryan Bigelow") == "Bryan"
     assert _clean_meeting_with("Rev Spec/Tyler") == ""
     assert _clean_meeting_with("Heath McBride") == "Heath McBride"
@@ -74,7 +76,7 @@ def main() -> int:
         ).fetchone()
 
     # Jimmy / AAON options
-    jimmy_opts = list_preview_appointments(client_id, jimmy_id)
+    jimmy_opts = list_preview_appointments(client_id, jimmy_id, user_id=uid)
     labels = [o.label for o in jimmy_opts]
     types = {o.event_type for o in jimmy_opts}
     assert len(jimmy_opts) >= 3, labels
@@ -88,7 +90,7 @@ def main() -> int:
         print(f"  - {o.label}")
 
     # Bryan: none
-    bryan_opts = list_preview_appointments(client_id, bryan_id)
+    bryan_opts = list_preview_appointments(client_id, bryan_id, user_id=uid)
     assert bryan_opts == [], bryan_opts
     print("Bryan options: (none)")
 
@@ -98,6 +100,7 @@ def main() -> int:
         ClientEmailPreviewRequest(
             account_id=acct_id, contact_id=bryan_id, template_id=tmpl_id
         ),
+        user_id=uid,
     )
     assert "Hi Bryan," in r1.body or r1.body.startswith("Hi Bryan")
     assert "Hi Bryan Bigelow" not in r1.body
@@ -112,6 +115,7 @@ def main() -> int:
             template_id=tmpl_id,
             sales_event_id=int(se15["id"]),
         ),
+        user_id=uid,
     )
     assert "Jul 14, 2026" in r2.body, r2.body[:250]
     assert "9:00 AM CDT" in r2.body or "9:00 AM" in r2.body, r2.body[:250]
@@ -145,6 +149,7 @@ def main() -> int:
                 template_id=temp_id,
                 sales_event_id=int(se15["id"]),
             ),
+            user_id=uid,
         )
         assert "Hi Jimmy," in r3.body
         assert "Jul 14, 2026" in r3.body

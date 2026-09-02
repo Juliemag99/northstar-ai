@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 
@@ -9,7 +9,13 @@ from access import (
     get_user_by_id,
     list_clients_for_user,
 )
-from auth_http import add_staff_csrf_middleware, staff_auth_router
+from auth_http import (
+    add_staff_csrf_middleware,
+    require_administrator,
+    require_client_access,
+    require_client_setup_editor,
+    staff_auth_router,
+)
 from activities_data import (
     create_activity,
     list_activities_due_today,
@@ -2122,9 +2128,10 @@ def update_email_template_api(
     "/api/clients/{client_id}/email-accounts",
     response_model=list[ClientEmailAccountView],
 )
-def list_email_accounts_api(client_id: int):
+def list_email_accounts_api(client_id: int, request: Request):
+    actor = require_client_access(request, client_id)
     try:
-        return list_email_accounts(client_id)
+        return list_email_accounts(client_id, user_id=int(actor.id))
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
@@ -2133,10 +2140,11 @@ def list_email_accounts_api(client_id: int):
     "/api/clients/{client_id}/email-accounts/suggestions",
     response_model=ClientEmailAccountSuggestion,
 )
-def suggest_email_accounts_api(client_id: int):
+def suggest_email_accounts_api(client_id: int, request: Request):
     """Suggest from approved Client Operations — never auto-creates."""
+    actor = require_client_access(request, client_id)
     try:
-        return suggest_email_account_setup(client_id)
+        return suggest_email_account_setup(client_id, user_id=int(actor.id))
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
@@ -2145,9 +2153,10 @@ def suggest_email_accounts_api(client_id: int):
     "/api/clients/{client_id}/email-accounts",
     response_model=ClientEmailAccountView,
 )
-def create_email_account_api(client_id: int, body: ClientEmailAccountUpdate):
+def create_email_account_api(client_id: int, body: ClientEmailAccountUpdate, request: Request):
+    actor = require_client_setup_editor(request, client_id)
     try:
-        return upsert_email_account(client_id, body)
+        return upsert_email_account(client_id, body, user_id=int(actor.id))
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
@@ -2159,10 +2168,13 @@ def create_email_account_api(client_id: int, body: ClientEmailAccountUpdate):
     response_model=ClientEmailAccountView,
 )
 def update_email_account_api(
-    client_id: int, account_id: int, body: ClientEmailAccountUpdate
+    client_id: int, account_id: int, body: ClientEmailAccountUpdate, request: Request
 ):
+    actor = require_client_setup_editor(request, client_id)
     try:
-        return upsert_email_account(client_id, body, account_id=account_id)
+        return upsert_email_account(
+            client_id, body, account_id=account_id, user_id=int(actor.id)
+        )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except LookupError as exc:
@@ -2175,9 +2187,10 @@ def update_email_account_api(
     "/api/clients/{client_id}/email-accounts/{account_id}/deactivate",
     response_model=ClientEmailAccountView,
 )
-def deactivate_email_account_api(client_id: int, account_id: int):
+def deactivate_email_account_api(client_id: int, account_id: int, request: Request):
+    actor = require_client_setup_editor(request, client_id)
     try:
-        return deactivate_email_account(client_id, account_id)
+        return deactivate_email_account(client_id, account_id, user_id=int(actor.id))
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except LookupError as exc:
@@ -2185,15 +2198,16 @@ def deactivate_email_account_api(client_id: int, account_id: int):
 
 
 @app.post("/api/clients/{client_id}/email-accounts/{account_id}/connect")
-def connect_email_account_api(client_id: int, account_id: int):
+def connect_email_account_api(client_id: int, account_id: int, request: Request):
     """Start provider connect. Google → OAuth URL; other providers remain stubbed."""
+    actor = require_administrator(request)
     try:
         from client_email_accounts_data import get_email_account
 
-        account = get_email_account(client_id, account_id)
+        account = get_email_account(client_id, account_id, user_id=int(actor.id))
         provider = (account.provider or "").strip().lower()
         if provider in {"google", "gmail"}:
-            started = begin_google_connect(account_id)
+            started = begin_google_connect(account_id, actor=actor)
             return {
                 "account_id": account_id,
                 "client_id": client_id,
@@ -2206,7 +2220,7 @@ def connect_email_account_api(client_id: int, account_id: int):
                 "oauth_path": f"/api/email/google/connect/{account_id}",
                 "message": "Redirect to Google to connect this mailbox.",
             }
-        return connect_email_account_stub(client_id, account_id)
+        return connect_email_account_stub(client_id, account_id, user_id=int(actor.id))
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except LookupError as exc:
@@ -2218,15 +2232,17 @@ def connect_email_account_api(client_id: int, account_id: int):
 
 
 @app.get("/api/email/google/status")
-def google_oauth_status_api():
+def google_oauth_status_api(request: Request):
+    require_administrator(request)
     return oauth_status()
 
 
 @app.get("/api/email/google/connect/{account_id}")
-def google_connect_start_api(account_id: int, redirect: int = 1):
+def google_connect_start_api(account_id: int, request: Request, redirect: int = 1):
     """Start Google OAuth. redirect=1 returns RedirectResponse to Google."""
+    actor = require_administrator(request)
     try:
-        started = begin_google_connect(account_id)
+        started = begin_google_connect(account_id, actor=actor)
         if redirect:
             return RedirectResponse(url=started["authorization_url"], status_code=302)
         return started
@@ -2266,9 +2282,10 @@ def google_oauth_callback_api(code: str = "", state: str = "", error: str = ""):
 
 
 @app.post("/api/clients/{client_id}/email-accounts/{account_id}/disconnect")
-def disconnect_google_account_api(client_id: int, account_id: int):
+def disconnect_google_account_api(client_id: int, account_id: int, request: Request):
+    actor = require_administrator(request)
     try:
-        return disconnect_google_account(client_id, account_id)
+        return disconnect_google_account(client_id, account_id, actor=actor)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except LookupError as exc:
@@ -2281,13 +2298,14 @@ def disconnect_google_account_api(client_id: int, account_id: int):
     "/api/clients/{client_id}/email-send",
     response_model=ClientEmailSendResult,
 )
-def send_client_email_api(client_id: int, body: ClientEmailSendRequest):
+def send_client_email_api(client_id: int, body: ClientEmailSendRequest, request: Request):
     """Send via Gmail after human confirm_send. Creates Email Sent only on success."""
+    actor = require_client_access(request, client_id)
     try:
         if body.confirm_send and body.confirm_recipient:
             if body.confirm_recipient.strip().lower() != body.to_address.strip().lower():
                 raise ValueError("confirm_recipient must match to_address.")
-        return send_client_email(client_id, body)
+        return send_client_email(client_id, body, user_id=int(actor.id))
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except LookupError as exc:
@@ -2301,10 +2319,13 @@ def send_client_email_api(client_id: int, body: ClientEmailSendRequest):
     response_model=ClientEmailAccountAssignmentView,
 )
 def create_email_account_assignment_api(
-    client_id: int, account_id: int, body: ClientEmailAccountAssignmentUpdate
+    client_id: int, account_id: int, body: ClientEmailAccountAssignmentUpdate, request: Request
 ):
+    actor = require_client_setup_editor(request, client_id)
     try:
-        return upsert_email_account_assignment(client_id, account_id, body)
+        return upsert_email_account_assignment(
+            client_id, account_id, body, user_id=int(actor.id)
+        )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except LookupError as exc:
@@ -2317,9 +2338,10 @@ def create_email_account_assignment_api(
     "/api/clients/{client_id}/email-signatures",
     response_model=list[ClientEmailSignatureView],
 )
-def list_email_signatures_api(client_id: int):
+def list_email_signatures_api(client_id: int, request: Request):
+    actor = require_client_access(request, client_id)
     try:
-        return list_email_signatures(client_id)
+        return list_email_signatures(client_id, user_id=int(actor.id))
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
@@ -2328,9 +2350,12 @@ def list_email_signatures_api(client_id: int):
     "/api/clients/{client_id}/email-signatures",
     response_model=ClientEmailSignatureView,
 )
-def create_email_signature_api(client_id: int, body: ClientEmailSignatureUpdate):
+def create_email_signature_api(
+    client_id: int, body: ClientEmailSignatureUpdate, request: Request
+):
+    actor = require_client_setup_editor(request, client_id)
     try:
-        return upsert_email_signature(client_id, body)
+        return upsert_email_signature(client_id, body, user_id=int(actor.id))
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except LookupError as exc:
@@ -2344,10 +2369,13 @@ def create_email_signature_api(client_id: int, body: ClientEmailSignatureUpdate)
     response_model=ClientEmailSignatureView,
 )
 def update_email_signature_api(
-    client_id: int, signature_id: int, body: ClientEmailSignatureUpdate
+    client_id: int, signature_id: int, body: ClientEmailSignatureUpdate, request: Request
 ):
+    actor = require_client_setup_editor(request, client_id)
     try:
-        return upsert_email_signature(client_id, body, signature_id=signature_id)
+        return upsert_email_signature(
+            client_id, body, signature_id=signature_id, user_id=int(actor.id)
+        )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except LookupError as exc:
@@ -2360,9 +2388,12 @@ def update_email_signature_api(
     "/api/clients/{client_id}/email-signatures/{signature_id}/deactivate",
     response_model=ClientEmailSignatureView,
 )
-def deactivate_email_signature_api(client_id: int, signature_id: int):
+def deactivate_email_signature_api(client_id: int, signature_id: int, request: Request):
+    actor = require_client_setup_editor(request, client_id)
     try:
-        return deactivate_email_signature(client_id, signature_id)
+        return deactivate_email_signature(
+            client_id, signature_id, user_id=int(actor.id)
+        )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except LookupError as exc:
@@ -2370,9 +2401,10 @@ def deactivate_email_signature_api(client_id: int, signature_id: int):
 
 
 @app.get("/api/clients/{client_id}/email-preview/contacts")
-def list_email_preview_contacts_api(client_id: int, limit: int = 100):
+def list_email_preview_contacts_api(client_id: int, request: Request, limit: int = 100):
+    actor = require_client_access(request, client_id)
     try:
-        return list_preview_contacts(client_id, limit=limit)
+        return list_preview_contacts(client_id, user_id=int(actor.id), limit=limit)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
@@ -2383,13 +2415,15 @@ def list_email_preview_contacts_api(client_id: int, limit: int = 100):
 )
 def list_email_preview_appointments_api(
     client_id: int,
+    request: Request,
     contact_id: int = Query(...),
     limit: int = 50,
 ):
     """Read-only appointments for Preview Email, scoped to a CRM contact."""
+    actor = require_client_access(request, client_id)
     try:
         return list_preview_appointments(
-            client_id, contact_id, limit=limit
+            client_id, contact_id, user_id=int(actor.id), limit=limit
         )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -2401,10 +2435,13 @@ def list_email_preview_appointments_api(
     "/api/clients/{client_id}/email-preview",
     response_model=ClientEmailPreviewResult,
 )
-def preview_client_email_api(client_id: int, body: ClientEmailPreviewRequest):
+def preview_client_email_api(
+    client_id: int, body: ClientEmailPreviewRequest, request: Request
+):
     """Read-only From/To/Subject/Body/Signature render. Does not send."""
+    actor = require_client_access(request, client_id)
     try:
-        return preview_client_email(client_id, body)
+        return preview_client_email(client_id, body, user_id=int(actor.id))
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except LookupError as exc:

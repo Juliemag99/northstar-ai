@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Navigate, useSearchParams } from 'react-router-dom'
 import {
   connectEmailAccount,
   disconnectEmailAccount,
@@ -12,6 +12,8 @@ import {
   emailConnectionUiStatus,
   type EmailConnectionUiStatus,
 } from './emailConnectionStatus'
+import { useAuth } from './auth/useAuth'
+import { staffCanAdminister } from './auth/staffCanAdminister'
 
 type AssignedClient = {
   client_id: number
@@ -63,6 +65,8 @@ export default function Administration({
   activeClientId,
   availableClients,
 }: AdministrationProps) {
+  const { authenticated, user } = useAuth()
+  const canAdminister = staffCanAdminister(authenticated, user)
   const [searchParams, setSearchParams] = useSearchParams()
   const [scopedClientId, setScopedClientId] = useState<number>(
     activeClientId != null && activeClientId > 0 ? activeClientId : 0,
@@ -108,6 +112,7 @@ export default function Administration({
   }, [])
 
   useEffect(() => {
+    if (!canAdminister) return
     const flag = (searchParams.get('email_oauth') || '').trim().toLowerCase()
     if (!flag) return
     const detail = searchParams.get('detail') || ''
@@ -121,15 +126,19 @@ export default function Administration({
     next.delete('account_id')
     next.delete('client_id')
     setSearchParams(next, { replace: true })
-  }, [searchParams, setSearchParams])
+  }, [canAdminister, searchParams, setSearchParams])
 
   useEffect(() => {
+    if (!canAdminister) {
+      setAccounts([])
+      return
+    }
     if (!canConnect || connectClientId == null) {
       setAccounts([])
       return
     }
     void loadAccounts(connectClientId)
-  }, [canConnect, connectClientId, loadAccounts, banner])
+  }, [canAdminister, canConnect, connectClientId, loadAccounts, banner])
 
   const scopedClientName = useMemo(() => {
     if (!canConnect || connectClientId == null) return ''
@@ -196,6 +205,10 @@ export default function Administration({
     if (status === 'connected') return 'disconnect'
     if (status === 'expired' || status === 'error') return 'reconnect'
     return 'connect'
+  }
+
+  if (!canAdminister) {
+    return <Navigate to="/" replace />
   }
 
   return (

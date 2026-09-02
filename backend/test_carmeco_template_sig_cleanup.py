@@ -5,6 +5,7 @@ from __future__ import annotations
 import testdb
 import re
 
+from access import get_default_user
 from client_email_accounts_data import preview_client_email
 from client_knowledge_data import list_email_templates, upsert_email_template
 from db import DB_PATH, get_connection
@@ -50,6 +51,7 @@ def _strip_hardcoded_block(body: str) -> str:
 def main() -> None:
     print("DB", DB_PATH)
     client_id = 1
+    uid = int(get_default_user().id)
     with get_connection() as conn:
         before_crm = {
             "companies": conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0],
@@ -131,6 +133,7 @@ def main() -> None:
             ClientEmailPreviewRequest(
                 account_id=acct, contact_id=bryan, template_id=tid
             ),
+            user_id=uid,
         )
         n = r.body.count("Tyler Sullivan")
         print(

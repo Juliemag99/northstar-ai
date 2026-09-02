@@ -9,6 +9,7 @@ from __future__ import annotations
 import testdb
 import sys
 
+from access import get_default_user
 from client_email_accounts_data import (
     _clean_meeting_with,
     _crm_first_name,
@@ -35,6 +36,7 @@ def _crm_counts(conn) -> dict[str, int]:
 
 def main() -> int:
     client_id = 1
+    uid = int(get_default_user().id)
     assert _crm_first_name("Bryan", "Bryan Bigelow") == "Bryan"
     assert _crm_first_name("", "Bryan Bigelow") == "Bryan"
     assert _clean_meeting_with("Heath McBride") == "Heath McBride"
@@ -91,6 +93,7 @@ def main() -> int:
             contact_id=contact_id,
             template_id=template_id,
         ),
+        user_id=uid,
     )
     assert "Hi Bryan," in r1.body or r1.body.startswith("Hi Bryan\n"), r1.body[:120]
     assert "Hi Bryan Bigelow" not in r1.body
@@ -106,7 +109,7 @@ def main() -> int:
     # 2) Appointment context from sales event (Jimmy Davis)
     assert jimmy is not None and se is not None, "Need Jimmy + appointment sales event"
     jimmy_id = int(jimmy["id"])
-    appts = list_preview_appointments(client_id, jimmy_id)
+    appts = list_preview_appointments(client_id, jimmy_id, user_id=uid)
     assert any(
         a.source == "sales_event" and a.event_id == int(se["id"]) for a in appts
     ), appts
@@ -128,6 +131,7 @@ def main() -> int:
             template_id=template_id,
             sales_event_id=int(se["id"]),
         ),
+        user_id=uid,
     )
     expected_date = se["event_date"] or ""
     assert "Jul 14, 2026" in r2.body or expected_date in r2.body, r2.body[:200]
@@ -164,6 +168,7 @@ def main() -> int:
                 sales_event_id=int(se["id"]),
                 meeting_with="Heath McBride",
             ),
+            user_id=uid,
         )
         assert "Hi Bryan," in r3.body
         assert "Heath McBride" in r3.body
@@ -179,6 +184,7 @@ def main() -> int:
                 template_id=temp_id,
                 # no appointment selected
             ),
+            user_id=uid,
         )
         assert "Hi Bryan," in r4.body
         assert "UNRESOLVED" in r4.body

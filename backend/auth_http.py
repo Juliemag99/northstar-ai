@@ -22,7 +22,12 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from access import DEFAULT_USER_EMAIL, get_default_user, get_user_by_id
+from access import (
+    DEFAULT_USER_EMAIL,
+    get_default_user,
+    get_user_by_id,
+    user_can_access_client,
+)
 from auth_passwords import verify_password
 from auth_sessions import (
     ABSOLUTE_HOURS,
@@ -38,6 +43,7 @@ SESSION_COOKIE = "northstar_session"
 CSRF_HEADER = "X-CSRF-Token"
 LOGIN_FAILED_DETAIL = "Invalid email or password."
 AUTH_REQUIRED_DETAIL = "Authentication required."
+ADMIN_REQUIRED_DETAIL = "Not authorized."
 CSRF_FAILED_DETAIL = "CSRF token missing or invalid."
 LOCKOUT_THRESHOLD = 5
 LOCKOUT_MINUTES = 15
@@ -271,6 +277,62 @@ def _valid_active_staff_session(request: Request) -> bool:
         return False
     user = get_user_by_id(int(session["user_id"]))
     return user is not None and bool(user.active)
+
+
+def require_authenticated_staff(request: Request) -> NorthStarUser:
+    """Return the active staff user from the session cookie alone.
+
+    Does not read get_default_user(), query parameters, headers, or body
+    fields. Independent of NORTHSTAR_AUTH_ENFORCE: missing, invalid,
+    expired, revoked, or inactive sessions are 401.
+    """
+    try:
+        session = lookup_request_session(request, touch=False)
+    except Exception:
+        raise HTTPException(status_code=401, detail=AUTH_REQUIRED_DETAIL)
+    if session is None:
+        raise HTTPException(status_code=401, detail=AUTH_REQUIRED_DETAIL)
+    try:
+        user = get_user_by_id(int(session["user_id"]))
+    except Exception:
+        raise HTTPException(status_code=401, detail=AUTH_REQUIRED_DETAIL)
+    if user is None or not bool(user.active):
+        raise HTTPException(status_code=401, detail=AUTH_REQUIRED_DETAIL)
+    return user
+
+
+def require_administrator(request: Request) -> NorthStarUser:
+    """Return the session user only when they are an active administrator."""
+    user = require_authenticated_staff(request)
+    if not bool(user.is_administrator):
+        raise HTTPException(status_code=403, detail=ADMIN_REQUIRED_DETAIL)
+    return user
+
+
+def require_client_access(request: Request, client_id: int) -> NorthStarUser:
+    """Session user must be assigned to the client (administrators included)."""
+    user = require_authenticated_staff(request)
+    try:
+        allowed = user_can_access_client(int(user.id), int(client_id))
+    except Exception:
+        raise HTTPException(status_code=403, detail=ADMIN_REQUIRED_DETAIL)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=ADMIN_REQUIRED_DETAIL)
+    return user
+
+
+def require_client_setup_editor(request: Request, client_id: int) -> NorthStarUser:
+    """Session user must have existing Client Setup edit permission."""
+    user = require_authenticated_staff(request)
+    from client_setup_data import user_can_edit_client_setup
+
+    try:
+        allowed = user_can_edit_client_setup(int(user.id), int(client_id))
+    except Exception:
+        raise HTTPException(status_code=403, detail=ADMIN_REQUIRED_DETAIL)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=ADMIN_REQUIRED_DETAIL)
+    return user
 
 
 def _auth_required_response() -> JSONResponse:
