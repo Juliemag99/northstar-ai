@@ -44,6 +44,7 @@ STATUS_PREVIEWED = "previewed"
 STATUS_FAILED = "failed"
 STATUS_CANCELLED = "cancelled"
 STATUS_EXPIRED = "expired"
+STATUS_IMPORTED = "imported"
 USABLE_STATUS = STATUS_PREVIEWED
 
 GENERIC_PARSE_ERROR = "The spreadsheet could not be read. Check the file and try again."
@@ -207,9 +208,21 @@ def ensure_crm_import_schema(conn=None) -> None:
                 mapping_json TEXT NOT NULL DEFAULT '{}',
                 mapping_updated_at TEXT NOT NULL DEFAULT '',
                 mapping_updated_by_user_id INTEGER,
+                imported_at TEXT NOT NULL DEFAULT '',
+                imported_by_user_id INTEGER,
+                confirmed_plan_fingerprint TEXT NOT NULL DEFAULT '',
+                created_company_count INTEGER NOT NULL DEFAULT 0,
+                reused_company_count INTEGER NOT NULL DEFAULT 0,
+                created_contact_count INTEGER NOT NULL DEFAULT 0,
+                reused_contact_count INTEGER NOT NULL DEFAULT 0,
+                created_relationship_count INTEGER NOT NULL DEFAULT 0,
+                existing_relationship_count INTEGER NOT NULL DEFAULT 0,
+                no_contact_row_count INTEGER NOT NULL DEFAULT 0,
+                total_imported_row_count INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE,
                 FOREIGN KEY (uploaded_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
-                FOREIGN KEY (mapping_updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+                FOREIGN KEY (mapping_updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+                FOREIGN KEY (imported_by_user_id) REFERENCES users(id) ON DELETE SET NULL
             );
 
             CREATE TABLE IF NOT EXISTS crm_import_rows (
@@ -230,6 +243,27 @@ def ensure_crm_import_schema(conn=None) -> None:
                 ON crm_import_rows(batch_id, source_row_number);
             CREATE INDEX IF NOT EXISTS idx_crm_import_batches_client
                 ON crm_import_batches(client_id, status, expires_at);
+
+            CREATE TABLE IF NOT EXISTS crm_import_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id INTEGER NOT NULL,
+                source_row_number INTEGER NOT NULL,
+                staged_row_id INTEGER NOT NULL,
+                company_action TEXT NOT NULL,
+                company_id INTEGER NOT NULL,
+                contact_action TEXT NOT NULL,
+                contact_id INTEGER,
+                relationship_action TEXT NOT NULL,
+                relationship_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (batch_id) REFERENCES crm_import_batches(id) ON DELETE CASCADE,
+                UNIQUE (batch_id, staged_row_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_crm_import_results_batch_source
+                ON crm_import_results(batch_id, source_row_number);
+            CREATE INDEX IF NOT EXISTS idx_crm_import_results_batch
+                ON crm_import_results(batch_id);
             """
         )
         existing = {
@@ -240,6 +274,18 @@ def ensure_crm_import_schema(conn=None) -> None:
             ("mapping_json", "TEXT NOT NULL DEFAULT '{}'"),
             ("mapping_updated_at", "TEXT NOT NULL DEFAULT ''"),
             ("mapping_updated_by_user_id", "INTEGER"),
+            # Checkpoint C3 audit columns.
+            ("imported_at", "TEXT NOT NULL DEFAULT ''"),
+            ("imported_by_user_id", "INTEGER"),
+            ("confirmed_plan_fingerprint", "TEXT NOT NULL DEFAULT ''"),
+            ("created_company_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("reused_company_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("created_contact_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("reused_contact_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("created_relationship_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("existing_relationship_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("no_contact_row_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("total_imported_row_count", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if name not in existing:
                 conn.execute(f"ALTER TABLE crm_import_batches ADD COLUMN {name} {declaration}")
@@ -264,9 +310,9 @@ def purge_expired_staging_rows(conn=None) -> int:
             """
             SELECT id FROM crm_import_batches
             WHERE expires_at != '' AND expires_at < ?
-              AND status NOT IN (?, ?)
+              AND status NOT IN (?, ?, ?)
             """,
-            (now, STATUS_CANCELLED, STATUS_EXPIRED),
+            (now, STATUS_CANCELLED, STATUS_EXPIRED, STATUS_IMPORTED),
         ).fetchall()
         ids = [int(r["id"]) for r in rows]
         if not ids:

@@ -120,6 +120,8 @@ from models import (
     CrmImportBatchView,
     CrmImportDryRunRequest,
     CrmImportDryRunResponse,
+    CrmImportConfirmRequest,
+    CrmImportConfirmResponse,
     CrmImportMappingRequest,
     CrmImportRowsPage,
     CrmImportUploadResult,
@@ -325,6 +327,7 @@ from crm_import_staging import (
     upload_crm_import,
 )
 from crm_import_plan import dry_run_crm_import
+from crm_import_confirm import confirm_admin_crm_import_batch
 from gmail_send import send_client_email
 from fastapi.responses import RedirectResponse
 from extraction_review_bulk import (
@@ -2604,6 +2607,38 @@ def dry_run_admin_crm_import_api(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post(
+    "/api/clients/{client_id}/admin/imports/{batch_id}/confirm",
+    response_model=CrmImportConfirmResponse,
+)
+def confirm_admin_crm_import_api(
+    client_id: int,
+    batch_id: int,
+    body: CrmImportConfirmRequest,
+    request: Request,
+):
+    actor = _require_admin_client(request, client_id)
+    if body.confirm is not True:
+        raise HTTPException(status_code=400, detail="confirm must be true.")
+    try:
+        return confirm_admin_crm_import_batch(
+            client_id=client_id,
+            batch_id=batch_id,
+            plan_fingerprint=body.plan_fingerprint,
+            actor=actor,
+        )
+    except BatchNotReusable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Unexpected failure.") from exc
 
 
 @app.put(

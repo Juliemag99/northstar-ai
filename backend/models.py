@@ -3192,3 +3192,25 @@ class CrmImportDryRunResponse(BaseModel):
     limit: int
     counts: CrmImportDryRunCounts = Field(default_factory=CrmImportDryRunCounts)
     rows: list[CrmImportDryRunRow] = Field(default_factory=list)
+
+
+class CrmImportConfirmRequest(BaseModel):
+    confirm: bool = False
+    plan_fingerprint: str = ""
+
+
+class CrmImportConfirmResponse(BaseModel):
+    batch_id: int
+    client_id: int
+    status: str = "imported"
+    imported_at: str = ""
+    imported_by_user_id: int | None = None
+    confirmed_plan_fingerprint: str = ""
+    created_company_count: int = 0
+    reused_company_count: int = 0
+    created_contact_count: int = 0
+    reused_contact_count: int = 0
+    created_relationship_count: int = 0
+    existing_relationship_count: int = 0
+    no_contact_row_count: int = 0
+    total_imported_row_count: int = 0

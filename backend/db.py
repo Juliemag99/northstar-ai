@@ -92,6 +92,18 @@ _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("mapping_json", "TEXT NOT NULL DEFAULT '{}'"),
         ("mapping_updated_at", "TEXT NOT NULL DEFAULT ''"),
         ("mapping_updated_by_user_id", "INTEGER"),
+        # Checkpoint C3 audit columns.
+        ("imported_at", "TEXT NOT NULL DEFAULT ''"),
+        ("imported_by_user_id", "INTEGER"),
+        ("confirmed_plan_fingerprint", "TEXT NOT NULL DEFAULT ''"),
+        ("created_company_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("reused_company_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("created_contact_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("reused_contact_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("created_relationship_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("existing_relationship_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("no_contact_row_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("total_imported_row_count", "INTEGER NOT NULL DEFAULT 0"),
     ],
 }
 
