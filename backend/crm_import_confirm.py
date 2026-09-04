@@ -24,9 +24,19 @@ from datetime import datetime
 from typing import Any
 
 from contact_phone import format_us_phone_display, upsert_contact_phone_keys
+from appointments_data import is_hot_prospect_status
 from crm_add_data import allocate_ns_record_no
 from crm_import_plan import plan_crm_import_batch
 from crm_import_staging import BatchNotReusable
+from crm_import_status_notes import (
+    NOTES_ALREADY_PRESENT,
+    NOTES_APPEND,
+    NOTES_NO_CHANGE,
+    NOTES_SET,
+    STATUS_PRESERVE,
+    STATUS_USE_DEFAULT,
+    STATUS_USE_IMPORTED,
+)
 from db import get_connection
 from models import NorthStarUser
 
@@ -53,15 +63,15 @@ def _split_full_name(full_name: str) -> tuple[str, str]:
     return parts[0], " ".join(parts[1:])
 
 
-def _require_allowed_actions(plan) -> tuple[int, int, int, int, int, int, int]:
-    """Return (created_company, reused_company, created_contact, reused_contact,
-    created_relationship, existing_relationship, no_contact_rows).
-    """
+def _require_allowed_actions(plan) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int]:
+    """Return company/contact/relationship counters plus status/notes audit counters."""
 
     created_company = reused_company = 0
     created_contact = reused_contact = 0
     no_contact_rows = 0
     created_relationship = existing_relationship = 0
+    imported_status = default_status = preserved_status = 0
+    notes_set = notes_appended = notes_duplicate = notes_unchanged = 0
 
     for row in plan.rows:
         # Company
@@ -92,6 +102,26 @@ def _require_allowed_actions(plan) -> tuple[int, int, int, int, int, int, int]:
                 "Import batch contains a non-actionable relationship plan."
             )
 
+        if row.status_action == STATUS_USE_IMPORTED:
+            imported_status += 1
+        elif row.status_action == STATUS_USE_DEFAULT:
+            default_status += 1
+        elif row.status_action == STATUS_PRESERVE:
+            preserved_status += 1
+        else:
+            raise BatchNotReusable("Import batch contains a non-actionable status plan.")
+
+        if row.notes_action == NOTES_SET:
+            notes_set += 1
+        elif row.notes_action == NOTES_APPEND:
+            notes_appended += 1
+        elif row.notes_action == NOTES_ALREADY_PRESENT:
+            notes_duplicate += 1
+        elif row.notes_action == NOTES_NO_CHANGE:
+            notes_unchanged += 1
+        else:
+            raise BatchNotReusable("Import batch contains a non-actionable notes plan.")
+
     total = int(plan.total_rows)
     if created_company + reused_company != total:
         raise BatchNotReusable("Company plan counters do not reconcile to total rows.")
@@ -99,6 +129,10 @@ def _require_allowed_actions(plan) -> tuple[int, int, int, int, int, int, int]:
         raise BatchNotReusable("Contact plan counters do not reconcile to total rows.")
     if created_relationship + existing_relationship != total:
         raise BatchNotReusable("Relationship plan counters do not reconcile to total rows.")
+    if imported_status + default_status + preserved_status != total:
+        raise BatchNotReusable("Status plan counters do not reconcile to total rows.")
+    if notes_set + notes_appended + notes_duplicate + notes_unchanged != total:
+        raise BatchNotReusable("Notes plan counters do not reconcile to total rows.")
 
     return (
         created_company,
@@ -108,6 +142,13 @@ def _require_allowed_actions(plan) -> tuple[int, int, int, int, int, int, int]:
         created_relationship,
         existing_relationship,
         no_contact_rows,
+        imported_status,
+        default_status,
+        preserved_status,
+        notes_set,
+        notes_appended,
+        notes_duplicate,
+        notes_unchanged,
     )
 
 
@@ -174,6 +215,13 @@ def confirm_admin_crm_import_batch(
                 created_relationship_count,
                 existing_relationship_count,
                 no_contact_row_count,
+                imported_status_count,
+                default_status_count,
+                preserved_status_count,
+                notes_set_count,
+                notes_appended_count,
+                notes_duplicate_count,
+                notes_unchanged_count,
             ) = _require_allowed_actions(plan)
 
             total_imported_row_count = int(plan.total_rows)
@@ -361,18 +409,25 @@ def confirm_admin_crm_import_batch(
                     if proposed_key in relationship_key_to_id:
                         raise BatchNotReusable("Duplicate proposed relationship creation detected.")
 
+                    resolved_status = _blank(row.resolved_status) or "New"
+                    planned_notes = "" if row.planned_notes is None else str(row.planned_notes)
+                    if row.notes_action == NOTES_NO_CHANGE:
+                        planned_notes = ""
                     cur = conn.execute(
                         """
                         INSERT INTO client_company_relationships (
                             client_id, company_id, external_record_no,
                             status, assigned_user_id, priority, next_action,
                             notes, is_hot, created_at, updated_at
-                        ) VALUES (?, ?, ?, 'New', NULL, '', '', '', 0, ?, ?)
+                        ) VALUES (?, ?, ?, ?, NULL, '', '', ?, ?, ?, ?)
                         """,
                         (
                             int(client_id),
                             company_id,
                             company_external_record_no,
+                            resolved_status,
+                            planned_notes,
+                            1 if is_hot_prospect_status(resolved_status) else 0,
                             now,
                             now,
                         ),
@@ -390,7 +445,7 @@ def confirm_admin_crm_import_batch(
                         # Verify belongs to same client + company.
                         rel = conn.execute(
                             """
-                            SELECT client_id, company_id
+                            SELECT client_id, company_id, notes
                             FROM client_company_relationships
                             WHERE id = ?
                             """,
@@ -400,6 +455,30 @@ def confirm_admin_crm_import_batch(
                             raise BatchNotReusable("Plan references missing relationship.")
                         if int(rel["client_id"]) != int(client_id) or int(rel["company_id"]) != int(company_id):
                             raise BatchNotReusable("Plan references relationship in a different client/company.")
+                        if row.notes_action == NOTES_APPEND:
+                            planned_notes = "" if row.planned_notes is None else str(row.planned_notes)
+                            conn.execute(
+                                """
+                                UPDATE client_company_relationships
+                                SET notes = ?, updated_at = ?
+                                WHERE id = ? AND client_id = ? AND company_id = ?
+                                """,
+                                (
+                                    planned_notes,
+                                    now,
+                                    relationship_id,
+                                    int(client_id),
+                                    int(company_id),
+                                ),
+                            )
+                            if int(conn.execute("SELECT changes() AS n").fetchone()["n"]) != 1:
+                                raise BatchNotReusable("Relationship notes UPDATE did not change exactly one row.")
+                        elif row.notes_action in {NOTES_NO_CHANGE, NOTES_ALREADY_PRESENT}:
+                            pass
+                        elif row.notes_action == NOTES_SET:
+                            raise BatchNotReusable("set_imported_notes is invalid for existing relationships.")
+                        else:
+                            raise BatchNotReusable("Unsupported notes action for existing relationship.")
                     else:
                         proposed_key = _assert_proposed_key_present(
                             row.relationship_proposed_key, "proposed:relationship:"
@@ -409,6 +488,24 @@ def confirm_admin_crm_import_batch(
                         relationship_id = relationship_key_to_id[proposed_key]
                         if relationship_key_to_company_id.get(proposed_key) != int(company_id):
                             raise BatchNotReusable("Proposed relationship resolved to wrong company.")
+                        if row.notes_action == NOTES_APPEND:
+                            planned_notes = "" if row.planned_notes is None else str(row.planned_notes)
+                            conn.execute(
+                                """
+                                UPDATE client_company_relationships
+                                SET notes = ?, updated_at = ?
+                                WHERE id = ? AND client_id = ? AND company_id = ?
+                                """,
+                                (
+                                    planned_notes,
+                                    now,
+                                    relationship_id,
+                                    int(client_id),
+                                    int(company_id),
+                                ),
+                            )
+                            if int(conn.execute("SELECT changes() AS n").fetchone()["n"]) != 1:
+                                raise BatchNotReusable("Relationship notes UPDATE did not change exactly one row.")
 
                 # -----------------
                 # Results audit row (one per staged row)
@@ -419,8 +516,9 @@ def confirm_admin_crm_import_batch(
                         batch_id, source_row_number, staged_row_id,
                         company_action, company_id,
                         contact_action, contact_id,
-                        relationship_action, relationship_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        relationship_action, relationship_id,
+                        status_action, notes_action
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         int(batch_id),
@@ -432,6 +530,8 @@ def confirm_admin_crm_import_batch(
                         contact_id if contact_id is not None else None,
                         row.relationship_action,
                         int(relationship_id),
+                        row.status_action,
+                        row.notes_action,
                     ),
                 )
                 actual_results_inserts += 1
@@ -486,6 +586,13 @@ def confirm_admin_crm_import_batch(
                     existing_relationship_count = ?,
                     no_contact_row_count = ?,
                     total_imported_row_count = ?,
+                    imported_status_count = ?,
+                    default_status_count = ?,
+                    preserved_status_count = ?,
+                    notes_set_count = ?,
+                    notes_appended_count = ?,
+                    notes_duplicate_count = ?,
+                    notes_unchanged_count = ?,
                     updated_at = ?,
                     headers_json = '[]',
                     warnings_json = '[]',
@@ -504,6 +611,13 @@ def confirm_admin_crm_import_batch(
                     existing_relationship_count,
                     no_contact_row_count,
                     total_imported_row_count,
+                    imported_status_count,
+                    default_status_count,
+                    preserved_status_count,
+                    notes_set_count,
+                    notes_appended_count,
+                    notes_duplicate_count,
+                    notes_unchanged_count,
                     now,
                     int(batch_id),
                     int(client_id),
@@ -560,7 +674,10 @@ def confirm_admin_crm_import_batch(
                     created_company_count, reused_company_count,
                     created_contact_count, reused_contact_count,
                     created_relationship_count, existing_relationship_count,
-                    no_contact_row_count, total_imported_row_count
+                    no_contact_row_count, total_imported_row_count,
+                    imported_status_count, default_status_count, preserved_status_count,
+                    notes_set_count, notes_appended_count, notes_duplicate_count,
+                    notes_unchanged_count
                 FROM crm_import_batches
                 WHERE id = ? AND client_id = ?
                 """,
@@ -584,6 +701,13 @@ def confirm_admin_crm_import_batch(
                 "existing_relationship_count": int(out["existing_relationship_count"]),
                 "no_contact_row_count": int(out["no_contact_row_count"]),
                 "total_imported_row_count": int(out["total_imported_row_count"]),
+                "imported_status_count": int(out["imported_status_count"] or 0),
+                "default_status_count": int(out["default_status_count"] or 0),
+                "preserved_status_count": int(out["preserved_status_count"] or 0),
+                "notes_set_count": int(out["notes_set_count"] or 0),
+                "notes_appended_count": int(out["notes_appended_count"] or 0),
+                "notes_duplicate_count": int(out["notes_duplicate_count"] or 0),
+                "notes_unchanged_count": int(out["notes_unchanged_count"] or 0),
             }
         except Exception:
             conn.rollback()

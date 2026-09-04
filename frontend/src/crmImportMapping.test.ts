@@ -16,6 +16,8 @@ describe('crmImportMapping helpers', () => {
       'Full Name',
       'Website',
       'Phone',
+      'Status',
+      'Notes',
     ])
     expect(suggested).toEqual({
       company_name: 'Company Name',
@@ -24,6 +26,8 @@ describe('crmImportMapping helpers', () => {
       contact_last_name: 'Last Name',
       website: 'Website',
       phone: 'Phone',
+      relationship_status: 'Status',
+      relationship_notes: 'Notes',
     })
     expect(suggested.contact_full_name).toBeUndefined()
     const values = Object.values(suggested)

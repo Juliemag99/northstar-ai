@@ -69,6 +69,15 @@ function emptyCounts(
     create_client_relationship: 1,
     relationship_already_exists: 0,
     relationship_deferred: 0,
+    use_default_status: 1,
+    preserve_existing_status: 0,
+    use_imported_status: 0,
+    status_conflict: 0,
+    invalid_status: 0,
+    no_notes_change: 1,
+    set_imported_notes: 0,
+    append_imported_notes: 0,
+    imported_notes_already_present: 0,
     importable_rows: 1,
     needs_review_rows: 0,
     ...overrides,
@@ -122,6 +131,9 @@ function dryRunResponse(
           action: 'create_client_relationship',
           relationship_id: null,
           proposed_key: 'proposed:relationship:2:1',
+          status_action: 'use_default_status',
+          notes_action: 'no_notes_change',
+          resolved_status: 'New',
         },
       },
     ],
@@ -499,6 +511,9 @@ describe('Administration import tab', () => {
               action: 'deferred',
               relationship_id: null,
               proposed_key: null,
+              status_action: 'none',
+              notes_action: 'none',
+              resolved_status: '',
             },
           },
         ],
@@ -841,6 +856,125 @@ describe('Administration import tab', () => {
     expect(screen.queryByRole('button', { name: 'Confirm Import' })).toBeNull()
   })
 
+  it('shows relationship status/notes mapping and blocks confirm on status conflict', async () => {
+    const file = new File(['Company,Status,Notes\nAcme,Active,Hello\n'], 'sn.csv', {
+      type: 'text/csv',
+    })
+    vi.mocked(crmImport.uploadCrmImport).mockResolvedValue({
+      kind: 'previewed',
+      needs_worksheet: false,
+      visible_sheets: [],
+      filename: 'sn.csv',
+      file_type: 'csv',
+      message: 'Preview ready.',
+      batch: baseBatch({
+        headers: ['Company', 'Status', 'Notes'],
+        mapping: {
+          company_name: 'Company',
+          relationship_status: 'Status',
+          relationship_notes: 'Notes',
+        },
+        mapping_updated_at: 't',
+        mapping_updated_by_user_id: 1,
+      }),
+    })
+    vi.mocked(crmImport.fetchCrmImportRows).mockResolvedValue({
+      batch_id: 11,
+      client_id: 7,
+      offset: 0,
+      limit: 25,
+      total: 1,
+      rows: [],
+    })
+    vi.mocked(crmImport.dryRunCrmImport).mockResolvedValue(
+      dryRunResponse({
+        counts: emptyCounts({
+          importable_rows: 0,
+          needs_review_rows: 1,
+          create_client_relationship: 0,
+          relationship_already_exists: 1,
+          use_default_status: 0,
+          status_conflict: 1,
+          no_notes_change: 0,
+          append_imported_notes: 1,
+          ok: 0,
+        }),
+        rows: [
+          {
+            row_id: 1,
+            source_row_number: 2,
+            validity: 'ok',
+            validity_detail: '',
+            mapped: {
+              company_name: 'Acme',
+              relationship_status: 'Active',
+              relationship_notes: 'Hello world note that must not appear in full',
+            },
+            company: {
+              action: 'use_existing_company',
+              reasons: ['name_exact'],
+              company_id: 9,
+              proposed_key: null,
+              created_at_source_row: null,
+              name: 'Acme',
+              possibles: [],
+            },
+            contact: {
+              action: 'no_contact_data',
+              reasons: [],
+              contact_id: null,
+              proposed_key: null,
+              created_at_source_row: null,
+              display_name: '',
+              possibles: [],
+            },
+            relationship: {
+              action: 'relationship_already_exists',
+              relationship_id: 3,
+              proposed_key: null,
+              status_action: 'status_conflict',
+              notes_action: 'append_imported_notes',
+              resolved_status: 'Active',
+            },
+          },
+        ],
+      }),
+    )
+
+    render(
+      <AdministrationImport
+        allMyClients={false}
+        connectClientId={7}
+        scopedClientId={7}
+        availableClients={clients}
+        onScopedClientId={() => undefined}
+        clientName="Carmeco"
+      />,
+    )
+    fireEvent.change(screen.getByLabelText('Company and contact spreadsheet'), {
+      target: { files: [file] },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Upload for preview' }))
+    await screen.findByText('Column mapping')
+    expect((screen.getByLabelText('Relationship status') as HTMLSelectElement).value).toBe(
+      'Status',
+    )
+    expect((screen.getByLabelText('Relationship notes') as HTMLSelectElement).value).toBe('Notes')
+    fireEvent.click(screen.getByRole('button', { name: 'Run Dry Run' }))
+    expect(
+      await screen.findByText('Review is required before this batch can be imported.'),
+    ).toBeTruthy()
+    const counts = screen.getByLabelText('Full-batch dry-run counts')
+    expect(within(counts).getByText('Status conflicts / invalid').parentElement?.textContent).toMatch(
+      /Status conflicts \/ invalid\s*1 \/ 0/,
+    )
+    expect(screen.getByText('Status conflict')).toBeTruthy()
+    expect(screen.getByText('Append imported notes')).toBeTruthy()
+    expect(screen.queryByText('Hello world note that must not appear in full')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Confirm Import' })).toBeNull()
+    expect(document.body.innerHTML).not.toContain('dangerouslySetInnerHTML')
+  })
+
   it('opens an accessible confirm dialog with client and counts, Cancel restores focus', async () => {
     await renderReadyToConfirm(
       dryRunResponse({
@@ -920,10 +1054,18 @@ describe('Administration import tab', () => {
       existing_relationship_count: 0,
       no_contact_row_count: 0,
       total_imported_row_count: 1,
+      imported_status_count: 0,
+      default_status_count: 1,
+      preserved_status_count: 0,
+      notes_set_count: 0,
+      notes_appended_count: 0,
+      notes_duplicate_count: 0,
+      notes_unchanged_count: 1,
     })
     expect(await screen.findByText('Import completed')).toBeTruthy()
     expect(crmImport.confirmCrmImport).toHaveBeenCalledWith(7, 11, 'ab'.repeat(32))
     expect(screen.getByLabelText('Import completion summary').textContent).toMatch(/Imported rows\s*1/)
+    expect(screen.getByLabelText('Import completion summary').textContent).toMatch(/Default statuses\s*1/)
     expect(screen.queryByText('Column mapping')).toBeNull()
     expect(screen.queryByText('Dry-run review')).toBeNull()
     expect(screen.queryByRole('button', { name: 'Confirm Import' })).toBeNull()

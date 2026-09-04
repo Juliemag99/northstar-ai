@@ -28,6 +28,19 @@ from crm_import_staging import (
     STATUS_PREVIEWED,
     _normalize_mapping,
 )
+from crm_import_status_notes import (
+    NOTES_ALREADY_PRESENT,
+    NOTES_APPEND,
+    NOTES_NO_CHANGE,
+    NOTES_SET,
+    STATUS_CONFLICT,
+    STATUS_INVALID,
+    STATUS_PRESERVE,
+    STATUS_USE_DEFAULT,
+    STATUS_USE_IMPORTED,
+    load_client_status_catalog,
+    plan_status_and_notes,
+)
 from import_brown_industries import digits_phone, domain, norm_addr, norm_name
 from models import (
     CrmImportDryRunCompanyPlan,
@@ -40,7 +53,7 @@ from models import (
     CrmImportDryRunRow,
 )
 
-PLANNER_VERSION = "crm-import-plan-v1"
+PLANNER_VERSION = "crm-import-plan-v2"
 MAX_DRY_RUN_PAGE = 100
 IN_CHUNK = 400
 INVALID_PAGING = "Invalid paging."
@@ -180,6 +193,8 @@ class StagedPlanRow:
     contact_title: str
     contact_email: str
     contact_phone: str
+    relationship_status: str
+    relationship_notes: str
     norm_company: str
     company_domain: str
     company_phone_digits: str
@@ -190,6 +205,21 @@ class StagedPlanRow:
     person_norm: str
     has_any_contact_field: bool
     can_create_contact: bool
+
+
+@dataclass(slots=True)
+class RelationshipRec:
+    relationship_id: int
+    company_id: int
+    status: str
+    notes: str
+
+
+@dataclass(slots=True)
+class ProposedRelationshipState:
+    proposed_key: str
+    status: str
+    notes: str
 
 
 @dataclass(slots=True)
@@ -215,6 +245,10 @@ class RowDecision:
     relationship_action: str
     relationship_id: int | None
     relationship_proposed_key: str | None
+    status_action: str
+    notes_action: str
+    resolved_status: str
+    planned_notes: str
     mapped: dict[str, str]
 
 
@@ -384,6 +418,11 @@ def _build_staged_row(row, mapping: dict[str, str]) -> StagedPlanRow:
     person = _norm_person_name(full)
     has_any_contact_field = bool(first or last or full or title or email or phone)
     can_create = bool(full or email)
+    relationship_status = _blank(mapped.get("relationship_status"))
+    # Keep full notes for planning; dry-run mapped display remains capped.
+    relationship_notes_raw = "" if mapped.get("relationship_notes") is None else str(
+        mapped.get("relationship_notes") or ""
+    )
     return StagedPlanRow(
         row_id=int(row["id"]),
         source_row_number=int(row["source_row_number"] or 0),
@@ -403,6 +442,8 @@ def _build_staged_row(row, mapping: dict[str, str]) -> StagedPlanRow:
         contact_title=title,
         contact_email=_blank(mapped.get("contact_email")),
         contact_phone=phone,
+        relationship_status=relationship_status,
+        relationship_notes=relationship_notes_raw,
         norm_company=norm_name(_blank(mapped.get("company_name"))),
         company_domain=domain(_blank(mapped.get("website"))),
         company_phone_digits=digits_phone(_blank(mapped.get("phone"))),
@@ -439,6 +480,10 @@ def _empty_decision(staged: StagedPlanRow, validity: str, detail: str) -> RowDec
         relationship_action="none",
         relationship_id=None,
         relationship_proposed_key=None,
+        status_action="none",
+        notes_action="none",
+        resolved_status="",
+        planned_notes="",
         mapped=dict(staged.mapped),
     )
 
@@ -491,6 +536,15 @@ def _counts_from_rows(rows: list[RowDecision]) -> dict[str, int]:
         "create_client_relationship": 0,
         "relationship_already_exists": 0,
         "relationship_deferred": 0,
+        "use_default_status": 0,
+        "preserve_existing_status": 0,
+        "use_imported_status": 0,
+        "status_conflict": 0,
+        "invalid_status": 0,
+        "no_notes_change": 0,
+        "set_imported_notes": 0,
+        "append_imported_notes": 0,
+        "imported_notes_already_present": 0,
         "importable_rows": 0,
         "needs_review_rows": 0,
     }
@@ -511,6 +565,10 @@ def _counts_from_rows(rows: list[RowDecision]) -> dict[str, int]:
             counts["relationship_deferred"] += 1
         elif row.relationship_action in counts:
             counts[row.relationship_action] += 1
+        if row.status_action in counts:
+            counts[row.status_action] += 1
+        if row.notes_action in counts:
+            counts[row.notes_action] += 1
         importable = (
             row.validity == "ok"
             and row.company_action in {"create_company", "use_existing_company"}
@@ -518,6 +576,10 @@ def _counts_from_rows(rows: list[RowDecision]) -> dict[str, int]:
             in {"create_contact", "use_existing_contact", "no_contact_data"}
             and row.relationship_action
             in {"create_client_relationship", "relationship_already_exists"}
+            and row.status_action
+            in {STATUS_USE_DEFAULT, STATUS_PRESERVE, STATUS_USE_IMPORTED}
+            and row.notes_action
+            in {NOTES_NO_CHANGE, NOTES_SET, NOTES_APPEND, NOTES_ALREADY_PRESENT}
         )
         if importable:
             counts["importable_rows"] += 1
@@ -582,6 +644,9 @@ def _fingerprint_payload(
                 "relationship_action": d.relationship_action,
                 "relationship_id": d.relationship_id,
                 "relationship_proposed_key": d.relationship_proposed_key,
+                "status_action": d.status_action,
+                "notes_action": d.notes_action,
+                "resolved_status": d.resolved_status,
             }
             for d in decisions
         ],
@@ -640,17 +705,23 @@ def _load_matching_companies(conn, staged: list[StagedPlanRow]) -> list[CompanyR
     return kept
 
 
-def _load_relationships(conn, client_id: int) -> dict[int, int]:
-    found: dict[int, int] = {}
+def _load_relationships(conn, client_id: int) -> dict[int, RelationshipRec]:
+    found: dict[int, RelationshipRec] = {}
     for raw in conn.execute(
         """
-        SELECT id, company_id
+        SELECT id, company_id, status, notes
         FROM client_company_relationships
         WHERE client_id = ?
         """,
         (client_id,),
     ):
-        found[int(raw["company_id"])] = int(raw["id"])
+        company_id = int(raw["company_id"])
+        found[company_id] = RelationshipRec(
+            relationship_id=int(raw["id"]),
+            company_id=company_id,
+            status=_blank(raw["status"]),
+            notes="" if raw["notes"] is None else str(raw["notes"]),
+        )
     return found
 
 
@@ -809,6 +880,7 @@ def plan_crm_import_batch(conn, *, client_id: int, batch_id: int) -> ImportPlan:
     staged = [_build_staged_row(row, mapping) for row in staged_raw]
     db_companies = _load_matching_companies(conn, staged)
     relationships = _load_relationships(conn, client_id)
+    status_catalog = load_client_status_catalog(conn, client_id)
     staged_names = {row.person_norm for row in staged if row.person_norm}
     name_elsewhere = _load_name_elsewhere(conn, staged_names)
 
@@ -872,7 +944,7 @@ def plan_crm_import_batch(conn, *, client_id: int, batch_id: int) -> ImportPlan:
     contacts_by_company, phone_keys = _load_contacts_for_companies(conn, needed_company_ids)
 
     proposed_contacts: list[ContactRec] = []
-    proposed_relationships: dict[str, str] = {}
+    proposed_relationships: dict[str, ProposedRelationshipState] = {}
 
     for staged_row, decision in zip(staged, decisions):
         if decision.validity != "ok" or decision.company_action == "possible_company_match":
@@ -897,6 +969,7 @@ def plan_crm_import_batch(conn, *, client_id: int, batch_id: int) -> ImportPlan:
             company_key=company_key,
             db_relationships=relationships,
             proposed_relationships=proposed_relationships,
+            status_catalog=status_catalog,
         )
 
     fingerprint = hashlib.sha256(
@@ -1069,24 +1142,70 @@ def _plan_relationship(
     decision: RowDecision,
     *,
     company_key: str,
-    db_relationships: dict[int, int],
-    proposed_relationships: dict[str, str],
+    db_relationships: dict[int, RelationshipRec],
+    proposed_relationships: dict[str, ProposedRelationshipState],
+    status_catalog,
 ) -> None:
     if decision.validity != "ok":
         return
+
+    relationship_is_new = True
+    existing_status = ""
+    existing_notes = ""
     if decision.company_id is not None and decision.company_id in db_relationships:
+        existing = db_relationships[decision.company_id]
         decision.relationship_action = "relationship_already_exists"
-        decision.relationship_id = db_relationships[decision.company_id]
-        return
-    prior = proposed_relationships.get(company_key)
-    if prior:
-        decision.relationship_action = "relationship_already_exists"
-        decision.relationship_proposed_key = prior
-        return
-    key = _proposed_key("relationship", staged.source_row_number, staged.row_id)
-    proposed_relationships[company_key] = key
-    decision.relationship_action = "create_client_relationship"
-    decision.relationship_proposed_key = key
+        decision.relationship_id = existing.relationship_id
+        relationship_is_new = False
+        existing_status = existing.status
+        existing_notes = existing.notes
+    else:
+        prior = proposed_relationships.get(company_key)
+        if prior:
+            decision.relationship_action = "relationship_already_exists"
+            decision.relationship_proposed_key = prior.proposed_key
+            relationship_is_new = False
+            existing_status = prior.status
+            existing_notes = prior.notes
+        else:
+            key = _proposed_key("relationship", staged.source_row_number, staged.row_id)
+            decision.relationship_action = "create_client_relationship"
+            decision.relationship_proposed_key = key
+            relationship_is_new = True
+            existing_status = ""
+            existing_notes = ""
+
+    sn_plan = plan_status_and_notes(
+        relationship_is_new=relationship_is_new,
+        existing_status=existing_status,
+        existing_notes=existing_notes,
+        imported_status=staged.relationship_status,
+        imported_notes=staged.relationship_notes,
+        catalog=status_catalog,
+    )
+    decision.status_action = sn_plan.status_action
+    decision.notes_action = sn_plan.notes_action
+    decision.resolved_status = sn_plan.resolved_status
+    decision.planned_notes = sn_plan.planned_notes
+
+    if decision.relationship_action == "create_client_relationship":
+        proposed_relationships[company_key] = ProposedRelationshipState(
+            proposed_key=str(decision.relationship_proposed_key or ""),
+            status=decision.resolved_status,
+            notes=decision.planned_notes,
+        )
+    elif (
+        decision.relationship_action == "relationship_already_exists"
+        and decision.relationship_id is None
+        and company_key in proposed_relationships
+        and decision.notes_action == NOTES_APPEND
+        and not sn_plan.needs_review
+    ):
+        # Keep in-batch proposed notes current for later duplicate-company rows.
+        proposed_relationships[company_key].notes = decision.planned_notes
+        proposed_relationships[company_key].status = (
+            decision.resolved_status or proposed_relationships[company_key].status
+        )
 
 
 def _row_to_api(row: RowDecision) -> CrmImportDryRunRow:
@@ -1133,6 +1252,12 @@ def _row_to_api(row: RowDecision) -> CrmImportDryRunRow:
             action=row.relationship_action,
             relationship_id=row.relationship_id,
             proposed_key=row.relationship_proposed_key,
+            status_action=row.status_action if row.status_action != "none" else "none",
+            notes_action=row.notes_action if row.notes_action != "none" else "none",
+            resolved_status=row.resolved_status
+            if row.status_action
+            in {STATUS_USE_DEFAULT, STATUS_PRESERVE, STATUS_USE_IMPORTED}
+            else "",
         ),
     )
 

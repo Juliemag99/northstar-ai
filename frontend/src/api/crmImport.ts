@@ -96,6 +96,21 @@ export type CrmImportRelationshipAction =
   | 'relationship_already_exists'
   | 'deferred'
 
+export type CrmImportStatusAction =
+  | 'none'
+  | 'use_default_status'
+  | 'preserve_existing_status'
+  | 'use_imported_status'
+  | 'status_conflict'
+  | 'invalid_status'
+
+export type CrmImportNotesAction =
+  | 'none'
+  | 'no_notes_change'
+  | 'set_imported_notes'
+  | 'append_imported_notes'
+  | 'imported_notes_already_present'
+
 export type CrmImportDryRunCompanyPossible = {
   company_id: number
   company_name: string
@@ -133,6 +148,9 @@ export type CrmImportDryRunRelationshipPlan = {
   action: CrmImportRelationshipAction
   relationship_id: number | null
   proposed_key: string | null
+  status_action: CrmImportStatusAction
+  notes_action: CrmImportNotesAction
+  resolved_status: string
 }
 
 export type CrmImportDryRunRow = {
@@ -162,6 +180,15 @@ export type CrmImportDryRunCounts = {
   create_client_relationship: number
   relationship_already_exists: number
   relationship_deferred: number
+  use_default_status: number
+  preserve_existing_status: number
+  use_imported_status: number
+  status_conflict: number
+  invalid_status: number
+  no_notes_change: number
+  set_imported_notes: number
+  append_imported_notes: number
+  imported_notes_already_present: number
   importable_rows: number
   needs_review_rows: number
 }
@@ -199,6 +226,13 @@ export type CrmImportConfirmResponse = {
   existing_relationship_count: number
   no_contact_row_count: number
   total_imported_row_count: number
+  imported_status_count: number
+  default_status_count: number
+  preserved_status_count: number
+  notes_set_count: number
+  notes_appended_count: number
+  notes_duplicate_count: number
+  notes_unchanged_count: number
 }
 
 export const CRM_IMPORT_DRY_RUN_MAX_PAGE = 100

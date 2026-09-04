@@ -3146,6 +3146,9 @@ class CrmImportDryRunRelationshipPlan(BaseModel):
     action: str = "none"
     relationship_id: int | None = None
     proposed_key: str | None = None
+    status_action: str = "none"
+    notes_action: str = "none"
+    resolved_status: str = ""
 
 
 class CrmImportDryRunRow(BaseModel):
@@ -3177,6 +3180,15 @@ class CrmImportDryRunCounts(BaseModel):
     create_client_relationship: int = 0
     relationship_already_exists: int = 0
     relationship_deferred: int = 0
+    use_default_status: int = 0
+    preserve_existing_status: int = 0
+    use_imported_status: int = 0
+    status_conflict: int = 0
+    invalid_status: int = 0
+    no_notes_change: int = 0
+    set_imported_notes: int = 0
+    append_imported_notes: int = 0
+    imported_notes_already_present: int = 0
     importable_rows: int = 0
     needs_review_rows: int = 0
 
@@ -3214,3 +3226,10 @@ class CrmImportConfirmResponse(BaseModel):
     existing_relationship_count: int = 0
     no_contact_row_count: int = 0
     total_imported_row_count: int = 0
+    imported_status_count: int = 0
+    default_status_count: int = 0
+    preserved_status_count: int = 0
+    notes_set_count: int = 0
+    notes_appended_count: int = 0
+    notes_duplicate_count: int = 0
+    notes_unchanged_count: int = 0

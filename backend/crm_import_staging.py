@@ -91,6 +91,8 @@ CANONICAL_MAPPING_FIELDS = frozenset(
         "contact_title",
         "contact_email",
         "contact_phone",
+        "relationship_status",
+        "relationship_notes",
     }
 )
 
@@ -219,6 +221,13 @@ def ensure_crm_import_schema(conn=None) -> None:
                 existing_relationship_count INTEGER NOT NULL DEFAULT 0,
                 no_contact_row_count INTEGER NOT NULL DEFAULT 0,
                 total_imported_row_count INTEGER NOT NULL DEFAULT 0,
+                imported_status_count INTEGER NOT NULL DEFAULT 0,
+                default_status_count INTEGER NOT NULL DEFAULT 0,
+                preserved_status_count INTEGER NOT NULL DEFAULT 0,
+                notes_set_count INTEGER NOT NULL DEFAULT 0,
+                notes_appended_count INTEGER NOT NULL DEFAULT 0,
+                notes_duplicate_count INTEGER NOT NULL DEFAULT 0,
+                notes_unchanged_count INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE,
                 FOREIGN KEY (uploaded_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
                 FOREIGN KEY (mapping_updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
@@ -255,6 +264,8 @@ def ensure_crm_import_schema(conn=None) -> None:
                 contact_id INTEGER,
                 relationship_action TEXT NOT NULL,
                 relationship_id INTEGER NOT NULL,
+                status_action TEXT NOT NULL DEFAULT '',
+                notes_action TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 FOREIGN KEY (batch_id) REFERENCES crm_import_batches(id) ON DELETE CASCADE,
                 UNIQUE (batch_id, staged_row_id)
@@ -286,9 +297,29 @@ def ensure_crm_import_schema(conn=None) -> None:
             ("existing_relationship_count", "INTEGER NOT NULL DEFAULT 0"),
             ("no_contact_row_count", "INTEGER NOT NULL DEFAULT 0"),
             ("total_imported_row_count", "INTEGER NOT NULL DEFAULT 0"),
+            # Relationship status/notes audit counters.
+            ("imported_status_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("default_status_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("preserved_status_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("notes_set_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("notes_appended_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("notes_duplicate_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("notes_unchanged_count", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if name not in existing:
                 conn.execute(f"ALTER TABLE crm_import_batches ADD COLUMN {name} {declaration}")
+        results_existing = {
+            str(r["name"])
+            for r in conn.execute("PRAGMA table_info(crm_import_results)").fetchall()
+        }
+        for name, declaration in (
+            ("status_action", "TEXT NOT NULL DEFAULT ''"),
+            ("notes_action", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if name not in results_existing:
+                conn.execute(
+                    f"ALTER TABLE crm_import_results ADD COLUMN {name} {declaration}"
+                )
         if owns:
             conn.commit()
     finally:

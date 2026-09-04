@@ -3,7 +3,7 @@
 export type CanonicalMappingField = {
   key: string
   label: string
-  group: 'company' | 'contact'
+  group: 'company' | 'contact' | 'relationship'
   required?: boolean
 }
 
@@ -21,6 +21,8 @@ export const CANONICAL_MAPPING_FIELDS: CanonicalMappingField[] = [
   { key: 'contact_title', label: 'Contact title', group: 'contact' },
   { key: 'contact_email', label: 'Contact email', group: 'contact' },
   { key: 'contact_phone', label: 'Contact phone', group: 'contact' },
+  { key: 'relationship_status', label: 'Relationship status', group: 'relationship' },
+  { key: 'relationship_notes', label: 'Relationship notes', group: 'relationship' },
 ]
 
 const FIELD_KEYS = new Set(CANONICAL_MAPPING_FIELDS.map((f) => f.key))
@@ -75,6 +77,15 @@ const HEADER_ALIASES: Record<string, string> = {
   contact_phone: 'contact_phone',
   mobile: 'contact_phone',
   cellphone: 'contact_phone',
+  status: 'relationship_status',
+  relationshipstatus: 'relationship_status',
+  relationship_status: 'relationship_status',
+  companystatus: 'relationship_status',
+  notes: 'relationship_notes',
+  note: 'relationship_notes',
+  relationshipnotes: 'relationship_notes',
+  relationship_notes: 'relationship_notes',
+  comments: 'relationship_notes',
 }
 
 export function normalizeHeaderKey(raw: string): string {
@@ -200,4 +211,8 @@ export function companyFields(): CanonicalMappingField[] {
 
 export function contactFields(): CanonicalMappingField[] {
   return CANONICAL_MAPPING_FIELDS.filter((f) => f.group === 'contact')
+}
+
+export function relationshipFields(): CanonicalMappingField[] {
+  return CANONICAL_MAPPING_FIELDS.filter((f) => f.group === 'relationship')
 }

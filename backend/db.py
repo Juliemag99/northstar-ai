@@ -104,6 +104,17 @@ _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("existing_relationship_count", "INTEGER NOT NULL DEFAULT 0"),
         ("no_contact_row_count", "INTEGER NOT NULL DEFAULT 0"),
         ("total_imported_row_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("imported_status_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("default_status_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("preserved_status_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("notes_set_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("notes_appended_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("notes_duplicate_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("notes_unchanged_count", "INTEGER NOT NULL DEFAULT 0"),
+    ],
+    "crm_import_results": [
+        ("status_action", "TEXT NOT NULL DEFAULT ''"),
+        ("notes_action", "TEXT NOT NULL DEFAULT ''"),
     ],
 }
 

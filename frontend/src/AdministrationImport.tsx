@@ -18,6 +18,7 @@ import {
   contactFields,
   mappingsEqual,
   normalizeMapping,
+  relationshipFields,
   suggestMapping,
   validateMapping,
 } from './crmImportMapping'
@@ -105,6 +106,42 @@ function relationshipActionLabel(action: string): string {
       return 'Relationship already exists'
     case 'deferred':
       return 'Deferred'
+    case 'none':
+      return 'None'
+    default:
+      return action || '—'
+  }
+}
+
+function statusActionLabel(action: string): string {
+  switch (action) {
+    case 'use_default_status':
+      return 'Use default status (New)'
+    case 'preserve_existing_status':
+      return 'Preserve existing status'
+    case 'use_imported_status':
+      return 'Use imported status'
+    case 'status_conflict':
+      return 'Status conflict'
+    case 'invalid_status':
+      return 'Invalid status'
+    case 'none':
+      return 'None'
+    default:
+      return action || '—'
+  }
+}
+
+function notesActionLabel(action: string): string {
+  switch (action) {
+    case 'no_notes_change':
+      return 'No notes change'
+    case 'set_imported_notes':
+      return 'Set imported notes'
+    case 'append_imported_notes':
+      return 'Append imported notes'
+    case 'imported_notes_already_present':
+      return 'Notes already present'
     case 'none':
       return 'None'
     default:
@@ -902,6 +939,34 @@ export default function AdministrationImport({
               <dd>{confirmResult.no_contact_row_count}</dd>
             </div>
             <div>
+              <dt>Imported statuses</dt>
+              <dd>{confirmResult.imported_status_count}</dd>
+            </div>
+            <div>
+              <dt>Default statuses</dt>
+              <dd>{confirmResult.default_status_count}</dd>
+            </div>
+            <div>
+              <dt>Preserved statuses</dt>
+              <dd>{confirmResult.preserved_status_count}</dd>
+            </div>
+            <div>
+              <dt>Notes set</dt>
+              <dd>{confirmResult.notes_set_count}</dd>
+            </div>
+            <div>
+              <dt>Notes appended</dt>
+              <dd>{confirmResult.notes_appended_count}</dd>
+            </div>
+            <div>
+              <dt>Notes duplicates skipped</dt>
+              <dd>{confirmResult.notes_duplicate_count}</dd>
+            </div>
+            <div>
+              <dt>Notes unchanged</dt>
+              <dd>{confirmResult.notes_unchanged_count}</dd>
+            </div>
+            <div>
               <dt>Imported at</dt>
               <dd>{confirmResult.imported_at || '—'}</dd>
             </div>
@@ -1116,6 +1181,32 @@ export default function AdministrationImport({
                     </label>
                   ))}
                 </fieldset>
+                <fieldset className="administration-import-fieldset">
+                  <legend>Relationship</legend>
+                  {relationshipFields().map((field) => (
+                    <label key={field.key} className="setup-field">
+                      <span className="setup-field-label">{field.label}</span>
+                      <select
+                        aria-label={field.label}
+                        value={draftNormalized[field.key] || ''}
+                        onChange={(e) => onDraftChange(field.key, e.target.value)}
+                        disabled={mappingSaving || dryRunLoading || confirming}
+                      >
+                        <option value="">Not mapped</option>
+                        {previewHeaders.map((header) => {
+                          const taken =
+                            usedHeaders.has(header) &&
+                            draftNormalized[field.key] !== header
+                          return (
+                            <option key={header} value={header} disabled={taken}>
+                              {header}
+                            </option>
+                          )
+                        })}
+                      </select>
+                    </label>
+                  ))}
+                </fieldset>
               </div>
 
               {mappingDirty && !localValidation.ok ? (
@@ -1208,6 +1299,27 @@ export default function AdministrationImport({
                     {dryRun.counts.relationship_deferred}
                   </dd>
                 </div>
+                <div>
+                  <dt>Status imported / default / preserved</dt>
+                  <dd>
+                    {dryRun.counts.use_imported_status} / {dryRun.counts.use_default_status} /{' '}
+                    {dryRun.counts.preserve_existing_status}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Status conflicts / invalid</dt>
+                  <dd>
+                    {dryRun.counts.status_conflict} / {dryRun.counts.invalid_status}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Notes set / append / duplicate / unchanged</dt>
+                  <dd>
+                    {dryRun.counts.set_imported_notes} / {dryRun.counts.append_imported_notes} /{' '}
+                    {dryRun.counts.imported_notes_already_present} /{' '}
+                    {dryRun.counts.no_notes_change}
+                  </dd>
+                </div>
               </dl>
 
               <div className="queue-table-wrap administration-import-table">
@@ -1219,6 +1331,8 @@ export default function AdministrationImport({
                       <th>Company</th>
                       <th>Contact</th>
                       <th>Relationship</th>
+                      <th>Status decision</th>
+                      <th>Notes decision</th>
                       <th>Mapped summary</th>
                       <th>Possible matches</th>
                       <th>Detail</th>
@@ -1235,6 +1349,9 @@ export default function AdministrationImport({
                           row.contact.display_name ||
                           row.mapped.contact_email ||
                           '',
+                      )
+                      const mappedStatus = truncateMapped(
+                        row.relationship.resolved_status || row.mapped.relationship_status || '',
                       )
                       const possibles = [
                         ...row.company.possibles.map(
@@ -1264,6 +1381,11 @@ export default function AdministrationImport({
                           <td>{companyActionLabel(row.company.action)}</td>
                           <td>{contactActionLabel(row.contact.action)}</td>
                           <td>{relationshipActionLabel(row.relationship.action)}</td>
+                          <td>
+                            <div>{statusActionLabel(row.relationship.status_action)}</div>
+                            {mappedStatus ? <div>{mappedStatus}</div> : null}
+                          </td>
+                          <td>{notesActionLabel(row.relationship.notes_action)}</td>
                           <td>
                             <div>{mappedCompany || '—'}</div>
                             <div>{mappedContact || '—'}</div>
