@@ -31,7 +31,7 @@ from carmeco_data import (
     get_company_by_record_no,
     get_company_workspace,
     list_contacts,
-    list_prospects,
+    list_prospects_page,
     list_relationship_statuses,
     update_relationship_notes,
     update_relationship_status,
@@ -450,11 +450,27 @@ def active_client(
 def list_prospects_api(
     client_id: int | None = Query(default=None),
     all_clients: bool = Query(default=False),
+    q: str | None = Query(default=None),
+    limit: int | None = Query(default=None, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
 ):
     """Return prospects for the Active Client (or all assigned clients)."""
-    prospects = list_prospects(client_id=client_id, all_clients=all_clients)
+    page = list_prospects_page(
+        client_id=client_id,
+        all_clients=all_clients,
+        q=q,
+        limit=limit,
+        offset=offset,
+    )
     client = get_active_client(client_id=client_id, all_clients=all_clients)
-    return ProspectsResponse(client=client, prospects=prospects)
+    return ProspectsResponse(
+        client=client,
+        prospects=page["prospects"],
+        total=int(page["total"]),
+        client_total=int(page["client_total"]),
+        offset=int(page["offset"]),
+        limit=page["limit"],
+    )
 
 
 @app.get("/api/carmeco/statuses", response_model=ClientStatusList)

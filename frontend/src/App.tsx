@@ -840,6 +840,14 @@ function App() {
   >([])
   const [activeClientId, setActiveClientId] = useState<number | null>(() => readStoredActiveClientId())
   const [prospects, setProspects] = useState<ProspectListItem[]>([])
+  const [companyListQuery, setCompanyListQuery] = useState('')
+  const [debouncedCompanyListQuery, setDebouncedCompanyListQuery] = useState('')
+  const [companyListPage, setCompanyListPage] = useState(0)
+  const [companyListRows, setCompanyListRows] = useState<ProspectListItem[]>([])
+  const [companyListTotal, setCompanyListTotal] = useState(0)
+  const [companyListClientTotal, setCompanyListClientTotal] = useState(0)
+  const [companyListLoading, setCompanyListLoading] = useState(false)
+  const COMPANY_PAGE_SIZE = 50
   const [queueRefreshKey, setQueueRefreshKey] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -993,6 +1001,71 @@ function App() {
       cancelled = true
     }
   }, [activeClientId])
+
+  useEffect(() => {
+    const timer = window.setTimeout(
+      () => setDebouncedCompanyListQuery(companyListQuery.trim()),
+      250,
+    )
+    return () => window.clearTimeout(timer)
+  }, [companyListQuery])
+
+  useEffect(() => {
+    setCompanyListPage(0)
+  }, [debouncedCompanyListQuery, activeClientId, activeNav, prospectFilter, prospectStatusFilter])
+
+  useEffect(() => {
+    if (activeClientId == null) {
+      setCompanyListRows([])
+      setCompanyListTotal(0)
+      setCompanyListClientTotal(0)
+      return
+    }
+    if (activeNav !== 'companies' && activeNav !== 'prospects') return
+    // Filtered queue views still use the full in-memory prospects list.
+    if (prospectFilter || prospectStatusFilter) {
+      setCompanyListRows([])
+      setCompanyListTotal(0)
+      setCompanyListClientTotal(prospects.length)
+      setCompanyListLoading(false)
+      return
+    }
+    let cancelled = false
+    setCompanyListLoading(true)
+    const allClients = activeClientId === 0
+    void fetchProspects({
+      client_id: allClients ? null : activeClientId,
+      all_clients: allClients,
+      q: debouncedCompanyListQuery,
+      limit: COMPANY_PAGE_SIZE,
+      offset: companyListPage * COMPANY_PAGE_SIZE,
+    })
+      .then((data) => {
+        if (cancelled) return
+        setCompanyListRows(data.prospects)
+        setCompanyListTotal(data.total)
+        setCompanyListClientTotal(data.client_total)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setCompanyListRows([])
+        setCompanyListTotal(0)
+      })
+      .finally(() => {
+        if (!cancelled) setCompanyListLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [
+    activeClientId,
+    activeNav,
+    debouncedCompanyListQuery,
+    companyListPage,
+    prospectFilter,
+    prospectStatusFilter,
+    prospects.length,
+  ])
 
   useEffect(() => {
     let cancelled = false
@@ -3773,84 +3846,191 @@ function App() {
               >
                 <div className="panel-header">
                   <h2>
-                    {filteredProspects.length} prospect
-                    {filteredProspects.length === 1 ? '' : 's'}
+                    {prospectFilter || prospectStatusFilter
+                      ? `${filteredProspects.length} prospect${filteredProspects.length === 1 ? '' : 's'}`
+                      : companyListLoading
+                        ? 'Loading…'
+                        : debouncedCompanyListQuery
+                          ? `${companyListTotal} match${companyListTotal === 1 ? '' : 'es'}`
+                          : `${companyListClientTotal || companyListTotal} prospect${
+                              (companyListClientTotal || companyListTotal) === 1 ? '' : 's'
+                            }`}
                   </h2>
                   <span className="queue-source">
-                    {client?.seed_file ?? 'database/northstar.db'} ·{' '}
-                    {client?.contact_count ?? '—'} contacts
+                    {prospectFilter || prospectStatusFilter
+                      ? `${client?.seed_file ?? 'database/northstar.db'} · ${client?.contact_count ?? '—'} contacts`
+                      : companyListTotal === 0
+                        ? `${companyListClientTotal} total`
+                        : `${companyListPage * COMPANY_PAGE_SIZE + 1}–${Math.min(
+                            companyListTotal,
+                            (companyListPage + 1) * COMPANY_PAGE_SIZE,
+                          )} of ${companyListTotal}${
+                            debouncedCompanyListQuery
+                              ? ` · ${companyListClientTotal} total`
+                              : ''
+                          }`}
                   </span>
                 </div>
 
-                <div className="opportunity-filter-grid" style={{ marginBottom: '0.85rem' }}>
-                  <label className="edit-field">
-                    <span className="edit-field__label">Status</span>
-                    <select
-                      className="edit-select"
-                      value={prospectStatusFilter}
-                      onChange={(event) => {
-                        const next = new URLSearchParams(searchParams)
-                        const value = event.target.value
-                        if (value) next.set('status', value)
-                        else next.delete('status')
-                        setSearchParams(next, { replace: true })
-                      }}
-                    >
-                      <option value="">Any status</option>
-                      {statusOptions.map((status) => (
-                        <option key={status} value={status}>
-                          {status}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
-
-                {filteredProspects.length === 0 ? (
-                  <p className="empty-state">
-                    {prospectFilterMeta?.empty ?? `No ${clientName} prospects match this filter.`}
-                  </p>
-                ) : (
-                  <div className="queue-table-wrap">
-                    <table className="queue-table">
-                      <thead>
-                        <tr>
-                          <th>Company</th>
-                          <th>City</th>
-                          <th>State</th>
-                          <th>Status</th>
-                          <th>Primary Contact</th>
-                          <th>Phone</th>
-                          <th>Last Updated</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {filteredProspects.map((prospect) => (
-                          <tr key={`${prospect.client_id}-${prospect.relationship_id || prospect.id}`}>
-                            <td>
-                              <Link
-                                to={companyWorkspaceHref(prospect.external_record_no, prospect.client_id || workspaceClientId)}
-                                className="company-link"
-                                onClick={() => setSidebarOpen(false)}
-                              >
-                                {prospect.company || '—'}
-                              </Link>
-                              <span className="queue-sub">
-                                Record No. {prospect.external_record_no}
-                              </span>
-                            </td>
-                            <td>{displayOrDash(prospect.city)}</td>
-                            <td>{displayOrDash(prospect.state)}</td>
-                            <td>{displayOrDash(prospectStatus(prospect))}</td>
-                            <td>{displayOrDash(prospect.primary_contact)}</td>
-                            <td>{displayOrDash(prospect.phone)}</td>
-                            <td>{displayOrDash(prospect.last_updated)}</td>
-                          </tr>
+                {!prospectFilter && !prospectStatusFilter ? (
+                  <div className="opportunity-filter-grid" style={{ marginBottom: '0.85rem' }}>
+                    <label className="edit-field">
+                      <span className="edit-field__label">Search companies</span>
+                      <input
+                        type="search"
+                        className="edit-input"
+                        value={companyListQuery}
+                        placeholder={`Search all ${clientName} companies`}
+                        aria-label={`Search all ${clientName} companies`}
+                        onChange={(event) => setCompanyListQuery(event.target.value)}
+                      />
+                    </label>
+                    <label className="edit-field">
+                      <span className="edit-field__label">Status</span>
+                      <select
+                        className="edit-select"
+                        value={prospectStatusFilter}
+                        onChange={(event) => {
+                          const next = new URLSearchParams(searchParams)
+                          const value = event.target.value
+                          if (value) next.set('status', value)
+                          else next.delete('status')
+                          setSearchParams(next, { replace: true })
+                        }}
+                      >
+                        <option value="">Any status</option>
+                        {statusOptions.map((status) => (
+                          <option key={status} value={status}>
+                            {status}
+                          </option>
                         ))}
-                      </tbody>
-                    </table>
+                      </select>
+                    </label>
+                  </div>
+                ) : (
+                  <div className="opportunity-filter-grid" style={{ marginBottom: '0.85rem' }}>
+                    <label className="edit-field">
+                      <span className="edit-field__label">Status</span>
+                      <select
+                        className="edit-select"
+                        value={prospectStatusFilter}
+                        onChange={(event) => {
+                          const next = new URLSearchParams(searchParams)
+                          const value = event.target.value
+                          if (value) next.set('status', value)
+                          else next.delete('status')
+                          setSearchParams(next, { replace: true })
+                        }}
+                      >
+                        <option value="">Any status</option>
+                        {statusOptions.map((status) => (
+                          <option key={status} value={status}>
+                            {status}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
                   </div>
                 )}
+
+                {(() => {
+                  const rows =
+                    prospectFilter || prospectStatusFilter
+                      ? filteredProspects
+                      : companyListRows
+                  if (companyListLoading && !(prospectFilter || prospectStatusFilter)) {
+                    return <p className="data-status">Loading {clientName} companies…</p>
+                  }
+                  if (rows.length === 0) {
+                    return (
+                      <p className="empty-state">
+                        {prospectFilterMeta?.empty ??
+                          (debouncedCompanyListQuery
+                            ? `No ${clientName} companies match that search.`
+                            : `No ${clientName} prospects match this filter.`)}
+                      </p>
+                    )
+                  }
+                  const pageCount = Math.max(
+                    1,
+                    Math.ceil(companyListTotal / COMPANY_PAGE_SIZE),
+                  )
+                  return (
+                    <>
+                      <div className="queue-table-wrap">
+                        <table className="queue-table">
+                          <thead>
+                            <tr>
+                              <th>Company</th>
+                              <th>City</th>
+                              <th>State</th>
+                              <th>Status</th>
+                              <th>Primary Contact</th>
+                              <th>Phone</th>
+                              <th>Last Updated</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {rows.map((prospect) => (
+                              <tr
+                                key={`${prospect.client_id}-${prospect.relationship_id || prospect.id}`}
+                              >
+                                <td>
+                                  <Link
+                                    to={companyWorkspaceHref(
+                                      prospect.external_record_no,
+                                      prospect.client_id || workspaceClientId,
+                                    )}
+                                    className="company-link"
+                                    onClick={() => setSidebarOpen(false)}
+                                  >
+                                    {prospect.company || '—'}
+                                  </Link>
+                                  <span className="queue-sub">
+                                    Record No. {prospect.external_record_no}
+                                  </span>
+                                </td>
+                                <td>{displayOrDash(prospect.city)}</td>
+                                <td>{displayOrDash(prospect.state)}</td>
+                                <td>{displayOrDash(prospectStatus(prospect))}</td>
+                                <td>{displayOrDash(prospect.primary_contact)}</td>
+                                <td>{displayOrDash(prospect.phone)}</td>
+                                <td>{displayOrDash(prospect.last_updated)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      {!prospectFilter &&
+                      !prospectStatusFilter &&
+                      companyListTotal > COMPANY_PAGE_SIZE ? (
+                        <div className="setup-actions" style={{ marginTop: '0.75rem' }}>
+                          <button
+                            type="button"
+                            className="link-btn"
+                            disabled={companyListPage <= 0 || companyListLoading}
+                            onClick={() => setCompanyListPage((p) => Math.max(0, p - 1))}
+                          >
+                            Previous
+                          </button>
+                          <span className="queue-source">
+                            Page {companyListPage + 1} of {pageCount}
+                          </span>
+                          <button
+                            type="button"
+                            className="link-btn"
+                            disabled={
+                              companyListPage + 1 >= pageCount || companyListLoading
+                            }
+                            onClick={() => setCompanyListPage((p) => p + 1)}
+                          >
+                            Next
+                          </button>
+                        </div>
+                      ) : null}
+                    </>
+                  )
+                })()}
               </section>
             </>
           )}

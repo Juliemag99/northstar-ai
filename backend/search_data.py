@@ -371,6 +371,153 @@ def rebuild_search_index(conn=None) -> int:
             conn.close()
 
 
+def index_company_relationship(client_id: int, company_id: int, conn=None) -> None:
+    """Upsert one company doc into search_fts for a client relationship."""
+    if not _db_exists() or client_id is None or company_id is None:
+        return
+    owns_conn = conn is None
+    if owns_conn:
+        conn = get_connection()
+    try:
+        if not _table_exists(conn, "search_fts"):
+            rebuild_search_index(conn)
+            return
+        conn.execute(
+            """
+            DELETE FROM search_fts
+            WHERE doc_type = 'company'
+              AND client_id = ?
+              AND company_id = ?
+            """,
+            (int(client_id), int(company_id)),
+        )
+        conn.execute(
+            """
+            INSERT INTO search_fts (
+                doc_type, client_id, company_id, external_record_no, contact_id,
+                source_table, source_id, company_name, client_name, client_code,
+                contact_name, note_type, created_by, event_at, title, body
+            )
+            SELECT
+                'company',
+                cl.id,
+                co.id,
+                COALESCE(NULLIF(TRIM(ccr.external_record_no), ''), co.external_record_no),
+                NULL,
+                'companies',
+                co.id,
+                co.company_name,
+                cl.name,
+                cl.code,
+                '',
+                '',
+                '',
+                COALESCE(NULLIF(co.last_updated_at, ''), co.created_at),
+                co.company_name,
+                trim(
+                    co.company_name || ' ' ||
+                    COALESCE(NULLIF(TRIM(ccr.external_record_no), ''), co.external_record_no) || ' ' ||
+                    co.address || ' ' ||
+                    co.city || ' ' ||
+                    co.state || ' ' ||
+                    co.zip || ' ' ||
+                    co.website || ' ' ||
+                    co.legacy_phone || ' ' ||
+                    co.legacy_email || ' ' ||
+                    COALESCE(ccr.status, '')
+                )
+            FROM client_company_relationships ccr
+            JOIN clients cl ON cl.id = ccr.client_id
+            JOIN companies co ON co.id = ccr.company_id
+            WHERE ccr.client_id = ? AND ccr.company_id = ?
+            """,
+            (int(client_id), int(company_id)),
+        )
+        if owns_conn:
+            conn.commit()
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def index_contact_relationship(
+    client_id: int, company_id: int, contact_id: int, conn=None
+) -> None:
+    """Upsert one contact doc into search_fts for a client relationship."""
+    if (
+        not _db_exists()
+        or client_id is None
+        or company_id is None
+        or contact_id is None
+    ):
+        return
+    owns_conn = conn is None
+    if owns_conn:
+        conn = get_connection()
+    try:
+        if not _table_exists(conn, "search_fts"):
+            rebuild_search_index(conn)
+            return
+        conn.execute(
+            """
+            DELETE FROM search_fts
+            WHERE doc_type = 'contact'
+              AND client_id = ?
+              AND contact_id = ?
+            """,
+            (int(client_id), int(contact_id)),
+        )
+        conn.execute(
+            """
+            INSERT INTO search_fts (
+                doc_type, client_id, company_id, external_record_no, contact_id,
+                source_table, source_id, company_name, client_name, client_code,
+                contact_name, note_type, created_by, event_at, title, body
+            )
+            SELECT
+                'contact',
+                cl.id,
+                co.id,
+                COALESCE(NULLIF(TRIM(ccr.external_record_no), ''), co.external_record_no),
+                ct.id,
+                'contacts',
+                ct.id,
+                co.company_name,
+                cl.name,
+                cl.code,
+                trim(ct.first_name || ' ' || ct.last_name),
+                '',
+                '',
+                ct.created_at,
+                trim(ct.first_name || ' ' || ct.last_name),
+                trim(
+                    ct.first_name || ' ' || ct.last_name || ' ' ||
+                    ct.title || ' ' ||
+                    ct.phone || ' ' ||
+                    ct.alt_phone || ' ' ||
+                    ct.email || ' ' ||
+                    co.company_name
+                )
+            FROM contacts ct
+            JOIN companies co ON co.id = ct.company_id
+            JOIN client_company_relationships ccr ON ccr.company_id = co.id
+            JOIN clients cl ON cl.id = ccr.client_id
+            WHERE ccr.client_id = ?
+              AND ccr.company_id = ?
+              AND ct.id = ?
+              AND TRIM(ct.external_record_no) = TRIM(
+                COALESCE(NULLIF(TRIM(ccr.external_record_no), ''), co.external_record_no)
+              )
+            """,
+            (int(client_id), int(company_id), int(contact_id)),
+        )
+        if owns_conn:
+            conn.commit()
+    finally:
+        if owns_conn:
+            conn.close()
+
+
 def index_activity(activity_id: int, conn=None) -> None:
     """Upsert one activity into search_fts without a full rebuild."""
     if not _db_exists() or activity_id is None:

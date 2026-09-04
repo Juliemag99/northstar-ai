@@ -8,6 +8,7 @@ from client_workspace_data import (  # noqa: F401
     list_carmeco_statuses,
     list_contacts,
     list_prospects,
+    list_prospects_page,
     list_relationship_statuses,
     update_carmeco_notes,
     update_carmeco_status,

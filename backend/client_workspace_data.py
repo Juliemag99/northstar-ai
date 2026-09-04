@@ -420,17 +420,47 @@ def list_prospects(
     client_id: int | None = None,
     all_clients: bool = False,
     user_id: int | None = None,
+    q: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> list[ProspectListItem]:
     """Prospects for one client, or all assigned clients when all_clients=True."""
+    return list_prospects_page(
+        client_id=client_id,
+        all_clients=all_clients,
+        user_id=user_id,
+        q=q,
+        limit=limit,
+        offset=offset,
+    )["prospects"]
+
+
+def list_prospects_page(
+    *,
+    client_id: int | None = None,
+    all_clients: bool = False,
+    user_id: int | None = None,
+    q: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> dict:
+    """Paginated/searchable prospects. limit=None returns the full matching set."""
+    empty = {
+        "prospects": [],
+        "total": 0,
+        "client_total": 0,
+        "offset": 0,
+        "limit": None,
+    }
     if not db_exists():
-        return []
+        return empty
 
     from access import get_default_user, resolve_dashboard_client_ids
 
     user = get_default_user() if user_id is None else None
     uid = user_id if user_id is not None else (user.id if user else None)
     if uid is None:
-        return []
+        return empty
 
     if all_clients or client_id == 0:
         client_ids = resolve_dashboard_client_ids(uid, selected_client_id=None)
@@ -439,22 +469,73 @@ def list_prospects(
             uid, selected_client_id=int(client_id)
         )
     else:
-        # Default Carmeco
         with get_connection() as conn:
             row = conn.execute(
                 "SELECT id FROM clients WHERE code = 'carmeco'"
             ).fetchone()
             if row is None:
-                return []
+                return empty
             client_ids = resolve_dashboard_client_ids(
                 uid, selected_client_id=int(row["id"])
             )
 
     if not client_ids:
-        return []
+        return empty
+
+    page_offset = max(0, int(offset or 0))
+    page_size: int | None
+    if limit is None:
+        page_size = None
+    else:
+        page_size = max(1, min(int(limit), 500))
 
     placeholders = ",".join("?" * len(client_ids))
-    sql = f"""
+    tokens = [t for t in _blank(q).split() if t]
+    search_clauses: list[str] = []
+    search_params: list[object] = []
+    for token in tokens:
+        esc = (
+            token.replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        like = f"%{esc}%"
+        search_clauses.append(
+            """
+            (
+              co.company_name LIKE ? ESCAPE '\\'
+              OR COALESCE(NULLIF(TRIM(ccr.external_record_no), ''), co.external_record_no) LIKE ? ESCAPE '\\'
+              OR co.city LIKE ? ESCAPE '\\'
+              OR co.state LIKE ? ESCAPE '\\'
+              OR COALESCE(ccr.status, '') LIKE ? ESCAPE '\\'
+              OR co.website LIKE ? ESCAPE '\\'
+              OR EXISTS (
+                SELECT 1 FROM contacts ct
+                WHERE ct.company_id = co.id
+                  AND (
+                    ct.first_name LIKE ? ESCAPE '\\'
+                    OR ct.last_name LIKE ? ESCAPE '\\'
+                    OR ct.email LIKE ? ESCAPE '\\'
+                    OR ct.phone LIKE ? ESCAPE '\\'
+                  )
+              )
+            )
+            """
+        )
+        search_params.extend([like] * 10)
+
+    search_sql = ""
+    if search_clauses:
+        search_sql = " AND " + " AND ".join(search_clauses)
+
+    from_sql = f"""
+        FROM client_company_relationships ccr
+        JOIN clients cl ON cl.id = ccr.client_id
+        JOIN companies co ON co.id = ccr.company_id
+        WHERE ccr.client_id IN ({placeholders})
+        {search_sql}
+    """
+    select_sql = f"""
         SELECT
             co.id,
             COALESCE(NULLIF(TRIM(ccr.external_record_no), ''), co.external_record_no)
@@ -500,10 +581,7 @@ def list_prospects(
                 ORDER BY ct.source_row_index ASC, ct.id ASC
                 LIMIT 1
             ) AS contact_phone
-        FROM client_company_relationships ccr
-        JOIN clients cl ON cl.id = ccr.client_id
-        JOIN companies co ON co.id = ccr.company_id
-        WHERE ccr.client_id IN ({placeholders})
+        {from_sql}
         ORDER BY cl.name COLLATE NOCASE ASC, co.company_name COLLATE NOCASE ASC
     """
 
@@ -511,6 +589,24 @@ def list_prospects(
     with get_connection() as conn:
         from milestones_data import companies_with_milestone_flags
         from work_queue_data import due_record_nos
+
+        client_total = int(
+            conn.execute(
+                f"""
+                SELECT COUNT(*) AS n
+                FROM client_company_relationships ccr
+                WHERE ccr.client_id IN ({placeholders})
+                """,
+                client_ids,
+            ).fetchone()["n"]
+        )
+        match_params = [*client_ids, *search_params]
+        total = int(
+            conn.execute(
+                f"SELECT COUNT(*) AS n {from_sql}",
+                match_params,
+            ).fetchone()["n"]
+        )
 
         flags_by_client: dict[int, dict[int, dict[str, bool]]] = {}
         call_due: dict[int, set[str]] = {}
@@ -520,7 +616,15 @@ def list_prospects(
             call_due[cid] = due_record_nos(kind="call", client_id=cid)
             follow_due[cid] = due_record_nos(kind="follow_up", client_id=cid)
 
-        for row in conn.execute(sql, client_ids):
+        if page_size is None:
+            rows = conn.execute(select_sql, match_params)
+        else:
+            rows = conn.execute(
+                select_sql + " LIMIT ? OFFSET ?",
+                [*match_params, page_size, page_offset],
+            )
+
+        for row in rows:
             primary = _contact_display_name(
                 _blank(row["contact_first"]), _blank(row["contact_last"])
             )
@@ -566,7 +670,13 @@ def list_prospects(
                     relationship_id=int(row["relationship_id"]),
                 )
             )
-    return prospects
+    return {
+        "prospects": prospects,
+        "total": total,
+        "client_total": client_total,
+        "offset": page_offset,
+        "limit": page_size,
+    }
 
 
 def _workspace_from_relationship(conn, row) -> CompanyWorkspace:

@@ -39,6 +39,10 @@ from crm_import_status_notes import (
 )
 from db import get_connection
 from models import NorthStarUser
+from search_data import index_company_relationship, index_contact_relationship
+import logging
+
+log = logging.getLogger("northstar.crm_import")
 
 _FP_RE = re.compile(r"^[a-f0-9]{64}$")
 
@@ -237,6 +241,7 @@ def confirm_admin_crm_import_batch(
             actual_contact_inserts = 0
             actual_relationship_inserts = 0
             actual_results_inserts = 0
+            search_index_targets: list[tuple[int, int | None]] = []
 
             now = _now()
 
@@ -568,6 +573,9 @@ def confirm_admin_crm_import_batch(
                 # -----------------
                 # Results audit row (one per staged row)
                 # -----------------
+                search_index_targets.append(
+                    (int(company_id), int(contact_id) if contact_id is not None else None)
+                )
                 conn.execute(
                     """
                     INSERT INTO crm_import_results (
@@ -726,6 +734,22 @@ def confirm_admin_crm_import_batch(
                 raise RuntimeError("Injected failure before commit.")
 
             conn.commit()
+
+            # Refresh global search docs for imported companies/contacts (after commit).
+            for company_id, contact_id in search_index_targets:
+                try:
+                    index_company_relationship(int(client_id), int(company_id))
+                    if contact_id is not None:
+                        index_contact_relationship(
+                            int(client_id), int(company_id), int(contact_id)
+                        )
+                except Exception:
+                    log.exception(
+                        "search_fts index failed after CRM import client_id=%s company_id=%s contact_id=%s",
+                        client_id,
+                        company_id,
+                        contact_id,
+                    )
 
             # Read back the final audit fields for response.
             out = conn.execute(

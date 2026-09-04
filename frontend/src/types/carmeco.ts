@@ -228,6 +228,10 @@ export interface SharedHistoryResponse {
 export interface ProspectsResponse {
   client: ActiveClient
   prospects: ProspectListItem[]
+  total: number
+  client_total: number
+  offset: number
+  limit: number | null
 }
 
 export interface ContactsResponse {

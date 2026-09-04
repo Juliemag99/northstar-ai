@@ -213,11 +213,26 @@ function normalizeProspectsResponse(raw: unknown): ProspectsResponse {
   const payload = (raw ?? {}) as {
     client?: unknown
     prospects?: unknown[]
+    total?: unknown
+    client_total?: unknown
+    offset?: unknown
+    limit?: unknown
   }
   const prospects = (payload.prospects ?? []).map(normalizeProspect)
+  const total = asNumber(payload.total, prospects.length)
+  const clientTotal = asNumber(payload.client_total, total)
+  const limitRaw = payload.limit
+  const limit =
+    limitRaw == null || limitRaw === ''
+      ? null
+      : asNumber(limitRaw, prospects.length)
   return {
-    client: normalizeActiveClient(payload.client, prospects.length),
+    client: normalizeActiveClient(payload.client, clientTotal),
     prospects,
+    total,
+    client_total: clientTotal,
+    offset: asNumber(payload.offset, 0),
+    limit,
   }
 }
 
@@ -304,12 +319,24 @@ export async function fetchActiveClient(): Promise<ActiveClient> {
 export async function fetchProspects(params?: {
   client_id?: number | null
   all_clients?: boolean
+  q?: string
+  limit?: number | null
+  offset?: number
 }): Promise<ProspectsResponse> {
   const query = new URLSearchParams()
   if (params?.all_clients) {
     query.set('all_clients', 'true')
   } else if (params?.client_id != null && Number(params.client_id) > 0) {
     query.set('client_id', String(params.client_id))
+  }
+  if (params?.q != null && String(params.q).trim()) {
+    query.set('q', String(params.q).trim())
+  }
+  if (params?.limit != null && Number.isFinite(params.limit) && params.limit > 0) {
+    query.set('limit', String(params.limit))
+  }
+  if (params?.offset != null && Number.isFinite(params.offset) && params.offset > 0) {
+    query.set('offset', String(params.offset))
   }
   const qs = query.toString()
   const response = await fetch(`/api/prospects${qs ? `?${qs}` : ''}`)

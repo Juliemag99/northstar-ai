@@ -154,6 +154,10 @@ class CompanyWorkspace(BaseModel):
 class ProspectsResponse(BaseModel):
     client: ActiveClient
     prospects: list[ProspectListItem]
+    total: int = 0
+    client_total: int = 0
+    offset: int = 0
+    limit: int | None = None
 
 
 class ImportStats(BaseModel):
