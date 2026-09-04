@@ -1051,8 +1051,12 @@ export default function AdministrationImport({
           ) : null}
           {reusable && previewHeaders.length > 0 ? (
             <>
-              <div className="queue-table-wrap administration-import-table">
-                <table className="queue-table">
+              <div
+                className="administration-import-table-scroll"
+                tabIndex={0}
+                aria-label="Source preview table"
+              >
+                <table className="queue-table administration-import-preview-table">
                   <thead>
                     <tr>
                       <th>Source row</th>
@@ -1322,8 +1326,12 @@ export default function AdministrationImport({
                 </div>
               </dl>
 
-              <div className="queue-table-wrap administration-import-table">
-                <table className="queue-table">
+              <div
+                className="administration-import-table-scroll"
+                tabIndex={0}
+                aria-label="Dry-run results table"
+              >
+                <table className="queue-table administration-import-dry-run-table">
                   <thead>
                     <tr>
                       <th>Source row</th>
@@ -1353,6 +1361,8 @@ export default function AdministrationImport({
                       const mappedStatus = truncateMapped(
                         row.relationship.resolved_status || row.mapped.relationship_status || '',
                       )
+                      const mappedEntered = truncateMapped(row.mapped.source_entered_at || '')
+                      const mappedUpdated = truncateMapped(row.mapped.source_updated_at || '')
                       const possibles = [
                         ...row.company.possibles.map(
                           (p) =>
@@ -1389,6 +1399,8 @@ export default function AdministrationImport({
                           <td>
                             <div>{mappedCompany || '—'}</div>
                             <div>{mappedContact || '—'}</div>
+                            {mappedEntered ? <div>Entered {mappedEntered}</div> : null}
+                            {mappedUpdated ? <div>Updated {mappedUpdated}</div> : null}
                           </td>
                           <td>
                             {possibles.length

@@ -28,6 +28,8 @@ from crm_import_staging import (
     STATUS_PREVIEWED,
     _normalize_mapping,
 )
+from crm_import_datetime import INVALID_DATE, normalize_import_datetime
+from crm_import_state import INVALID_STATE, normalize_us_state, state_for_match
 from crm_import_status_notes import (
     NOTES_ALREADY_PRESENT,
     NOTES_APPEND,
@@ -53,7 +55,7 @@ from models import (
     CrmImportDryRunRow,
 )
 
-PLANNER_VERSION = "crm-import-plan-v2"
+PLANNER_VERSION = "crm-import-plan-v3"
 MAX_DRY_RUN_PAGE = 100
 IN_CHUNK = 400
 INVALID_PAGING = "Invalid paging."
@@ -62,6 +64,8 @@ CONTACT_NEEDS_NAME_OR_EMAIL = "contact_requires_name_or_email"
 INSUFFICIENT_CONTACT_DATA = "insufficient_contact_data"
 BLANK_COMPANY_NAME = "blank_company_name"
 BLOCKING_ERROR = "blocking_error"
+INVALID_STATE_DETAIL = INVALID_STATE
+INVALID_DATE_DETAIL = INVALID_DATE
 
 _NON_ALNUM_PERSON = re.compile(r"[^a-z0-9]+")
 
@@ -186,6 +190,8 @@ class StagedPlanRow:
     address: str
     city: str
     state: str
+    state_invalid: bool
+    date_invalid: bool
     zip: str
     contact_first: str
     contact_last: str
@@ -377,7 +383,8 @@ def _query_company(mapped: dict[str, str]) -> CompanyRec:
     phone = _blank(mapped.get("phone"))
     address = _blank(mapped.get("address"))
     city = _blank(mapped.get("city"))
-    state = _blank(mapped.get("state"))
+    # Mapped state is already normalized (or blank) for valid rows.
+    state = state_for_match(mapped.get("state"))
     return CompanyRec(
         company_id=None,
         proposed_key=None,
@@ -387,7 +394,7 @@ def _query_company(mapped: dict[str, str]) -> CompanyRec:
         phone=digits_phone(phone),
         addr=norm_addr(address) if address else "",
         city=_blank(city).lower(),
-        state=_blank(state).upper(),
+        state=state,
         record_no="",
     )
 
@@ -423,6 +430,29 @@ def _build_staged_row(row, mapping: dict[str, str]) -> StagedPlanRow:
     relationship_notes_raw = "" if mapped.get("relationship_notes") is None else str(
         mapped.get("relationship_notes") or ""
     )
+    raw_state = _blank(mapped.get("state"))
+    normalized_state = normalize_us_state(raw_state)
+    state_invalid = normalized_state is None
+    if state_invalid:
+        # Keep trimmed original for review display; never treat as matchable.
+        mapped["state"] = raw_state
+        stored_state = ""
+    else:
+        mapped["state"] = normalized_state or ""
+        stored_state = normalized_state or ""
+
+    date_invalid = False
+    for date_field in ("source_entered_at", "source_updated_at"):
+        raw_date = mapped.get(date_field)
+        # Preserve full mapped text before capping; normalize blank/serial/string.
+        raw_date_text = "" if raw_date is None else str(raw_date)
+        normalized_date = normalize_import_datetime(raw_date_text)
+        if normalized_date is None:
+            date_invalid = True
+            mapped[date_field] = _blank(raw_date_text)
+        else:
+            mapped[date_field] = normalized_date
+
     return StagedPlanRow(
         row_id=int(row["id"]),
         source_row_number=int(row["source_row_number"] or 0),
@@ -434,7 +464,9 @@ def _build_staged_row(row, mapping: dict[str, str]) -> StagedPlanRow:
         phone=_blank(mapped.get("phone")),
         address=_blank(mapped.get("address")),
         city=_blank(mapped.get("city")),
-        state=_blank(mapped.get("state")),
+        state=stored_state,
+        state_invalid=state_invalid,
+        date_invalid=date_invalid,
         zip=_blank(mapped.get("zip")),
         contact_first=first,
         contact_last=last,
@@ -647,6 +679,15 @@ def _fingerprint_payload(
                 "status_action": d.status_action,
                 "notes_action": d.notes_action,
                 "resolved_status": d.resolved_status,
+                "normalized_state": (
+                    ""
+                    if d.validity_detail == INVALID_STATE_DETAIL
+                    else _blank((d.mapped or {}).get("state"))
+                ),
+                "state_invalid": d.validity_detail == INVALID_STATE_DETAIL,
+                "source_entered_at": _blank((d.mapped or {}).get("source_entered_at")),
+                "source_updated_at": _blank((d.mapped or {}).get("source_updated_at")),
+                "date_invalid": d.validity_detail == INVALID_DATE_DETAIL,
             }
             for d in decisions
         ],
@@ -659,9 +700,9 @@ def _load_matching_companies(conn, staged: list[StagedPlanRow]) -> list[CompanyR
     phones = {r.company_phone_digits for r in staged if r.company_phone_digits}
     last7 = {p[-7:] for p in phones if len(p) >= 7}
     addr_keys = {
-        (r.company_addr, _blank(r.city).lower(), _blank(r.state).upper())
+        (r.company_addr, _blank(r.city).lower(), state_for_match(r.state))
         for r in staged
-        if r.company_addr and _blank(r.city) and _blank(r.state)
+        if r.company_addr and _blank(r.city) and _blank(r.state) and not r.state_invalid
     }
     kept: list[CompanyRec] = []
     if not (domains or names or last7 or addr_keys):
@@ -683,7 +724,7 @@ def _load_matching_companies(conn, staged: list[StagedPlanRow]) -> list[CompanyR
             phone=digits_phone(_blank(raw["legacy_phone"])),
             addr=norm_addr(_blank(raw["address"])) if _blank(raw["address"]) else "",
             city=_blank(raw["city"]).lower(),
-            state=_blank(raw["state"]).upper(),
+            state=state_for_match(raw["state"]),
             record_no=_blank(raw["external_record_no"]),
         )
         phone_hit = bool(rec.phone) and (
@@ -892,6 +933,16 @@ def plan_crm_import_batch(conn, *, client_id: int, batch_id: int) -> ImportPlan:
             continue
         if not row.company_name:
             decisions.append(_empty_decision(row, "invalid_mapping_data", BLANK_COMPANY_NAME))
+            continue
+        if row.state_invalid:
+            decisions.append(
+                _empty_decision(row, "invalid_mapping_data", INVALID_STATE_DETAIL)
+            )
+            continue
+        if row.date_invalid:
+            decisions.append(
+                _empty_decision(row, "invalid_mapping_data", INVALID_DATE_DETAIL)
+            )
             continue
         query = _query_company(row.mapped)
         action, matched, reasons, extras = _match_company(

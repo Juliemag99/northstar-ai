@@ -34,6 +34,20 @@ describe('crmImportMapping helpers', () => {
     expect(new Set(values).size).toBe(values.length)
   })
 
+  it('suggests Status/Notes and source date aliases without duplicating headers', () => {
+    const suggested = suggestMapping([
+      'Company Name',
+      'Status',
+      'Notes',
+      'Date Entered',
+      'Last Updated',
+    ])
+    expect(suggested.relationship_status).toBe('Status')
+    expect(suggested.relationship_notes).toBe('Notes')
+    expect(suggested.source_entered_at).toBe('Date Entered')
+    expect(suggested.source_updated_at).toBe('Last Updated')
+  })
+
   it('prefers first/last over a lone full-name alias and skips unknown headers', () => {
     expect(suggestMapping(['Name', 'First', 'Last'])).toEqual({
       contact_first_name: 'First',

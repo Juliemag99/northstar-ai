@@ -270,13 +270,17 @@ def confirm_admin_crm_import_batch(
                     zip_ = _blank(mapped.get("zip"))
                     website = _blank(mapped.get("website"))
                     legacy_phone = _blank(mapped.get("phone"))
+                    # Source-history only — never write these onto created_at / updated_at.
+                    entered_at = _blank(mapped.get("source_entered_at"))
+                    source_updated_at = _blank(mapped.get("source_updated_at"))
 
                     cur = conn.execute(
                         """
                         INSERT INTO companies (
                             external_record_no, company_name, address, city, state, zip, website,
-                            legacy_phone, type_of_industry, created_at, last_updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
+                            legacy_phone, type_of_industry, entered_at, source_updated_at,
+                            created_at, last_updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)
                         """,
                         (
                             external_record_no,
@@ -287,6 +291,8 @@ def confirm_admin_crm_import_batch(
                             zip_,
                             website,
                             legacy_phone,
+                            entered_at,
+                            source_updated_at,
                             now,
                             now,
                         ),

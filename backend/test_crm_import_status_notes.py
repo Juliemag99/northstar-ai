@@ -234,7 +234,7 @@ class StatusNotesPlanConfirmTests(unittest.TestCase):
         )
         with get_connection() as conn:
             plan = plan_crm_import_batch(conn, client_id=self.client_id, batch_id=batch_id)
-            self.assertEqual(PLANNER_VERSION, "crm-import-plan-v2")
+            self.assertEqual(PLANNER_VERSION, "crm-import-plan-v3")
             row = plan.rows[0]
             self.assertEqual(row.status_action, STATUS_USE_IMPORTED)
             self.assertEqual(row.resolved_status, "Active")

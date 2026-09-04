@@ -223,6 +223,67 @@ describe('Administration import tab', () => {
     expect(crmImport.uploadCrmImport).toHaveBeenLastCalledWith(7, file, 'People')
   })
 
+  it('wraps source preview and dry-run tables in horizontal scroll containers', async () => {
+    const file = new File(['Company\nAcme\n'], 'scroll.csv', { type: 'text/csv' })
+    vi.mocked(crmImport.uploadCrmImport).mockResolvedValue({
+      kind: 'previewed',
+      needs_worksheet: false,
+      visible_sheets: [],
+      filename: 'scroll.csv',
+      file_type: 'csv',
+      message: 'Preview ready.',
+      batch: baseBatch({
+        headers: ['Company'],
+        mapping: { company_name: 'Company' },
+        mapping_updated_at: 't',
+        mapping_updated_by_user_id: 1,
+      }),
+    })
+    vi.mocked(crmImport.fetchCrmImportRows).mockResolvedValue({
+      batch_id: 11,
+      client_id: 7,
+      offset: 0,
+      limit: 25,
+      total: 1,
+      rows: [
+        {
+          row_id: 1,
+          source_row_number: 2,
+          values: { Company: 'Acme' },
+          warnings: [],
+          errors: [],
+          is_blank: false,
+          has_blocking_error: false,
+        },
+      ],
+    })
+    vi.mocked(crmImport.dryRunCrmImport).mockResolvedValue(dryRunResponse())
+
+    render(
+      <AdministrationImport
+        allMyClients={false}
+        connectClientId={7}
+        scopedClientId={7}
+        availableClients={clients}
+        onScopedClientId={() => undefined}
+        clientName="Carmeco"
+      />,
+    )
+    fireEvent.change(screen.getByLabelText('Company and contact spreadsheet'), {
+      target: { files: [file] },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Upload for preview' }))
+    await screen.findByText('Staging preview')
+    const previewScroll = screen.getByLabelText('Source preview table')
+    expect(previewScroll.className).toContain('administration-import-table-scroll')
+    expect(previewScroll.querySelector('table.administration-import-preview-table')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Run Dry Run' }))
+    await screen.findByText('Dry-run review')
+    const dryScroll = screen.getByLabelText('Dry-run results table')
+    expect(dryScroll.className).toContain('administration-import-table-scroll')
+    expect(dryScroll.querySelector('table.administration-import-dry-run-table')).toBeTruthy()
+  })
+
   it('suggests draft mapping for a new upload and does not overwrite saved mapping', async () => {
     const file = new File(['Company,Email\nAcme,a@x.test\n'], 'contacts.csv', {
       type: 'text/csv',

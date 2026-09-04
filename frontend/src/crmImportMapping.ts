@@ -15,6 +15,8 @@ export const CANONICAL_MAPPING_FIELDS: CanonicalMappingField[] = [
   { key: 'city', label: 'City', group: 'company' },
   { key: 'state', label: 'State', group: 'company' },
   { key: 'zip', label: 'ZIP', group: 'company' },
+  { key: 'source_entered_at', label: 'Source entered date', group: 'company' },
+  { key: 'source_updated_at', label: 'Source updated date', group: 'company' },
   { key: 'contact_first_name', label: 'Contact first name', group: 'contact' },
   { key: 'contact_last_name', label: 'Contact last name', group: 'contact' },
   { key: 'contact_full_name', label: 'Contact full name', group: 'contact' },
@@ -86,6 +88,17 @@ const HEADER_ALIASES: Record<string, string> = {
   relationshipnotes: 'relationship_notes',
   relationship_notes: 'relationship_notes',
   comments: 'relationship_notes',
+  sourceenteredat: 'source_entered_at',
+  source_entered_at: 'source_entered_at',
+  enteredat: 'source_entered_at',
+  entereddate: 'source_entered_at',
+  dateentered: 'source_entered_at',
+  sourceupdatedat: 'source_updated_at',
+  source_updated_at: 'source_updated_at',
+  updatedat: 'source_updated_at',
+  updateddate: 'source_updated_at',
+  dateupdated: 'source_updated_at',
+  lastupdated: 'source_updated_at',
 }
 
 export function normalizeHeaderKey(raw: string): string {

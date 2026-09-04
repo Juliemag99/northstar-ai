@@ -3818,10 +3818,42 @@ a.primary-btn:hover {
   padding-left: 1.2rem;
 }
 
-.administration-import-table {
+.administration-import-preview,
+.administration-import-dry-run {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.administration-import-table-scroll {
+  overflow-x: auto;
+  overflow-y: visible;
+  max-width: 100%;
   margin-bottom: 0.85rem;
-  max-height: 28rem;
-  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.administration-import-table-scroll:focus {
+  outline: 2px solid var(--accent, #2f6fed);
+  outline-offset: 2px;
+}
+
+.administration-import-table-scroll:focus:not(:focus-visible) {
+  outline: none;
+}
+
+.administration-import-table-scroll:focus-visible {
+  outline: 2px solid var(--accent, #2f6fed);
+  outline-offset: 2px;
+}
+
+.administration-import-preview-table {
+  min-width: 48rem;
+  width: max-content;
+}
+
+.administration-import-dry-run-table {
+  min-width: 72rem;
+  width: max-content;
 }
 
 .administration-import-sticky {

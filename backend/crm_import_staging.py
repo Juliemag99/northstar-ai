@@ -93,6 +93,8 @@ CANONICAL_MAPPING_FIELDS = frozenset(
         "contact_phone",
         "relationship_status",
         "relationship_notes",
+        "source_entered_at",
+        "source_updated_at",
     }
 )
 
