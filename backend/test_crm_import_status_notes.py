@@ -497,6 +497,73 @@ class StatusNotesPlanConfirmTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(restored["notes"], "Keep me")
 
+    def test_long_notes_plan_confirm_and_fingerprint_beyond_preview(self):
+        from crm_import_plan import CELL_PREVIEW_CHARS, dry_run_crm_import
+        from crm_import_staging import PREVIEW_DISPLAY_CHARS
+
+        prefix = "P" * (PREVIEW_DISPLAY_CHARS + 50)
+        body_a = prefix + "TAIL-A-" + ("a" * 1800)
+        body_b = prefix + "TAIL-B-" + ("b" * 1800)
+        self.assertGreater(len(body_a), 2000)
+        self.assertNotEqual(body_a, body_b)
+        self.assertEqual(body_a[:PREVIEW_DISPLAY_CHARS], body_b[:PREVIEW_DISPLAY_CHARS])
+
+        with get_connection() as conn:
+            batch_id = _insert_batch(
+                conn,
+                self.client_id,
+                ["Company", "Notes"],
+                [{"Company": "Long Notes Co", "Notes": body_a}],
+            )
+        save_crm_import_mapping(
+            self.client_id,
+            batch_id,
+            actor=_actor(),
+            mapping={"company_name": "Company", "relationship_notes": "Notes"},
+        )
+
+        with get_connection() as conn:
+            plan = plan_crm_import_batch(conn, client_id=self.client_id, batch_id=batch_id)
+            self.assertEqual(plan.rows[0].notes_action, NOTES_SET)
+            self.assertEqual(plan.rows[0].planned_notes, body_a)
+            fp1 = plan.plan_fingerprint
+
+            dry = dry_run_crm_import(self.client_id, batch_id, offset=0, limit=25)
+            mapped_notes = dry.rows[0].mapped.get("relationship_notes") or ""
+            self.assertLessEqual(len(mapped_notes), CELL_PREVIEW_CHARS)
+            self.assertNotIn("TAIL-A-", mapped_notes)
+            self.assertNotEqual(mapped_notes, body_a)
+
+            conn.execute(
+                "UPDATE crm_import_rows SET raw_json = ? WHERE batch_id = ?",
+                (json.dumps({"Company": "Long Notes Co", "Notes": body_b}), batch_id),
+            )
+            conn.commit()
+            plan2 = plan_crm_import_batch(conn, client_id=self.client_id, batch_id=batch_id)
+            self.assertNotEqual(fp1, plan2.plan_fingerprint)
+            self.assertEqual(plan2.rows[0].planned_notes, body_b)
+            fingerprint = plan2.plan_fingerprint
+
+        result = confirm_admin_crm_import_batch(
+            client_id=self.client_id,
+            batch_id=batch_id,
+            plan_fingerprint=fingerprint,
+            actor=_actor(),
+        )
+        self.assertEqual(result["notes_set_count"], 1)
+        with get_connection() as conn:
+            notes = conn.execute(
+                """
+                SELECT notes FROM client_company_relationships
+                WHERE client_id = ? AND company_id = (
+                    SELECT id FROM companies WHERE company_name = 'Long Notes Co'
+                )
+                """,
+                (self.client_id,),
+            ).fetchone()["notes"]
+            self.assertEqual(notes, body_b)
+            self.assertIn("TAIL-B-", notes)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -417,26 +417,166 @@ def test_xlsx_formula_is_literal_text() -> None:
         session.close()
 
 
-def test_long_cell_is_bounded_and_blocking() -> None:
+def test_ordinary_long_cell_is_bounded_and_blocking() -> None:
     session = _Session()
     try:
         huge = "x" * (MAX_CELL_CHARS + 5)
-        content = _csv_bytes(["Name", "Notes"], [["Ada", huge]])
+        content = _csv_bytes(["Name", "Title"], [["Ada", huge]])
         resp = _upload(session.http, session.assigned_id, session.csrf, "long.csv", content)
         if resp.status_code != 200:
             _fail(f"Long-cell upload must be 200, got {resp.status_code}.")
         batch = resp.json()["batch"]
         if batch["error_row_count"] != 1:
-            _fail("Overlong cells must count as blocking row errors.")
+            _fail("Overlong ordinary cells must count as blocking row errors.")
         row = batch["sample_rows"][0]
-        stored = row["values"]["Notes"]
+        stored = row["values"]["Title"]
         if stored != ("x" * CELL_PREVIEW_CHARS) + "…":
-            _fail("Overlong cells must keep only a bounded preview.")
+            _fail("Overlong ordinary cells must keep only a bounded preview.")
         if huge in _dump(row):
-            _fail("Overlong source text must not be retained in full.")
+            _fail("Overlong ordinary source text must not be retained in full.")
         if not row["has_blocking_error"] or not row["errors"]:
-            _fail("Overlong cells must add a blocking row error.")
-        session.assert_frozen("Long-cell preview")
+            _fail("Overlong ordinary cells must add a blocking row error.")
+        session.assert_frozen("Ordinary long-cell preview")
+    finally:
+        session.close()
+
+
+def test_notes_long_text_is_preserved_with_display_cap() -> None:
+    from crm_import_staging import (
+        MAX_LONG_TEXT_CHARS,
+        PREVIEW_DISPLAY_CHARS,
+        is_long_text_header,
+        list_crm_import_rows,
+    )
+
+    if not is_long_text_header("Notes"):
+        _fail("Notes must be recognized as a long-text header.")
+    if not is_long_text_header("Comments:"):
+        _fail("Comments: must be recognized as a long-text header.")
+    if is_long_text_header("Customer Notes") or is_long_text_header("Notepad"):
+        _fail("Unrelated headers must not be treated as long-text.")
+
+    session = _Session()
+    try:
+        body = ("line-one\n" + ("n" * 1990))  # >2000, multiline, well under 100k
+        if len(body) <= MAX_CELL_CHARS:
+            body = body + ("n" * (MAX_CELL_CHARS + 1 - len(body)))
+        content = _csv_bytes(["Company", "Notes"], [["Acme Notes Co", body]])
+        resp = _upload(session.http, session.assigned_id, session.csrf, "notes.csv", content)
+        if resp.status_code != 200:
+            _fail(f"Long Notes upload must be 200, got {resp.status_code}.")
+        batch = resp.json()["batch"]
+        if batch["error_row_count"] != 0:
+            _fail("Accepted long Notes must not count as blocking errors.")
+        sample = batch["sample_rows"][0]
+        preview = sample["values"]["Notes"]
+        if len(preview) != PREVIEW_DISPLAY_CHARS + 1 or not preview.endswith("…"):
+            _fail("Preview API must truncate long Notes for display.")
+        if body in _dump(sample):
+            _fail("Preview payload must not include the complete Notes body.")
+
+        batch_id = int(batch["batch_id"])
+        with get_connection() as conn:
+            raw = conn.execute(
+                "SELECT raw_json, has_blocking_error FROM crm_import_rows WHERE batch_id = ?",
+                (batch_id,),
+            ).fetchone()
+            stored = json.loads(raw["raw_json"])["Notes"]
+            if stored != body:
+                _fail("Accepted Notes must be preserved fully in raw_json.")
+            if int(raw["has_blocking_error"] or 0) != 0:
+                _fail("Accepted Notes must not set has_blocking_error.")
+
+        page = list_crm_import_rows(session.assigned_id, batch_id, offset=0, limit=25)
+        listed = page.rows[0].values["Notes"]
+        if listed != preview:
+            _fail("Row listing must use the same display truncation as sample_rows.")
+        with get_connection() as conn:
+            again = json.loads(
+                conn.execute(
+                    "SELECT raw_json FROM crm_import_rows WHERE batch_id = ?",
+                    (batch_id,),
+                ).fetchone()["raw_json"]
+            )["Notes"]
+            if again != body:
+                _fail("Listing must not modify stored raw_json Notes.")
+
+        # Comments header (no trailing colon) is also long-text.
+        comments_body = "c" * (MAX_CELL_CHARS + 50)
+        resp_c = _upload(
+            session.http,
+            session.assigned_id,
+            session.csrf,
+            "comments.csv",
+            _csv_bytes(["Company", "Comments"], [["Comments Co", comments_body]]),
+        )
+        if resp_c.status_code != 200 or resp_c.json()["batch"]["error_row_count"] != 0:
+            _fail("Comments header must accept values over 2000 characters.")
+        with get_connection() as conn:
+            c_batch = int(resp_c.json()["batch"]["batch_id"])
+            c_stored = json.loads(
+                conn.execute(
+                    "SELECT raw_json FROM crm_import_rows WHERE batch_id = ?",
+                    (c_batch,),
+                ).fetchone()["raw_json"]
+            )["Comments"]
+            if c_stored != comments_body:
+                _fail("Comments must be preserved fully in raw_json.")
+
+        # Near 100k accepted; HTML-like text stored literally (no execution path).
+        near = ("<" + "s" * (MAX_LONG_TEXT_CHARS - 20) + "script>")
+        if len(near) > MAX_LONG_TEXT_CHARS:
+            near = near[:MAX_LONG_TEXT_CHARS]
+        resp_near = _upload(
+            session.http,
+            session.assigned_id,
+            session.csrf,
+            "notes-near.csv",
+            _csv_bytes(["Company", "Notes"], [["Near Co", near]]),
+        )
+        if resp_near.status_code != 200 or resp_near.json()["batch"]["error_row_count"] != 0:
+            _fail("Notes near 100000 characters must be accepted.")
+        with get_connection() as conn:
+            near_id = int(resp_near.json()["batch"]["batch_id"])
+            near_stored = json.loads(
+                conn.execute(
+                    "SELECT raw_json FROM crm_import_rows WHERE batch_id = ?",
+                    (near_id,),
+                ).fetchone()["raw_json"]
+            )["Notes"]
+            if near_stored != near:
+                _fail("Near-limit Notes must be preserved fully in raw_json.")
+        near_preview = resp_near.json()["batch"]["sample_rows"][0]["values"]["Notes"]
+        if near in near_preview or len(near_preview) > PREVIEW_DISPLAY_CHARS + 1:
+            _fail("Near-limit Notes must still be display-truncated in preview.")
+
+        # Over 100k still blocks.
+        too_big = "z" * (MAX_LONG_TEXT_CHARS + 3)
+        resp2 = _upload(
+            session.http,
+            session.assigned_id,
+            session.csrf,
+            "notes-too-big.csv",
+            _csv_bytes(["Company", "Notes"], [["Huge Co", too_big]]),
+        )
+        if resp2.status_code != 200:
+            _fail("Overlong Notes upload must still return 200 with blocking row.")
+        batch2 = resp2.json()["batch"]
+        if batch2["error_row_count"] != 1:
+            _fail("Notes over 100000 must block.")
+        preview2 = batch2["sample_rows"][0]["values"]["Notes"]
+        if preview2 != ("z" * CELL_PREVIEW_CHARS) + "…":
+            _fail("Blocked overlong Notes must store only the safety preview.")
+        with get_connection() as conn:
+            blocked = json.loads(
+                conn.execute(
+                    "SELECT raw_json FROM crm_import_rows WHERE batch_id = ?",
+                    (int(batch2["batch_id"]),),
+                ).fetchone()["raw_json"]
+            )["Notes"]
+            if blocked != ("z" * CELL_PREVIEW_CHARS) + "…" or too_big in blocked:
+                _fail("Blocked overlong Notes must not retain the full value in raw_json.")
+        session.assert_frozen("Long Notes preservation")
     finally:
         session.close()
 
@@ -935,7 +1075,8 @@ def main() -> int:
     test_zero_client_and_unassigned_client()
     test_csv_preview_does_not_write_crm()
     test_xlsx_formula_is_literal_text()
-    test_long_cell_is_bounded_and_blocking()
+    test_ordinary_long_cell_is_bounded_and_blocking()
+    test_notes_long_text_is_preserved_with_display_cap()
     test_too_many_columns_fails_without_partial_rows()
     test_row_limit_and_file_size_leave_no_partial_rows()
     test_malformed_xlsx_creates_failed_batch_without_rows()

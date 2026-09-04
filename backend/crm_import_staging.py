@@ -34,11 +34,17 @@ MAX_ZIP_MEMBERS = 50
 MAX_COLUMNS = 40
 MAX_SOURCE_ROWS = 10_000
 MAX_CELL_CHARS = 2_000
+MAX_LONG_TEXT_CHARS = 100_000
 CELL_PREVIEW_CHARS = 200
+PREVIEW_DISPLAY_CHARS = 500
 SAMPLE_ROWS = 25
 MAX_PAGE_SIZE = 100
 RETENTION_DAYS = 7
 CSV_WORKSHEET_NAME = "CSV"
+
+# Normalized header keys (case/whitespace/trailing-colon insensitive).
+_LONG_TEXT_HEADER_KEYS = frozenset({"notes", "note", "comments"})
+
 
 STATUS_PREVIEWED = "previewed"
 STATUS_FAILED = "failed"
@@ -176,6 +182,36 @@ def _json_mapping(value: object) -> dict[str, str]:
 def _is_formula_text(text: str) -> bool:
     stripped = text.lstrip()
     return stripped.startswith("=")
+
+
+def _normalize_long_text_header_key(header: str) -> str:
+    """Normalize a header for long-text recognition.
+
+    Matching ignores case, surrounding/internal whitespace, and trailing colons.
+    """
+    text = _blank(header).casefold()
+    while text.endswith(":"):
+        text = text[:-1].rstrip()
+    return re.sub(r"\s+", "", text)
+
+
+def is_long_text_header(header: str) -> bool:
+    return _normalize_long_text_header_key(header) in _LONG_TEXT_HEADER_KEYS
+
+
+def _cell_char_limit(header: str) -> int:
+    return MAX_LONG_TEXT_CHARS if is_long_text_header(header) else MAX_CELL_CHARS
+
+
+def _preview_display_value(value: object) -> str:
+    text = "" if value is None else str(value)
+    if len(text) <= PREVIEW_DISPLAY_CHARS:
+        return text
+    return text[:PREVIEW_DISPLAY_CHARS] + "…"
+
+
+def _preview_values(values: dict[str, str]) -> dict[str, str]:
+    return {str(k): _preview_display_value(v) for k, v in (values or {}).items()}
 
 
 def ensure_crm_import_schema(conn=None) -> None:
@@ -401,9 +437,10 @@ def _cell_record(header: str, raw: object, *, formula: bool) -> tuple[str, list[
     if formula or _is_formula_text(text):
         warnings.append(f"Formula in {header} was stored as text and was not calculated.")
         text = text if text else str(raw or "")
-    if len(text) > MAX_CELL_CHARS:
+    limit = _cell_char_limit(header)
+    if len(text) > limit:
         errors.append(
-            f"{header} exceeds {MAX_CELL_CHARS} characters. Re-upload a shorter value before import."
+            f"{header} exceeds {limit} characters. Re-upload a shorter value before import."
         )
         text = text[:CELL_PREVIEW_CHARS] + "…"
     return text, warnings, errors
@@ -729,7 +766,7 @@ def _row_view(row) -> CrmImportRowView:
     return CrmImportRowView(
         row_id=int(row["id"]),
         source_row_number=int(row["source_row_number"] or 0),
-        values=_json_dict(row["raw_json"]),
+        values=_preview_values(_json_dict(row["raw_json"])),
         warnings=_json_list(row["warnings_json"]),
         errors=_json_list(row["errors_json"]),
         has_blocking_error=bool(row["has_blocking_error"]),
