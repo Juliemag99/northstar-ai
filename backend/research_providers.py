@@ -326,6 +326,20 @@ _PRODUCT_PHRASES = (
     "weldments",
     "enclosures",
     "contract manufacturing",
+    "irrigation systems",
+    "center pivot",
+    "utility poles",
+    "lighting poles",
+    "traffic poles",
+    "communication structures",
+    "telecommunications structures",
+    "solar tracking",
+    "transmission structures",
+    "distribution poles",
+    "steel poles",
+    "infrastructure products",
+    "agricultural productivity",
+    "vital infrastructure",
 )
 
 # Too-generic product tokens — only keep if no specific product phrases found

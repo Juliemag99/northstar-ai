@@ -75,7 +75,12 @@ function FindingList({
     page_title?: string
   }>
 }) {
-  if (!items.length) {
+  const usable = items.filter(
+    (item) =>
+      (item.evidence_level || '').toLowerCase() !== 'not_verified' &&
+      !/not verified in current public research/i.test(item.value || ''),
+  )
+  if (!usable.length) {
     return (
       <div className="ask-section">
         <h3>{title}</h3>
@@ -87,7 +92,7 @@ function FindingList({
     <div className="ask-section">
       <h3>{title}</h3>
       <ul className="ask-history-list">
-        {items.map((item, index) => (
+        {usable.map((item, index) => (
           <li key={`${title}-${index}-${item.value}`}>
             <div className="ask-work-next-clients__row">
               <strong>{display(item.value)}</strong>
@@ -478,34 +483,106 @@ export default function ResearchCompany({
                 decision?.client_name || data.working_for_client_name || 'Client'
               const campaignLabel =
                 decision?.campaign_name || data.campaign_name || data.fit?.campaign_name || 'Default'
+              const overviewItems = (data.overview || []).filter(
+                (item) =>
+                  (item.evidence_level || '').toLowerCase() !== 'not_verified' &&
+                  !/not verified in current public research/i.test(item.value || ''),
+              )
+              const locationItems = (data.locations || []).filter(
+                (item) =>
+                  (item.evidence_level || '').toLowerCase() !== 'not_verified' &&
+                  !/not verified in current public research/i.test(item.value || ''),
+              )
+              const industryItems = (data.industries || []).filter(
+                (item) =>
+                  (item.evidence_level || '').toLowerCase() !== 'not_verified' &&
+                  !/not verified in current public research/i.test(item.value || ''),
+              )
+              const productItems = (data.products || []).filter(
+                (item) =>
+                  (item.evidence_level || '').toLowerCase() !== 'not_verified' &&
+                  !/not verified in current public research/i.test(item.value || ''),
+              )
+              const websiteItem = overviewItems.find((item) => item.finding_type === 'website')
+              const nameItem = overviewItems.find((item) => item.finding_type === 'company_name')
+              const overviewText = overviewItems.find((item) => item.finding_type === 'overview')
               return (
-                <div className="research-decision__fit">
-                  <div className="research-decision__kicker">Campaign Fit</div>
-                  <div className="research-decision__client">
-                    {clientLabel} · {campaignLabel}
+                <>
+                  <div className="research-decision__fit" aria-label="Company profile">
+                    <div className="research-decision__kicker">Company Profile</div>
+                    <div className="research-decision__client">
+                      {display(String(nameItem?.value || data.company_name || ''))}
+                      {websiteItem?.value ? ` · ${display(String(websiteItem.value))}` : ''}
+                    </div>
+                    {overviewText?.value ? (
+                      <p style={{ marginTop: '0.45rem' }}>{display(String(overviewText.value))}</p>
+                    ) : null}
+                    {locationItems.length > 0 ? (
+                      <p className="queue-sub" style={{ marginTop: '0.35rem' }}>
+                        Locations:{' '}
+                        {locationItems
+                          .map((item) => String(item.value || ''))
+                          .filter(Boolean)
+                          .slice(0, 4)
+                          .join(' · ')}
+                      </p>
+                    ) : null}
+                    {industryItems.length > 0 ? (
+                      <p className="queue-sub">
+                        Industries:{' '}
+                        {Array.from(
+                          new Set(industryItems.map((item) => String(item.value || ''))),
+                        )
+                          .filter(Boolean)
+                          .slice(0, 6)
+                          .join(', ')}
+                      </p>
+                    ) : null}
+                    {productItems.length > 0 ? (
+                      <p className="queue-sub">
+                        Products / services:{' '}
+                        {productItems
+                          .map((item) => String(item.value || ''))
+                          .filter(Boolean)
+                          .slice(0, 6)
+                          .join(', ')}
+                      </p>
+                    ) : (
+                      <p className="queue-sub">
+                        Products / manufacturing processes: see Research Evidence below when
+                        available.
+                      </p>
+                    )}
                   </div>
-                  <div className="research-decision__rating">{fitResult}</div>
-                  <div className="research-decision__block">
-                    <h3>Why</h3>
-                    <p>
-                      {display(
-                        decision?.why ||
-                          data.fit?.why ||
-                          'Not enough verified evidence to explain this rating yet.',
-                      )}
-                    </p>
+
+                  <div className="research-decision__fit">
+                    <div className="research-decision__kicker">Campaign Fit</div>
+                    <div className="research-decision__client">
+                      {clientLabel} · {campaignLabel}
+                    </div>
+                    <div className="research-decision__rating">{fitResult}</div>
+                    <div className="research-decision__block">
+                      <h3>Why</h3>
+                      <p>
+                        {display(
+                          decision?.why ||
+                            data.fit?.why ||
+                            'Not enough verified evidence to explain this rating yet.',
+                        )}
+                      </p>
+                    </div>
+                    <div className="research-decision__block">
+                      <h3>What we still need to know</h3>
+                      <p>
+                        {display(
+                          decision?.still_need ||
+                            (data.fit?.missing_information?.[0] as string) ||
+                            'Confirm the remaining campaign-specific gaps listed under Missing Information.',
+                        )}
+                      </p>
+                    </div>
                   </div>
-                  <div className="research-decision__block">
-                    <h3>What we still need to know</h3>
-                    <p>
-                      {display(
-                        decision?.still_need ||
-                          (data.fit?.missing_information?.[0] as string) ||
-                          'Confirm the remaining campaign-specific gaps listed under Missing Information.',
-                      )}
-                    </p>
-                  </div>
-                </div>
+                </>
               )
             })()}
 

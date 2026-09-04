@@ -756,6 +756,9 @@ export default function WorkQueue({
               <option value="Possible">Possible</option>
               <option value="Weak">Weak</option>
               <option value="Insufficient Information">Insufficient Information</option>
+              <option value="Campaign Criteria Not Configured">
+                Campaign Criteria Not Configured
+              </option>
               <option value="Not Evaluated">Not Evaluated</option>
             </select>
           </label>
@@ -774,6 +777,9 @@ export default function WorkQueue({
               <option value="No Current Engagement">No Current Engagement</option>
               <option value="Closed / Not Pursuing">Closed / Not Pursuing</option>
               <option value="Insufficient Information">Insufficient Information</option>
+              <option value="Campaign Criteria Not Configured">
+                Campaign Criteria Not Configured
+              </option>
               <option value="Not Evaluated">Not Evaluated</option>
             </select>
           </label>

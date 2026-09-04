@@ -28,6 +28,8 @@ def _norm_fit(fit_result: str) -> str:
         return "possible"
     if "weak" in t or "poor" in t or "not a fit" in t or "nofit" in t.replace(" ", ""):
         return "weak"
+    if "criteria not configured" in t:
+        return "insufficient"
     if "insufficient" in t or "unknown" in t or "not enough" in t:
         return "insufficient"
     return "insufficient"

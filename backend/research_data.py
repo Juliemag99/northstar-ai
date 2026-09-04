@@ -185,6 +185,9 @@ PROFILE_STRONG_FIT_REQUIRED = (
     "fit_weighting_notes",
 )
 
+# Explicit fit rating when the selected campaign has no usable ICP criteria.
+FIT_CRITERIA_NOT_CONFIGURED = "Campaign Criteria Not Configured"
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1016,6 +1019,30 @@ def _profile_assessment(profile: dict[str, str] | None) -> tuple[bool, list[str]
     return incomplete, present, gaps
 
 
+def _campaign_criteria_configured(profile: dict[str, str] | None) -> bool:
+    """True when the campaign/profile has usable fit criteria (not a thin Default shell).
+
+    Thin seed rows with only industries/products/notes are not enough to rate fit.
+    Engagement history never counts as campaign criteria.
+    """
+    profile = profile or {}
+    if _blank(profile.get("primary_service")):
+        return True
+    if _blank(profile.get("manufacturing_processes_sought")):
+        return True
+    if _blank(profile.get("fit_weighting_notes")):
+        return True
+    if _blank(profile.get("positive_fit_signals")) and _blank(
+        profile.get("negative_fit_signals")
+    ):
+        return True
+    if _blank(profile.get("secondary_services")) and _blank(
+        profile.get("ideal_customer_types")
+    ):
+        return True
+    return False
+
+
 def _text_has_stamping(text: str) -> bool:
     """True only for meaningful stamping / stamped-component language — not generic metalwork."""
     t = text.lower()
@@ -1568,6 +1595,42 @@ def _compute_fit(
         )
     )
 
+    # Empty / thin campaign ICP — never invent Campaign Fit; company research still stands.
+    if not _campaign_criteria_configured(profile):
+        missing.insert(
+            0,
+            "Campaign criteria not configured: set primary service, manufacturing "
+            "processes sought, fit weighting notes, and/or positive and negative "
+            "fit signals before rating campaign fit.",
+        )
+        concerns.append(
+            f"{client_name} campaign targeting criteria are not configured. "
+            "Public company research is available independently of Campaign Fit."
+        )
+        why = (
+            f"Campaign criteria not configured for {client_name}"
+            + (f" ({campaign_name})" if _blank(campaign_name) else "")
+            + ". Configure primary service and fit signals to rate campaign fit. "
+            "Company research findings remain available."
+        )
+        return ResearchFitView(
+            client_id=client_id,
+            client_name=client_name,
+            campaign_id=campaign_id,
+            campaign_name=campaign_name
+            or _blank(profile.get("campaign_name")),
+            fit_result=FIT_CRITERIA_NOT_CONFIGURED,
+            why=why,
+            supporting_evidence=evidence,
+            evidence_chains=chains,
+            potential_opportunity=opportunity,
+            concerns=concerns,
+            missing_information=missing,
+            profile_fields_used=fields_used,
+            profile_incomplete=True,
+            profile_gaps=profile_gaps,
+        )
+
     # --- Rating rules ---
     if stamping_primary:
         if has_weak_negative and not has_stamping_evidence:
@@ -1705,37 +1768,68 @@ def _build_summary(
     verified_products: list[str],
     verified_caps: list[str],
     pages_count: int,
+    verified_inds: list[str] | None = None,
+    overview_bits: list[str] | None = None,
+    website: str = "",
+    locations: list[str] | None = None,
+    stamping_primary: bool = False,
 ) -> str:
-    """Decision-oriented research summary — campaign fit is not generic manufacturing."""
+    """Company-profile-first research summary; campaign fit is a separate rating."""
     parts: list[str] = []
     client = known.working_for_client_name or "this client"
-    camp = _blank(fit.campaign_name) or "default"
+    camp = _blank(fit.campaign_name) or "Default"
+    inds = [i for i in (verified_inds or []) if _blank(i)]
+    locs = [loc for loc in (locations or []) if _blank(loc)]
+    overviews = [o for o in (overview_bits or []) if _blank(o)]
+    fit_key = _blank(fit.fit_result).lower()
+    criteria_missing = (
+        _blank(fit.fit_result) == FIT_CRITERIA_NOT_CONFIGURED
+        or "criteria not configured" in fit_key
+        or "criteria not configured" in _blank(fit.why).lower()
+    )
 
-    # 1. What does this company manufacture?
-    if verified_products:
+    ns_loc = ", ".join([x for x in [known.city, known.state] if x])
+    identity = f"1) Company identity: {company_name}"
+    if _blank(website):
+        identity += f" · website {_blank(website)}"
+    if locs:
+        identity += f" · locations {', '.join(locs[:4])}"
+    elif ns_loc:
+        identity += f" · NorthStar location {ns_loc}"
+    parts.append(identity + ".")
+
+    if overviews:
+        parts.append(f"2) Overview: {overviews[0][:280]}")
+    elif verified_products:
         parts.append(
-            f"1) Manufactures / offers: {', '.join(verified_products[:6])}."
+            f"2) Manufactures / offers: {', '.join(verified_products[:6])}."
         )
     else:
         parts.append(
-            f"1) Product categories were not clearly verified from {pages_count} reviewed "
-            f"public page(s) for {company_name}."
+            f"2) Product categories were not clearly phrase-verified from {pages_count} "
+            f"reviewed public page(s); see overview/industries when available."
         )
 
-    # 2. What relevant manufacturing evidence was found?
+    if inds:
+        parts.append(f"Industries / markets mentioned: {', '.join(inds[:6])}.")
+
     real_caps = [
         c for c in verified_caps if "not explicitly stated" not in c.lower()
     ]
     if real_caps:
         parts.append(
-            f"2) Manufacturing evidence found: {', '.join(real_caps[:6])}."
+            f"3) Manufacturing evidence found: {', '.join(real_caps[:6])}."
+        )
+    elif verified_products:
+        parts.append(
+            f"3) Product categories verified: {', '.join(verified_products[:6])} "
+            "(manufacturing processes not explicitly stated on reviewed pages)."
         )
     else:
         parts.append(
-            "2) Manufacturing processes were not explicitly stated on the reviewed public pages."
+            "3) Manufacturing processes were not explicitly stated on the reviewed public pages."
         )
 
-    # Commercial context (confidence only)
     cross_bits: list[str] = []
     for row in known.cross_client:
         cname = _blank(row.get("client_name"))
@@ -1744,7 +1838,7 @@ def _build_summary(
             cross_bits.append(f"{cname} ({', '.join(sigs)})")
     if cross_bits:
         parts.append(
-            "NorthStar commercial context (confidence only): prior history via "
+            "NorthStar commercial context (engagement/confidence only): prior history via "
             + "; ".join(cross_bits)
             + (
                 f"; opportunity score {known.opportunity_score}."
@@ -1753,50 +1847,64 @@ def _build_summary(
             )
         )
 
-    # 3. What evidence connects it specifically to this campaign?
-    stamp_bits = [
-        e
-        for e in (fit.supporting_evidence or [])
-        if ("stamp" in e.lower() or "stamped" in e.lower())
-        and "weaker" not in e.lower()
-        and "weighting" not in e.lower()
-    ]
-    fit_key = _blank(fit.fit_result).lower()
-    if stamp_bits:
+    if criteria_missing:
         parts.append(
-            f"3) Campaign connection ({client} / {camp}): " + stamp_bits[0]
+            f"4) Campaign fit ({client} / {camp}): campaign criteria not configured — "
+            "configure primary service and fit signals to rate fit. Company research above "
+            "is independent of Campaign Fit."
         )
-    elif "insufficient" in fit_key or (
-        "possible" not in fit_key and "strong" not in fit_key
-    ):
-        parts.append(
-            f"3) Campaign connection ({client} / {camp}): no meaningful stamping or "
-            "stamped/formed-component signal verified. Generic manufacturing capability "
-            "is not treated as campaign fit."
-        )
+    elif stamping_primary:
+        stamp_bits = [
+            e
+            for e in (fit.supporting_evidence or [])
+            if ("stamp" in e.lower() or "stamped" in e.lower())
+            and "weaker" not in e.lower()
+            and "weighting" not in e.lower()
+        ]
+        if stamp_bits:
+            parts.append(
+                f"4) Campaign connection ({client} / {camp}): " + stamp_bits[0]
+            )
+        elif "insufficient" in fit_key:
+            parts.append(
+                f"4) Campaign connection ({client} / {camp}): no meaningful stamping or "
+                "stamped/formed-component signal verified. Generic manufacturing capability "
+                "is not treated as campaign fit."
+            )
+        else:
+            align = [
+                e
+                for e in (fit.supporting_evidence or [])
+                if "alignment" in e.lower() or "industr" in e.lower()
+            ]
+            parts.append(
+                f"4) Campaign connection ({client} / {camp}): "
+                + (align[0] if align else "limited verified campaign-specific alignment.")
+            )
     else:
         align = [
             e
             for e in (fit.supporting_evidence or [])
-            if "alignment" in e.lower() or "industr" in e.lower()
+            if "alignment" in e.lower() or "industr" in e.lower() or e.startswith("Verified")
         ]
-        parts.append(
-            f"3) Campaign connection ({client} / {camp}): "
-            + (align[0] if align else "limited verified campaign-specific alignment.")
-        )
+        if "insufficient" in fit_key:
+            parts.append(
+                f"4) Campaign connection ({client} / {camp}): not enough verified alignment "
+                f"with stored campaign criteria to rate fit yet."
+            )
+        else:
+            parts.append(
+                f"4) Campaign connection ({client} / {camp}): "
+                + (align[0] if align else _blank(fit.why) or "see Campaign Fit rating.")
+            )
 
-    # 4. What important evidence is missing?
     if fit.missing_information:
-        # Prefer the most decision-relevant gaps (first few after ranking in compute_fit)
         gaps = [g for g in fit.missing_information if g][:3]
-        parts.append("4) Important evidence still missing: " + " | ".join(gaps))
+        parts.append("5) Important evidence still missing: " + " | ".join(gaps))
     else:
-        parts.append("4) Important evidence still missing: none listed from this run.")
+        parts.append("5) Important evidence still missing: none listed from this run.")
 
-    # 5. Why this rating?
-    parts.append(
-        f"5) Rating: {fit.fit_result} — {fit.why}"
-    )
+    parts.append(f"6) Rating: {fit.fit_result} — {fit.why}")
     return " ".join(parts)
 
 
@@ -1886,6 +1994,16 @@ def _build_decision_summary(
             "opportunity."
             if stamping_campaign
             else "Revisit only if new evidence shows stronger campaign alignment."
+        )
+    elif "criteria not configured" in key:
+        why = (
+            f"Campaign criteria not configured for {client}'s {camp} campaign. "
+            f"Public company research for {company_name} is still available; configure "
+            "primary service and fit signals before rating Campaign Fit."
+        )
+        still = (
+            "Configure campaign targeting criteria (primary service, processes sought, "
+            "fit weighting, positive/negative signals), then refresh research to rate fit."
         )
     else:
         # Insufficient Information (and default)
@@ -2687,6 +2805,30 @@ def start_company_research(
             verified_products=verified_products,
             verified_caps=verified_caps,
             pages_count=len(pages_researched),
+            verified_inds=verified_inds,
+            overview_bits=[
+                f.value
+                for f in finding_rows
+                if f.finding_type == "overview"
+                and f.value
+                and f.value != NOT_VERIFIED
+                and (f.evidence_level or "verified") != "not_verified"
+            ],
+            website=research_website or _blank(company["website"]),
+            locations=list(
+                dict.fromkeys(
+                    [
+                        f.value
+                        for f in finding_rows
+                        if f.finding_type in {"headquarters", "location"}
+                        and f.value
+                        and f.value != NOT_VERIFIED
+                        and (f.evidence_level or "verified") != "not_verified"
+                    ]
+                )
+            ),
+            stamping_primary="stamp"
+            in _blank((profile or {}).get("primary_service")).lower(),
         )
         conn.execute(
             "UPDATE company_research_runs SET summary = ?, completed_at = ? WHERE id = ?",
