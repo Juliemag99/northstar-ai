@@ -13,6 +13,7 @@ vi.mock('./api/crmImport', async () => {
     saveCrmImportMapping: vi.fn(),
     dryRunCrmImport: vi.fn(),
     confirmCrmImport: vi.fn(),
+    saveCrmImportStatusResolution: vi.fn(),
   }
 })
 
@@ -134,9 +135,14 @@ function dryRunResponse(
           status_action: 'use_default_status',
           notes_action: 'no_notes_change',
           resolved_status: 'New',
+          original_status_action: 'use_default_status',
+          status_resolution_type: '',
+          existing_status: '',
+          needs_status_resolution: false,
         },
       },
     ],
+    status_catalog: ['New', 'Active', 'Contacted'],
     ...overrides,
   }
 }
@@ -149,6 +155,7 @@ afterEach(() => {
   vi.mocked(crmImport.saveCrmImportMapping).mockReset()
   vi.mocked(crmImport.dryRunCrmImport).mockReset()
   vi.mocked(crmImport.confirmCrmImport).mockReset()
+  vi.mocked(crmImport.saveCrmImportStatusResolution).mockReset()
 })
 
 describe('Administration import tab', () => {
@@ -575,6 +582,10 @@ describe('Administration import tab', () => {
               status_action: 'none',
               notes_action: 'none',
               resolved_status: '',
+              original_status_action: 'none',
+              status_resolution_type: '',
+              existing_status: '',
+              needs_status_resolution: false,
             },
           },
         ],
@@ -995,9 +1006,22 @@ describe('Administration import tab', () => {
               proposed_key: null,
               status_action: 'status_conflict',
               notes_action: 'append_imported_notes',
-              resolved_status: 'Active',
+              resolved_status: '',
+              original_status_action: 'status_conflict',
+              status_resolution_type: '',
+              existing_status: 'New',
+              needs_status_resolution: true,
             },
           },
+        ],
+        status_catalog: [
+          'Contacted',
+          'Disqualified-Not a good fit-No relevant work',
+          'Disqualified-Production/Packed Outside US',
+          'Good Fit-But no projects at this Time',
+          'Left Message',
+          'New',
+          'Send Information',
         ],
       }),
     )
@@ -1031,9 +1055,175 @@ describe('Administration import tab', () => {
     )
     expect(screen.getByText('Status conflict')).toBeTruthy()
     expect(screen.getByText('Append imported notes')).toBeTruthy()
+    expect(screen.getByLabelText('Resolve status')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Save Resolution' })).toBeTruthy()
+    const resolveSelect = screen.getByLabelText(
+      'Resolve status for source row 2',
+    ) as HTMLSelectElement
+    const optionLabels = Array.from(resolveSelect.options).map((o) => o.textContent || '')
+    expect(optionLabels.some((t) => t.includes('Keep existing status'))).toBe(true)
+    expect(optionLabels.some((t) => t.includes('Replace with a client status'))).toBe(true)
     expect(screen.queryByText('Hello world note that must not appear in full')).toBeNull()
     expect(screen.queryByRole('button', { name: 'Confirm Import' })).toBeNull()
     expect(document.body.innerHTML).not.toContain('dangerouslySetInnerHTML')
+  })
+
+  it('saves status resolution, reruns dry run, and enables confirm when review is clear', async () => {
+    const file = new File(['Company,Status\nAcme,Disqualified\n'], 'sn.csv', {
+      type: 'text/csv',
+    })
+    vi.mocked(crmImport.uploadCrmImport).mockResolvedValue({
+      kind: 'previewed',
+      needs_worksheet: false,
+      visible_sheets: [],
+      filename: 'sn.csv',
+      file_type: 'csv',
+      message: '',
+      batch: baseBatch({
+        headers: ['Company', 'Status'],
+        mapping: {
+          company_name: 'Company',
+          relationship_status: 'Status',
+        },
+        mapping_updated_at: '2026-09-04T12:00:00',
+        mapping_updated_by_user_id: 1,
+      }),
+    })
+    const needsReview = dryRunResponse({
+      counts: emptyCounts({
+        importable_rows: 0,
+        needs_review_rows: 1,
+        create_client_relationship: 1,
+        use_default_status: 0,
+        invalid_status: 1,
+        ok: 0,
+      }),
+      rows: [
+        {
+          row_id: 44,
+          source_row_number: 2,
+          validity: 'ok',
+          validity_detail: '',
+          mapped: { company_name: 'Acme', relationship_status: 'Disqualified' },
+          company: {
+            action: 'create_company',
+            reasons: [],
+            company_id: null,
+            proposed_key: 'proposed:company:2:44',
+            created_at_source_row: 2,
+            name: 'Acme',
+            possibles: [],
+          },
+          contact: {
+            action: 'no_contact_data',
+            reasons: [],
+            contact_id: null,
+            proposed_key: null,
+            created_at_source_row: null,
+            display_name: '',
+            possibles: [],
+          },
+          relationship: {
+            action: 'create_client_relationship',
+            relationship_id: null,
+            proposed_key: 'proposed:relationship:2:44',
+            status_action: 'invalid_status',
+            notes_action: 'no_notes_change',
+            resolved_status: '',
+            original_status_action: 'invalid_status',
+            status_resolution_type: '',
+            existing_status: '',
+            needs_status_resolution: true,
+          },
+        },
+      ],
+      status_catalog: [
+        'Contacted',
+        'Disqualified-Not a good fit-No relevant work',
+        'New',
+      ],
+      plan_fingerprint: 'b'.repeat(64),
+    })
+    const resolved = dryRunResponse({
+      counts: emptyCounts({
+        importable_rows: 1,
+        needs_review_rows: 0,
+        use_imported_status: 1,
+        use_default_status: 0,
+      }),
+      rows: [
+        {
+          ...needsReview.rows[0],
+          relationship: {
+            ...needsReview.rows[0].relationship,
+            status_action: 'use_imported_status',
+            resolved_status: 'Disqualified-Not a good fit-No relevant work',
+            original_status_action: 'invalid_status',
+            status_resolution_type: 'replace_with_status',
+            needs_status_resolution: false,
+          },
+        },
+      ],
+      status_catalog: needsReview.status_catalog,
+      plan_fingerprint: 'c'.repeat(64),
+    })
+    vi.mocked(crmImport.dryRunCrmImport)
+      .mockResolvedValueOnce(needsReview)
+      .mockResolvedValueOnce(resolved)
+    vi.mocked(crmImport.saveCrmImportStatusResolution).mockResolvedValue({
+      client_id: 7,
+      batch_id: 11,
+      staged_row_id: 44,
+      cleared: false,
+      resolution: {
+        resolution_type: 'replace_with_status',
+        resolved_status: 'Disqualified-Not a good fit-No relevant work',
+        updated_at: '2026-09-04T12:00:00Z',
+        updated_by_user_id: 1,
+      },
+    })
+
+    render(
+      <AdministrationImport
+        allMyClients={false}
+        connectClientId={7}
+        scopedClientId={7}
+        availableClients={clients}
+        onScopedClientId={() => undefined}
+        clientName="Brown Industries"
+      />,
+    )
+    fireEvent.change(screen.getByLabelText('Company and contact spreadsheet'), {
+      target: { files: [file] },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Upload for preview' }))
+    await screen.findByText('Column mapping')
+    fireEvent.click(screen.getByRole('button', { name: 'Run Dry Run' }))
+    expect(await screen.findByText('Invalid status')).toBeTruthy()
+    const statusSelect = screen.getByLabelText(
+      'Replacement status for source row 2',
+    ) as HTMLSelectElement
+    expect(
+      Array.from(statusSelect.options).map((o) => o.value),
+    ).toEqual([
+      '',
+      'Contacted',
+      'Disqualified-Not a good fit-No relevant work',
+      'New',
+    ])
+    fireEvent.change(statusSelect, {
+      target: { value: 'Disqualified-Not a good fit-No relevant work' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save Resolution' }))
+    await screen.findByText(/Resolved: replace with/)
+    expect(crmImport.saveCrmImportStatusResolution).toHaveBeenCalledWith(7, 11, 44, {
+      resolution_type: 'replace_with_status',
+      resolved_status: 'Disqualified-Not a good fit-No relevant work',
+      clear: false,
+    })
+    expect(crmImport.dryRunCrmImport).toHaveBeenCalledTimes(2)
+    expect(crmImport.dryRunCrmImport).toHaveBeenLastCalledWith(7, 11, 0, 100)
+    expect(screen.getByRole('button', { name: 'Confirm Import' })).toBeTruthy()
   })
 
   it('opens an accessible confirm dialog with client and counts, Cancel restores focus', async () => {

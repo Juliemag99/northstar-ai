@@ -7,10 +7,12 @@ import {
   fetchCrmImportRows,
   isValidCrmImportPlanFingerprint,
   saveCrmImportMapping,
+  saveCrmImportStatusResolution,
   uploadCrmImport,
   type CrmImportBatch,
   type CrmImportConfirmResponse,
   type CrmImportDryRunResponse,
+  type CrmImportDryRunRow,
   type CrmImportRow,
 } from './api/crmImport'
 import {
@@ -234,6 +236,11 @@ export default function AdministrationImport({
   const [dryRunOffset, setDryRunOffset] = useState(0)
   const [dryRunLoading, setDryRunLoading] = useState(false)
   const [dryRunError, setDryRunError] = useState<string | null>(null)
+  const [statusDrafts, setStatusDrafts] = useState<
+    Record<number, { mode: string; status: string }>
+  >({})
+  const [resolvingRowId, setResolvingRowId] = useState<number | null>(null)
+  const [resolveError, setResolveError] = useState<string | null>(null)
   const [terminalLocked, setTerminalLocked] = useState(false)
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [confirming, setConfirming] = useState(false)
@@ -291,7 +298,8 @@ export default function AdministrationImport({
                 ? 'Ready to confirm'
                 : 'Ready'
 
-  const requestActive = busy || mappingSaving || dryRunLoading || confirming
+  const requestActive =
+    busy || mappingSaving || dryRunLoading || confirming || resolvingRowId != null
 
   const canSaveMapping =
     reusable &&
@@ -330,6 +338,9 @@ export default function AdministrationImport({
     setDryRun(null)
     setDryRunOffset(0)
     setDryRunError(null)
+    setStatusDrafts({})
+    setResolvingRowId(null)
+    setResolveError(null)
     setConfirmResult(null)
     clearConfirmUi()
   }
@@ -338,6 +349,9 @@ export default function AdministrationImport({
     setDryRun(null)
     setDryRunOffset(0)
     setDryRunError(null)
+    setStatusDrafts({})
+    setResolvingRowId(null)
+    setResolveError(null)
     clearConfirmUi()
   }
 
@@ -592,6 +606,57 @@ export default function AdministrationImport({
       }
     } finally {
       setDryRunLoading(false)
+    }
+  }
+
+  function statusDraftFor(row: CrmImportDryRunRow): { mode: string; status: string } {
+    const existing = statusDrafts[row.row_id]
+    if (existing) return existing
+    const isConflict = row.relationship.status_action === 'status_conflict'
+    return {
+      mode: isConflict ? '' : 'replace_with_status',
+      status: '',
+    }
+  }
+
+  async function saveStatusResolution(row: CrmImportDryRunRow) {
+    if (!batch || connectClientId == null || connectClientId <= 0 || !reusable) return
+    if (!row.relationship.needs_status_resolution) return
+    const draft = statusDraftFor(row)
+    const isConflict = row.relationship.status_action === 'status_conflict'
+    let resolutionType = draft.mode
+    if (!isConflict) {
+      resolutionType = 'replace_with_status'
+    }
+    if (!resolutionType) {
+      setResolveError('Choose how to resolve this status.')
+      return
+    }
+    if (resolutionType === 'replace_with_status' && !draft.status.trim()) {
+      setResolveError('Choose a valid client status.')
+      return
+    }
+    setResolvingRowId(row.row_id)
+    setResolveError(null)
+    setDryRunError(null)
+    try {
+      await saveCrmImportStatusResolution(connectClientId, batch.batch_id, row.row_id, {
+        resolution_type: resolutionType,
+        resolved_status:
+          resolutionType === 'replace_with_status' ? draft.status : null,
+        clear: false,
+      })
+      setStatusDrafts((prev) => {
+        const next = { ...prev }
+        delete next[row.row_id]
+        return next
+      })
+      await runDryRun(0)
+    } catch (err) {
+      const detail = errorMessage(err, 'Could not save status resolution.')
+      setResolveError(detail)
+    } finally {
+      setResolvingRowId(null)
     }
   }
 
@@ -1241,6 +1306,12 @@ export default function AdministrationImport({
             </p>
           ) : null}
 
+          {resolveError ? (
+            <p className="data-status data-status--error" role="alert">
+              {resolveError}
+            </p>
+          ) : null}
+
           {reusable && dryRun ? (
             <div className="administration-import-dry-run">
               <h3>Dry-run review</h3>
@@ -1394,6 +1465,107 @@ export default function AdministrationImport({
                           <td>
                             <div>{statusActionLabel(row.relationship.status_action)}</div>
                             {mappedStatus ? <div>{mappedStatus}</div> : null}
+                            {row.relationship.status_resolution_type ===
+                            'keep_existing_status' ? (
+                              <div>
+                                Resolved: keep existing
+                                {row.relationship.resolved_status
+                                  ? ` (${row.relationship.resolved_status})`
+                                  : ''}
+                              </div>
+                            ) : null}
+                            {row.relationship.status_resolution_type ===
+                            'replace_with_status' ? (
+                              <div>
+                                Resolved: replace with{' '}
+                                {row.relationship.resolved_status || '—'}
+                              </div>
+                            ) : null}
+                            {row.relationship.needs_status_resolution ? (
+                              <div className="administration-import-status-resolve">
+                                <label
+                                  className="field-label"
+                                  htmlFor={`resolve-status-${row.row_id}`}
+                                >
+                                  Resolve status
+                                </label>
+                                {row.relationship.status_action === 'status_conflict' ? (
+                                  <select
+                                    id={`resolve-status-${row.row_id}`}
+                                    aria-label={`Resolve status for source row ${row.source_row_number}`}
+                                    value={statusDraftFor(row).mode}
+                                    disabled={requestActive}
+                                    onChange={(event) => {
+                                      const mode = event.target.value
+                                      setStatusDrafts((prev) => ({
+                                        ...prev,
+                                        [row.row_id]: {
+                                          mode,
+                                          status:
+                                            mode === 'replace_with_status'
+                                              ? prev[row.row_id]?.status || ''
+                                              : '',
+                                        },
+                                      }))
+                                    }}
+                                  >
+                                    <option value="">Choose…</option>
+                                    <option value="keep_existing_status">
+                                      Keep existing status
+                                      {row.relationship.existing_status
+                                        ? ` (${row.relationship.existing_status})`
+                                        : ''}
+                                    </option>
+                                    <option value="replace_with_status">
+                                      Replace with a client status
+                                    </option>
+                                  </select>
+                                ) : null}
+                                {(row.relationship.status_action === 'invalid_status' ||
+                                  statusDraftFor(row).mode === 'replace_with_status') && (
+                                  <select
+                                    id={
+                                      row.relationship.status_action === 'invalid_status'
+                                        ? `resolve-status-${row.row_id}`
+                                        : `resolve-status-value-${row.row_id}`
+                                    }
+                                    aria-label={`Replacement status for source row ${row.source_row_number}`}
+                                    value={statusDraftFor(row).status}
+                                    disabled={requestActive}
+                                    onChange={(event) => {
+                                      setStatusDrafts((prev) => ({
+                                        ...prev,
+                                        [row.row_id]: {
+                                          mode:
+                                            prev[row.row_id]?.mode ||
+                                            (row.relationship.status_action === 'invalid_status'
+                                              ? 'replace_with_status'
+                                              : ''),
+                                          status: event.target.value,
+                                        },
+                                      }))
+                                    }}
+                                  >
+                                    <option value="">Choose a status…</option>
+                                    {(dryRun.status_catalog || []).map((label) => (
+                                      <option key={label} value={label}>
+                                        {label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                )}
+                                <button
+                                  type="button"
+                                  className="secondary-btn"
+                                  disabled={requestActive}
+                                  onClick={() => void saveStatusResolution(row)}
+                                >
+                                  {resolvingRowId === row.row_id
+                                    ? 'Saving…'
+                                    : 'Save Resolution'}
+                                </button>
+                              </div>
+                            ) : null}
                           </td>
                           <td>{notesActionLabel(row.relationship.notes_action)}</td>
                           <td>

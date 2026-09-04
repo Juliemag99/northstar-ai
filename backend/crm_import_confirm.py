@@ -451,7 +451,7 @@ def confirm_admin_crm_import_batch(
                         # Verify belongs to same client + company.
                         rel = conn.execute(
                             """
-                            SELECT client_id, company_id, notes
+                            SELECT client_id, company_id, notes, status
                             FROM client_company_relationships
                             WHERE id = ?
                             """,
@@ -461,6 +461,35 @@ def confirm_admin_crm_import_batch(
                             raise BatchNotReusable("Plan references missing relationship.")
                         if int(rel["client_id"]) != int(client_id) or int(rel["company_id"]) != int(company_id):
                             raise BatchNotReusable("Plan references relationship in a different client/company.")
+
+                        if row.status_action == STATUS_USE_IMPORTED:
+                            resolved_status = _blank(row.resolved_status)
+                            if not resolved_status:
+                                raise BatchNotReusable("Missing resolved status for status replace.")
+                            conn.execute(
+                                """
+                                UPDATE client_company_relationships
+                                SET status = ?, is_hot = ?, updated_at = ?
+                                WHERE id = ? AND client_id = ? AND company_id = ?
+                                """,
+                                (
+                                    resolved_status,
+                                    1 if is_hot_prospect_status(resolved_status) else 0,
+                                    now,
+                                    relationship_id,
+                                    int(client_id),
+                                    int(company_id),
+                                ),
+                            )
+                            if int(conn.execute("SELECT changes() AS n").fetchone()["n"]) != 1:
+                                raise BatchNotReusable(
+                                    "Relationship status UPDATE did not change exactly one row."
+                                )
+                        elif row.status_action in {STATUS_PRESERVE, STATUS_USE_DEFAULT}:
+                            pass
+                        else:
+                            raise BatchNotReusable("Unsupported status action for existing relationship.")
+
                         if row.notes_action == NOTES_APPEND:
                             planned_notes = "" if row.planned_notes is None else str(row.planned_notes)
                             conn.execute(
@@ -494,6 +523,29 @@ def confirm_admin_crm_import_batch(
                         relationship_id = relationship_key_to_id[proposed_key]
                         if relationship_key_to_company_id.get(proposed_key) != int(company_id):
                             raise BatchNotReusable("Proposed relationship resolved to wrong company.")
+                        if row.status_action == STATUS_USE_IMPORTED:
+                            resolved_status = _blank(row.resolved_status)
+                            if not resolved_status:
+                                raise BatchNotReusable("Missing resolved status for status replace.")
+                            conn.execute(
+                                """
+                                UPDATE client_company_relationships
+                                SET status = ?, is_hot = ?, updated_at = ?
+                                WHERE id = ? AND client_id = ? AND company_id = ?
+                                """,
+                                (
+                                    resolved_status,
+                                    1 if is_hot_prospect_status(resolved_status) else 0,
+                                    now,
+                                    relationship_id,
+                                    int(client_id),
+                                    int(company_id),
+                                ),
+                            )
+                            if int(conn.execute("SELECT changes() AS n").fetchone()["n"]) != 1:
+                                raise BatchNotReusable(
+                                    "Relationship status UPDATE did not change exactly one row."
+                                )
                         if row.notes_action == NOTES_APPEND:
                             planned_notes = "" if row.planned_notes is None else str(row.planned_notes)
                             conn.execute(
@@ -523,8 +575,9 @@ def confirm_admin_crm_import_batch(
                         company_action, company_id,
                         contact_action, contact_id,
                         relationship_action, relationship_id,
-                        status_action, notes_action
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        status_action, notes_action,
+                        original_status_action, status_resolution_action, final_status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         int(batch_id),
@@ -538,6 +591,9 @@ def confirm_admin_crm_import_batch(
                         int(relationship_id),
                         row.status_action,
                         row.notes_action,
+                        _blank(getattr(row, "original_status_action", "") or row.status_action),
+                        _blank(getattr(row, "status_resolution_type", "")),
+                        _blank(row.resolved_status),
                     ),
                 )
                 actual_results_inserts += 1

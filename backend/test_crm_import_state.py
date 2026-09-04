@@ -175,7 +175,7 @@ class StatePlanConfirmTests(unittest.TestCase):
         )
         with get_connection() as conn:
             plan = plan_crm_import_batch(conn, client_id=self.client_id, batch_id=batch_id)
-            self.assertEqual(PLANNER_VERSION, "crm-import-plan-v3")
+            self.assertEqual(PLANNER_VERSION, "crm-import-plan-v4")
             self.assertEqual(plan.counts["needs_review_rows"], 0)
             by_name = {r.company_name: r for r in plan.rows}
             self.assertEqual(by_name["Spell Co ST"].company_action, "use_existing_company")

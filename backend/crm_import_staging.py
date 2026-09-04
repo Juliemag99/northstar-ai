@@ -315,6 +315,9 @@ def ensure_crm_import_schema(conn=None) -> None:
                 ON crm_import_results(batch_id);
             """
         )
+        from crm_import_status_resolution import ensure_crm_import_status_resolution_schema
+
+        ensure_crm_import_status_resolution_schema(conn)
         existing = {
             str(r["name"])
             for r in conn.execute("PRAGMA table_info(crm_import_batches)").fetchall()
@@ -387,6 +390,10 @@ def purge_expired_staging_rows(conn=None) -> int:
         if not ids:
             return 0
         placeholders = ",".join("?" * len(ids))
+        conn.execute(
+            f"DELETE FROM crm_import_row_resolutions WHERE batch_id IN ({placeholders})",
+            ids,
+        )
         conn.execute(
             f"DELETE FROM crm_import_rows WHERE batch_id IN ({placeholders})",
             ids,
@@ -967,6 +974,9 @@ def cancel_crm_import(client_id: int, batch_id: int, *, actor: NorthStarUser) ->
             return _batch_view(conn, row, include_sample=False)
         if status not in {STATUS_PREVIEWED, STATUS_FAILED}:
             raise BatchNotReusable(BATCH_NOT_REUSABLE)
+        from crm_import_status_resolution import clear_batch_status_resolutions
+
+        clear_batch_status_resolutions(conn, client_id, batch_id)
         conn.execute("DELETE FROM crm_import_rows WHERE batch_id = ? AND client_id = ?", (batch_id, client_id))
         conn.execute(
             """
@@ -1062,6 +1072,9 @@ def save_crm_import_mapping(
             batch_id,
             ",".join(sorted(normalized)),
         )
+        from crm_import_status_resolution import clear_batch_status_resolutions
+
+        clear_batch_status_resolutions(conn, client_id, batch_id)
         conn.execute(
             """
             UPDATE crm_import_batches SET

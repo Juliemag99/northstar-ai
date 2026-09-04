@@ -151,6 +151,10 @@ export type CrmImportDryRunRelationshipPlan = {
   status_action: CrmImportStatusAction
   notes_action: CrmImportNotesAction
   resolved_status: string
+  original_status_action: CrmImportStatusAction | string
+  status_resolution_type: string
+  existing_status: string
+  needs_status_resolution: boolean
 }
 
 export type CrmImportDryRunRow = {
@@ -204,6 +208,26 @@ export type CrmImportDryRunResponse = {
   limit: number
   counts: CrmImportDryRunCounts
   rows: CrmImportDryRunRow[]
+  status_catalog: string[]
+}
+
+export type CrmImportStatusResolutionRequest = {
+  resolution_type?: string | null
+  resolved_status?: string | null
+  clear?: boolean
+}
+
+export type CrmImportStatusResolutionResponse = {
+  client_id: number
+  batch_id: number
+  staged_row_id: number
+  cleared: boolean
+  resolution: {
+    resolution_type: string
+    resolved_status: string
+    updated_at: string
+    updated_by_user_id: number
+  } | null
 }
 
 export type CrmImportConfirmRequest = {
@@ -390,4 +414,25 @@ export async function confirmCrmImport(
     },
   )
   return parseJson<CrmImportConfirmResponse>(response)
+}
+
+export async function saveCrmImportStatusResolution(
+  clientId: number,
+  batchId: number,
+  rowId: number,
+  body: CrmImportStatusResolutionRequest,
+): Promise<CrmImportStatusResolutionResponse> {
+  requirePositiveIds(clientId, batchId)
+  if (!Number.isFinite(rowId) || rowId <= 0) {
+    throw new Error('Import row is missing or invalid.')
+  }
+  const response = await apiFetch(
+    `/api/clients/${encodeURIComponent(String(clientId))}/admin/imports/${encodeURIComponent(String(batchId))}/rows/${encodeURIComponent(String(rowId))}/status-resolution`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  )
+  return parseJson<CrmImportStatusResolutionResponse>(response)
 }

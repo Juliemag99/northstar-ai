@@ -114,6 +114,7 @@ describe('crmImport mapping and dry-run helpers', () => {
         needs_review_rows: 0,
       },
       rows: [],
+      status_catalog: ['New', 'Contacted'],
     }
     vi.mocked(http.apiFetch).mockResolvedValue(
       new Response(JSON.stringify(plan), {

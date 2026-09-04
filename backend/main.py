@@ -124,6 +124,8 @@ from models import (
     CrmImportConfirmResponse,
     CrmImportMappingRequest,
     CrmImportRowsPage,
+    CrmImportStatusResolutionRequest,
+    CrmImportStatusResolutionResponse,
     CrmImportUploadResult,
     ClientEmailTemplateView,
     ClientExtractionBulkRejectRequest,
@@ -328,6 +330,7 @@ from crm_import_staging import (
 )
 from crm_import_plan import dry_run_crm_import
 from crm_import_confirm import confirm_admin_crm_import_batch
+from crm_import_status_resolution import save_crm_import_status_resolution
 from gmail_send import send_client_email
 from fastapi.responses import RedirectResponse
 from extraction_review_bulk import (
@@ -2570,6 +2573,39 @@ def save_admin_crm_import_mapping_api(
             actor=actor,
             mapping=body.mapping,
         )
+    except BatchNotReusable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put(
+    "/api/clients/{client_id}/admin/imports/{batch_id}/rows/{row_id}/status-resolution",
+    response_model=CrmImportStatusResolutionResponse,
+)
+def save_admin_crm_import_status_resolution_api(
+    client_id: int,
+    batch_id: int,
+    row_id: int,
+    body: CrmImportStatusResolutionRequest,
+    request: Request,
+):
+    actor = _require_admin_client(request, client_id)
+    try:
+        result = save_crm_import_status_resolution(
+            client_id,
+            batch_id,
+            row_id,
+            actor=actor,
+            resolution_type=body.resolution_type,
+            resolved_status=body.resolved_status,
+            clear=bool(body.clear),
+        )
+        return CrmImportStatusResolutionResponse(**result)
     except BatchNotReusable as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except PermissionError as exc:

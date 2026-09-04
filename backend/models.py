@@ -3149,6 +3149,10 @@ class CrmImportDryRunRelationshipPlan(BaseModel):
     status_action: str = "none"
     notes_action: str = "none"
     resolved_status: str = ""
+    original_status_action: str = "none"
+    status_resolution_type: str = ""
+    existing_status: str = ""
+    needs_status_resolution: bool = False
 
 
 class CrmImportDryRunRow(BaseModel):
@@ -3204,6 +3208,21 @@ class CrmImportDryRunResponse(BaseModel):
     limit: int
     counts: CrmImportDryRunCounts = Field(default_factory=CrmImportDryRunCounts)
     rows: list[CrmImportDryRunRow] = Field(default_factory=list)
+    status_catalog: list[str] = Field(default_factory=list)
+
+
+class CrmImportStatusResolutionRequest(BaseModel):
+    resolution_type: str | None = None
+    resolved_status: str | None = None
+    clear: bool = False
+
+
+class CrmImportStatusResolutionResponse(BaseModel):
+    client_id: int
+    batch_id: int
+    staged_row_id: int
+    cleared: bool = False
+    resolution: dict[str, object] | None = None
 
 
 class CrmImportConfirmRequest(BaseModel):
