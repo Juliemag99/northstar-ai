@@ -3,6 +3,7 @@ uvicorn[standard]
 python-multipart
 pydantic
 httpx
+openai>=1.66.0
 python-docx
 openpyxl
 python-dotenv

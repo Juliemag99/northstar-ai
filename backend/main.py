@@ -347,6 +347,12 @@ from research_data import (
     reject_proposed_update,
     start_company_research,
 )
+from deep_research_data import (
+    cancel_deep_research_job,
+    deep_research_status_payload,
+    get_deep_research_job,
+)
+from deep_research_config import deep_research_is_configured
 from work_queue_data import (
     clients_for_work_queue,
     complete_follow_up_task,
@@ -3354,9 +3360,13 @@ def ask_northstar_history(
 
 
 @app.post("/api/research/company", response_model=ResearchCompanyResponse)
-def research_company_api(body: ResearchStartRequest):
-    """Phase 2A Research This Company — NorthStar-first + public web; no auto CRM writes."""
+def research_company_api(body: ResearchStartRequest, request: Request):
+    """Research This Company — Quick (deterministic) or Deep (background job)."""
     try:
+        depth = (body.research_depth or "quick").strip().lower()
+        if depth in {"deep", "deep_research"}:
+            actor = require_administrator(request)
+            return start_company_research(body, user_id=actor.id)
         return start_company_research(body)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -3364,29 +3374,39 @@ def research_company_api(body: ResearchStartRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.get("/api/research/company", response_model=ResearchCompanyResponse)
 def research_company_get(
+    request: Request,
     company_id: int | None = Query(default=None),
     external_record_no: str | None = Query(default=None),
     working_for_client_id: int | None = Query(default=None),
     campaign_id: int | None = Query(default=None),
     run: bool = Query(default=False),
     force_refresh: bool = Query(default=False),
+    research_depth: str = Query(default="quick"),
+    confirm_paid_refresh: bool = Query(default=False),
 ):
     """Load latest research or start a run when run=true."""
     try:
         if run:
-            return start_company_research(
-                ResearchStartRequest(
-                    company_id=company_id,
-                    external_record_no=external_record_no,
-                    working_for_client_id=working_for_client_id,
-                    campaign_id=campaign_id,
-                    force_refresh=force_refresh,
-                )
+            depth = (research_depth or "quick").strip().lower()
+            body = ResearchStartRequest(
+                company_id=company_id,
+                external_record_no=external_record_no,
+                working_for_client_id=working_for_client_id,
+                campaign_id=campaign_id,
+                force_refresh=force_refresh,
+                confirm_paid_refresh=confirm_paid_refresh,
+                research_depth=research_depth,
             )
+            if depth in {"deep", "deep_research"}:
+                actor = require_administrator(request)
+                return start_company_research(body, user_id=actor.id)
+            return start_company_research(body)
         return get_latest_research(
             company_id=company_id,
             external_record_no=external_record_no,
@@ -3398,6 +3418,37 @@ def research_company_get(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get("/api/research/jobs/{job_id}", response_model=ResearchCompanyResponse)
+def research_job_get(job_id: int):
+    """Poll a Deep Research job (progress, result, errors)."""
+    try:
+        return get_deep_research_job(job_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/research/jobs/{job_id}/cancel", response_model=ResearchCompanyResponse)
+def research_job_cancel(job_id: int, request: Request):
+    """Request cancellation of an active Deep Research job (administrator-only)."""
+    try:
+        actor = require_administrator(request)
+        return cancel_deep_research_job(job_id, user_id=actor.id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/research/deep/status")
+def research_deep_status():
+    """Limits + monthly usage presence (never returns secrets)."""
+    return deep_research_status_payload()
 
 
 @app.get("/api/research/runs/{run_id}", response_model=ResearchCompanyResponse)

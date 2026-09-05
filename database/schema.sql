@@ -498,6 +498,12 @@ CREATE TABLE IF NOT EXISTS company_research_runs (
     sources_checked TEXT NOT NULL DEFAULT '',
     started_at TEXT NOT NULL DEFAULT (datetime('now')),
     completed_at TEXT,
+    campaign_id INTEGER,
+    research_depth TEXT NOT NULL DEFAULT 'quick',
+    openai_response_id TEXT NOT NULL DEFAULT '',
+    usage_json TEXT NOT NULL DEFAULT '',
+    citations_json TEXT NOT NULL DEFAULT '',
+    error_message TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE,
     FOREIGN KEY (working_for_client_id) REFERENCES clients(id) ON DELETE CASCADE,
     FOREIGN KEY (initiated_by_user_id) REFERENCES users(id) ON DELETE SET NULL
@@ -616,6 +622,45 @@ CREATE TABLE IF NOT EXISTS company_client_fit (
 
 CREATE INDEX IF NOT EXISTS idx_client_fit_company
     ON company_client_fit(company_id, client_id);
+
+-- Deep Research durable jobs (OpenAI Responses + web_search). Quick Research
+-- continues to use company_research_runs alone with research_depth='quick'.
+CREATE TABLE IF NOT EXISTS company_research_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL,
+    working_for_client_id INTEGER NOT NULL,
+    campaign_id INTEGER,
+    research_run_id INTEGER,
+    research_depth TEXT NOT NULL DEFAULT 'deep',
+    status TEXT NOT NULL DEFAULT 'queued',
+    progress INTEGER NOT NULL DEFAULT 0,
+    progress_message TEXT NOT NULL DEFAULT '',
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 2,
+    openai_response_id TEXT NOT NULL DEFAULT '',
+    openai_model TEXT NOT NULL DEFAULT '',
+    usage_json TEXT NOT NULL DEFAULT '',
+    citations_json TEXT NOT NULL DEFAULT '',
+    sources_json TEXT NOT NULL DEFAULT '',
+    report_json TEXT NOT NULL DEFAULT '',
+    error_message TEXT NOT NULL DEFAULT '',
+    initiated_by_user_id INTEGER,
+    initiated_by_name TEXT NOT NULL DEFAULT '',
+    started_at TEXT,
+    completed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE,
+    FOREIGN KEY (working_for_client_id) REFERENCES clients(id) ON DELETE CASCADE,
+    FOREIGN KEY (research_run_id) REFERENCES company_research_runs(id) ON DELETE SET NULL,
+    FOREIGN KEY (initiated_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_research_jobs_active
+    ON company_research_jobs(company_id, working_for_client_id, status);
+CREATE INDEX IF NOT EXISTS idx_research_jobs_company
+    ON company_research_jobs(company_id, created_at DESC);
 
 -- ============================================================
 -- Client Setup / Target Profiles / Campaigns

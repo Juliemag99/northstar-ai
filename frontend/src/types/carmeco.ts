@@ -816,6 +816,70 @@ export interface ResearchCompanyResponse {
   data_provider: Record<string, unknown>
   research_history: Record<string, unknown>[]
   read_only_crm: boolean
+  research_depth?: string
+  job?: ResearchJobView | null
+  citations?: Array<{ url: string; title: string }>
+  deep_research_usage?: Record<string, unknown>
+  deep_research_from_cache?: boolean
+  deep_research_paid_refresh_required?: boolean
+}
+
+export interface ResearchJobView {
+  job_id: number
+  company_id: number
+  working_for_client_id: number
+  campaign_id: number | null
+  research_run_id: number | null
+  research_depth: string
+  status: string
+  progress: number
+  progress_message: string
+  cancel_requested: boolean
+  attempt_count: number
+  max_attempts: number
+  openai_response_id: string
+  openai_model: string
+  usage: Record<string, unknown>
+  citations: Array<{ url: string; title: string }>
+  sources: Array<{ url: string; title: string }>
+  error_message: string
+  started_at: string
+  completed_at: string
+  created_at: string
+  updated_at: string
+  deep_research_configured: boolean
+  from_cache?: boolean
+  paid_refresh_required?: boolean
+  limited_by?: string
+}
+
+export interface DeepResearchStatus {
+  deep_research_configured: boolean
+  limits?: {
+    max_web_search_calls: number
+    max_output_tokens: number
+    max_attempts: number
+    max_run_usd: number
+    monthly_limit_usd: number
+    cache_days: number
+    dollar_limits_enforceable: boolean
+    estimated_max_run_usd: number | null
+    estimated_max_run_status: string
+    estimated_max_run_note: string
+    pilot_admin_only: boolean
+  }
+  pricing?: {
+    estimate_available: boolean
+    note: string
+  }
+  monthly?: {
+    month_start_utc?: string
+    spent_usd: number | null
+    remaining_usd: number | null
+    monthly_limit_usd: number
+    status: string
+    dollar_limits_enforceable?: boolean
+  }
 }
 
 export type CampaignStatus = 'Draft' | 'Active' | 'Paused' | 'Completed' | 'Archived'

@@ -2256,6 +2256,12 @@ def start_company_research(
     *,
     user_id: int | None = None,
 ) -> ResearchCompanyResponse:
+    depth = _blank(getattr(body, "research_depth", None) or "quick").lower()
+    if depth in {"deep", "deep_research"}:
+        from deep_research_data import start_deep_research_job
+
+        return start_deep_research_job(body, user_id=user_id)
+
     ensure_research_schema()
     from client_setup_data import (
         campaign_to_fit_profile,

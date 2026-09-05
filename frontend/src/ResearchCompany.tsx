@@ -3,15 +3,19 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   approveResearchUpdate,
+  cancelResearchJob,
   fetchCompanyResearch,
+  fetchDeepResearchStatus,
+  fetchResearchJob,
   rejectResearchUpdate,
   startCompanyResearch,
 } from './api/carmeco'
-import type { ResearchCompanyResponse, ResearchFindingView } from './types/carmeco'
+import type { DeepResearchStatus, ResearchCompanyResponse, ResearchFindingView } from './types/carmeco'
 import AddToNorthStar from './AddToNorthStar'
 import ZoomInfoAddModal from './ZoomInfoAddModal'
 import type { CrmAddContactInput } from './api/carmeco'
 import { ASK_NORTHSTAR_PATH, isFromAskNorthStar, withAskReturnParam } from './askNorthStarReturn'
+import { useAuth } from './auth/useAuth'
 
 function display(value: string | null | undefined): string {
   return value?.trim() || '—'
@@ -155,12 +159,20 @@ export default function ResearchCompany({
   const campaignIdFromUrl =
     campaignIdParam && Number(campaignIdParam) > 0 ? Number(campaignIdParam) : null
 
+  const { user } = useAuth()
+  const isAdmin = Boolean(user?.is_administrator)
+
   const [data, setData] = useState<ResearchCompanyResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [actionMsg, setActionMsg] = useState<string | null>(null)
   const [progressStep, setProgressStep] = useState(0)
+  const [deepConfigured, setDeepConfigured] = useState(false)
+  const [deepStatus, setDeepStatus] = useState<DeepResearchStatus | null>(null)
+  const [deepConfirmOpen, setDeepConfirmOpen] = useState(false)
+  const [deepPaidRefresh, setDeepPaidRefresh] = useState(false)
+  const [activeJobId, setActiveJobId] = useState<number | null>(null)
   const inFlightRef = useRef(false)
   const skipClientReloadRef = useRef(true)
   const [selectedPublicIdx, setSelectedPublicIdx] = useState<Set<number>>(new Set())
@@ -175,9 +187,13 @@ export default function ResearchCompany({
       force?: boolean
       clientId?: number | null
       campaignId?: number | null
+      depth?: 'quick' | 'deep'
+      confirmPaidRefresh?: boolean
     }) => {
       const run = opts?.run ?? false
       const force = opts?.force ?? false
+      const depth = opts?.depth ?? 'quick'
+      const confirmPaidRefresh = opts?.confirmPaidRefresh ?? false
       const cid = opts?.clientId !== undefined ? opts.clientId : workingForClientId
       const campId =
         opts?.campaignId !== undefined ? opts.campaignId : campaignIdFromUrl
@@ -194,6 +210,8 @@ export default function ResearchCompany({
               working_for_client_id: cid,
               campaign_id: campId,
               force_refresh: force,
+              confirm_paid_refresh: confirmPaidRefresh,
+              research_depth: depth,
             })
           : await fetchCompanyResearch({
               external_record_no: recordNo,
@@ -203,8 +221,19 @@ export default function ResearchCompany({
             })
         setData(result)
         setSelectedPublicIdx(new Set())
-        // Do not clear detailContact here — a background reload must not
-        // dismiss an open Contact Research Detail / Add handoff mid-click.
+        if (result.deep_research_paid_refresh_required) {
+          setDeepPaidRefresh(true)
+          setDeepConfirmOpen(true)
+          setRunning(false)
+          inFlightRef.current = false
+          setActiveJobId(null)
+          return
+        }
+        if (result.job?.job_id && ['queued', 'running'].includes(result.job.status)) {
+          setActiveJobId(result.job.job_id)
+        } else {
+          setActiveJobId(null)
+        }
         if (result.working_for_client_id && !clientIdParam) {
           setSearchParams(
             (prev) => {
@@ -244,6 +273,48 @@ export default function ResearchCompany({
     },
     [recordNo, workingForClientId, campaignIdFromUrl, clientIdParam, campaignIdParam, setSearchParams],
   )
+
+  useEffect(() => {
+    let cancelled = false
+    void fetchDeepResearchStatus()
+      .then((s) => {
+        if (!cancelled) {
+          setDeepConfigured(Boolean(s.deep_research_configured))
+          setDeepStatus(s)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setDeepConfigured(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    if (activeJobId == null) return
+    let cancelled = false
+    const timer = window.setInterval(() => {
+      void fetchResearchJob(activeJobId)
+        .then((result) => {
+          if (cancelled) return
+          setData(result)
+          const status = result.job?.status || ''
+          if (['completed', 'failed', 'cancelled'].includes(status)) {
+            setActiveJobId(null)
+            setRunning(false)
+            inFlightRef.current = false
+          }
+        })
+        .catch(() => {
+          /* keep polling until user cancels or leaves */
+        })
+    }, 2000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [activeJobId])
 
   useEffect(() => {
     skipClientReloadRef.current = true
@@ -415,28 +486,122 @@ export default function ResearchCompany({
           <button
             type="button"
             className="primary-btn"
-            disabled={running || loading || Boolean(data?.needs_working_for)}
+            disabled={running || loading || Boolean(data?.needs_working_for) || activeJobId != null}
             onClick={() => {
-              if (running || loading) return
-              void load({ run: true, force: true })
+              if (running || loading || activeJobId != null) return
+              void load({ run: true, force: true, depth: 'quick' })
             }}
           >
-            {running ? 'Researching…' : 'Refresh research'}
+            {running && !activeJobId ? 'Researching…' : 'Quick Research'}
           </button>
+          <button
+            type="button"
+            className="primary-btn"
+            disabled={
+              running ||
+              loading ||
+              Boolean(data?.needs_working_for) ||
+              activeJobId != null ||
+              !deepConfigured ||
+              !isAdmin ||
+              inFlightRef.current
+            }
+            title={
+              !isAdmin
+                ? 'Deep Research is administrator-only during the pilot'
+                : deepConfigured
+                  ? 'Deep Research with web search and citations'
+                  : 'Deep Research is not configured on the server'
+            }
+            onClick={() => {
+              if (
+                running ||
+                loading ||
+                activeJobId != null ||
+                !deepConfigured ||
+                !isAdmin ||
+                inFlightRef.current
+              ) {
+                return
+              }
+              setDeepPaidRefresh(false)
+              setDeepConfirmOpen(true)
+            }}
+          >
+            Deep Research
+          </button>
+          {activeJobId != null && isAdmin ? (
+            <button
+              type="button"
+              className="link-btn"
+              onClick={() => {
+                if (inFlightRef.current) return
+                void cancelResearchJob(activeJobId).then((result) => {
+                  setData(result)
+                  if (!['queued', 'running'].includes(result.job?.status || '')) {
+                    setActiveJobId(null)
+                    setRunning(false)
+                    inFlightRef.current = false
+                  }
+                })
+              }}
+            >
+              Cancel Deep Research
+            </button>
+          ) : null}
         </div>
       </div>
 
-      {(loading || running) && (
+      {(loading || running || activeJobId != null) && (
         <p className="data-status" aria-live="polite">
-          {RESEARCH_PROGRESS_STEPS[progressStep]}…
+          {data?.job && ['queued', 'running'].includes(data.job.status)
+            ? `Deep Research ${data.job.status} — ${data.job.progress}% ${data.job.progress_message || ''}`.trim()
+            : `${RESEARCH_PROGRESS_STEPS[progressStep]}…`}
         </p>
       )}
+      {data?.job?.error_message ? (
+        <p className="data-status data-status--error" role="alert">
+          {display(data.job.error_message)}
+        </p>
+      ) : null}
       {error && (
         <p className="data-status data-status--error" role="alert">
           {error}
         </p>
       )}
       {actionMsg && <p className="data-status">{actionMsg}</p>}
+
+      {(() => {
+        const usage =
+          (data?.deep_research_usage && Object.keys(data.deep_research_usage).length
+            ? data.deep_research_usage
+            : data?.job?.usage) || null
+        if (!usage || !Object.keys(usage).length) return null
+        if (data?.research_depth !== 'deep' && !data?.job) return null
+        const costStatus = String(usage.cost_estimate_status || 'unavailable')
+        const cost =
+          costStatus === 'complete' && usage.estimated_cost_usd != null
+            ? `$${Number(usage.estimated_cost_usd).toFixed(4)}`
+            : 'Exact cost unavailable'
+        return (
+          <p className="data-status" data-testid="deep-research-usage">
+            Deep Research usage: model {display(String(usage.model || data?.job?.openai_model || ''))}
+            {' · '}
+            searches {display(String(usage.web_search_call_count ?? '—'))}
+            {' · '}
+            tokens in/out/total{' '}
+            {display(String(usage.input_tokens ?? '—'))}/
+            {display(String(usage.output_tokens ?? '—'))}/
+            {display(String(usage.total_tokens ?? '—'))}
+            {usage.reasoning_tokens != null
+              ? ` (reasoning ${String(usage.reasoning_tokens)})`
+              : ''}
+            {' · '}
+            est. cost {cost}
+            {data?.deep_research_from_cache ? ' · cached' : ''}
+          </p>
+        )
+      })()}
 
       {data?.needs_working_for && (
         <section className="panel" aria-label="Select Working For client">
@@ -824,6 +989,44 @@ export default function ResearchCompany({
             <FindingList title="MATERIALS" items={data.materials || []} />
             <FindingList title="INDUSTRIES / MARKETS" items={data.industries} />
             <FindingList title="RECENT DEVELOPMENTS" items={data.recent_developments} />
+            {(() => {
+              const cites: Array<{ url: string; title?: string }> = [
+                ...(data.citations || []),
+                ...((data.job?.citations || []) as Array<{ url?: string; title?: string }>),
+                ...((data.sources || []) as Array<{ source_url?: string; url?: string; source_name?: string; title?: string; page_title?: string }>).map(
+                  (s) => ({
+                    url: String(s.url || s.source_url || ''),
+                    title: String(s.title || s.page_title || s.source_name || ''),
+                  }),
+                ),
+              ]
+                .map((c) => ({
+                  url: String(c.url || '').trim(),
+                  title: c.title,
+                }))
+                .filter((c) => Boolean(c.url) && /^https?:\/\//i.test(c.url))
+              const seen = new Set<string>()
+              const unique = cites.filter((c) => {
+                if (seen.has(c.url)) return false
+                seen.add(c.url)
+                return true
+              })
+              if (!unique.length) return null
+              return (
+                <div className="ask-section">
+                  <h3>SOURCE CITATIONS</h3>
+                  <ul className="ask-bullet-list">
+                    {unique.map((c) => (
+                      <li key={c.url}>
+                        <a href={c.url} target="_blank" rel="noreferrer">
+                          {display(c.title || c.url)}
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )
+            })()}
             {data.summary ? (
               <div className="ask-section">
                 <h3>DETAILED RESEARCH NOTES</h3>
@@ -1369,6 +1572,97 @@ export default function ResearchCompany({
           ) : null}
         </div>
       )}
+
+      {deepConfirmOpen
+        ? createPortal(
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="deep-research-confirm-title"
+              data-testid="deep-research-confirm-modal"
+              style={{
+                position: 'fixed',
+                inset: 0,
+                background: 'rgba(15, 23, 42, 0.45)',
+                zIndex: 210,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 16,
+              }}
+            >
+              <div
+                className="panel"
+                style={{ maxWidth: 520, width: '100%', background: '#fff', padding: 20 }}
+              >
+                <h2 id="deep-research-confirm-title">Confirm Deep Research</h2>
+                <p>
+                  <strong>Deep Research uses paid OpenAI API services.</strong>
+                </p>
+                <ul className="ask-bullet-list">
+                  <li>
+                    Maximum {deepStatus?.limits?.max_web_search_calls ?? 10} web searches
+                  </li>
+                  <li>
+                    Maximum {deepStatus?.limits?.max_output_tokens ?? 6000} generated tokens
+                  </li>
+                  <li>
+                    Estimated cost:{' '}
+                    {deepStatus?.pricing?.estimate_available &&
+                    deepStatus?.limits?.estimated_max_run_usd != null
+                      ? `up to $${Number(deepStatus.limits.estimated_max_run_usd).toFixed(4)} (output+search ceiling; input not included)`
+                      : 'Exact cost unavailable'}
+                  </li>
+                  <li>
+                    Remaining monthly NorthStar allowance:{' '}
+                    {deepStatus?.monthly?.remaining_usd != null &&
+                    deepStatus.monthly.status !== 'unavailable'
+                      ? `$${Number(deepStatus.monthly.remaining_usd).toFixed(2)}`
+                      : 'Not calculable until pricing rates are configured'}
+                  </li>
+                  {deepPaidRefresh ? (
+                    <li>
+                      A completed Deep Research result is still within the{' '}
+                      {deepStatus?.limits?.cache_days ?? 30}-day cache. This confirms a paid
+                      refresh.
+                    </li>
+                  ) : null}
+                </ul>
+                <div className="heading-controls" style={{ marginTop: 16 }}>
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => {
+                      setDeepConfirmOpen(false)
+                      setDeepPaidRefresh(false)
+                    }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="primary-btn"
+                    disabled={running || inFlightRef.current}
+                    onClick={() => {
+                      if (running || inFlightRef.current) return
+                      setDeepConfirmOpen(false)
+                      void load({
+                        run: true,
+                        force: true,
+                        depth: 'deep',
+                        confirmPaidRefresh: deepPaidRefresh,
+                      })
+                      setDeepPaidRefresh(false)
+                    }}
+                  >
+                    {deepPaidRefresh ? 'Confirm paid refresh' : 'Start Deep Research'}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
 
       {detailContact && data
         ? createPortal(

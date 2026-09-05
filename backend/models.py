@@ -1028,6 +1028,44 @@ class ResearchStartRequest(BaseModel):
     working_for_client_id: int | None = None
     campaign_id: int | None = None
     force_refresh: bool = False
+    # Required for a paid Deep Research re-run inside the cache window.
+    confirm_paid_refresh: bool = False
+    # quick = deterministic public web; deep = OpenAI Responses + web_search job
+    research_depth: str = "quick"
+
+
+class ResearchCitation(BaseModel):
+    url: str = ""
+    title: str = ""
+
+
+class ResearchJobView(BaseModel):
+    job_id: int
+    company_id: int
+    working_for_client_id: int
+    campaign_id: int | None = None
+    research_run_id: int | None = None
+    research_depth: str = "deep"
+    status: str = "queued"  # queued|running|completed|failed|cancelled
+    progress: int = 0
+    progress_message: str = ""
+    cancel_requested: bool = False
+    attempt_count: int = 0
+    max_attempts: int = 2
+    openai_response_id: str = ""
+    openai_model: str = ""
+    usage: dict = Field(default_factory=dict)
+    citations: list[dict] = Field(default_factory=list)
+    sources: list[dict] = Field(default_factory=list)
+    error_message: str = ""
+    started_at: str = ""
+    completed_at: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    deep_research_configured: bool = False
+    from_cache: bool = False
+    paid_refresh_required: bool = False
+    limited_by: str = ""
 
 
 class ResearchFindingView(BaseModel):
@@ -1225,6 +1263,12 @@ class ResearchCompanyResponse(BaseModel):
     data_provider: dict = Field(default_factory=dict)
     research_history: list[dict] = Field(default_factory=list)
     read_only_crm: bool = True
+    research_depth: str = "quick"
+    job: ResearchJobView | None = None
+    citations: list[dict] = Field(default_factory=list)
+    deep_research_usage: dict = Field(default_factory=dict)
+    deep_research_from_cache: bool = False
+    deep_research_paid_refresh_required: bool = False
 
 
 class ResearchApproveRequest(BaseModel):

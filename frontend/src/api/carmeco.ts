@@ -1918,6 +1918,62 @@ function normalizeResearchResponse(raw: Record<string, unknown>): import('../typ
         : {},
     research_history: list('research_history'),
     read_only_crm: raw.read_only_crm == null ? true : asBoolean(raw.read_only_crm),
+    research_depth: pick(raw, 'research_depth') || 'quick',
+    job: (() => {
+      const j = (raw.job || null) as Record<string, unknown> | null
+      if (!j) return null
+      return {
+        job_id: asNumber(j.job_id),
+        company_id: asNumber(j.company_id),
+        working_for_client_id: asNumber(j.working_for_client_id),
+        campaign_id: j.campaign_id == null ? null : asNumber(j.campaign_id),
+        research_run_id: j.research_run_id == null ? null : asNumber(j.research_run_id),
+        research_depth: pick(j, 'research_depth') || 'deep',
+        status: pick(j, 'status') || 'queued',
+        progress: asNumber(j.progress, 0),
+        progress_message: pick(j, 'progress_message'),
+        cancel_requested: asBoolean(j.cancel_requested),
+        attempt_count: asNumber(j.attempt_count, 0),
+        max_attempts: asNumber(j.max_attempts, 2),
+        openai_response_id: pick(j, 'openai_response_id'),
+        openai_model: pick(j, 'openai_model'),
+        usage:
+          j.usage && typeof j.usage === 'object' ? (j.usage as Record<string, unknown>) : {},
+        citations: Array.isArray(j.citations)
+          ? (j.citations as Record<string, unknown>[]).map((c) => ({
+              url: pick(c, 'url'),
+              title: pick(c, 'title'),
+            }))
+          : [],
+        sources: Array.isArray(j.sources)
+          ? (j.sources as Record<string, unknown>[]).map((c) => ({
+              url: pick(c, 'url'),
+              title: pick(c, 'title'),
+            }))
+          : [],
+        error_message: pick(j, 'error_message'),
+        started_at: pick(j, 'started_at'),
+        completed_at: pick(j, 'completed_at'),
+        created_at: pick(j, 'created_at'),
+        updated_at: pick(j, 'updated_at'),
+        deep_research_configured: asBoolean(j.deep_research_configured),
+        from_cache: asBoolean(j.from_cache),
+        paid_refresh_required: asBoolean(j.paid_refresh_required),
+        limited_by: pick(j, 'limited_by'),
+      }
+    })(),
+    citations: list('citations').map((c) => ({
+      url: pick(c, 'url'),
+      title: pick(c, 'title'),
+    })),
+    deep_research_usage:
+      raw.deep_research_usage && typeof raw.deep_research_usage === 'object'
+        ? (raw.deep_research_usage as Record<string, unknown>)
+        : {},
+    deep_research_from_cache: asBoolean(raw.deep_research_from_cache),
+    deep_research_paid_refresh_required: asBoolean(
+      raw.deep_research_paid_refresh_required,
+    ),
   }
 }
 
@@ -1927,6 +1983,8 @@ export async function startCompanyResearch(params: {
   working_for_client_id?: number | null
   campaign_id?: number | null
   force_refresh?: boolean
+  confirm_paid_refresh?: boolean
+  research_depth?: 'quick' | 'deep'
 }): Promise<import('../types/carmeco').ResearchCompanyResponse> {
   const response = await fetch('/api/research/company', {
     method: 'POST',
@@ -1937,10 +1995,83 @@ export async function startCompanyResearch(params: {
       working_for_client_id: params.working_for_client_id ?? null,
       campaign_id: params.campaign_id ?? null,
       force_refresh: Boolean(params.force_refresh),
+      confirm_paid_refresh: Boolean(params.confirm_paid_refresh),
+      research_depth: params.research_depth || 'quick',
     }),
   })
   const raw = await parseJson<Record<string, unknown>>(response)
   return normalizeResearchResponse(raw)
+}
+
+export async function fetchResearchJob(
+  jobId: number,
+): Promise<import('../types/carmeco').ResearchCompanyResponse> {
+  const response = await fetch(`/api/research/jobs/${jobId}`)
+  const raw = await parseJson<Record<string, unknown>>(response)
+  return normalizeResearchResponse(raw)
+}
+
+export async function cancelResearchJob(
+  jobId: number,
+): Promise<import('../types/carmeco').ResearchCompanyResponse> {
+  const response = await fetch(`/api/research/jobs/${jobId}/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  })
+  const raw = await parseJson<Record<string, unknown>>(response)
+  return normalizeResearchResponse(raw)
+}
+
+export async function fetchDeepResearchStatus(): Promise<
+  import('../types/carmeco').DeepResearchStatus
+> {
+  const response = await fetch('/api/research/deep/status')
+  const raw = await parseJson<Record<string, unknown>>(response)
+  const limits =
+    raw.limits && typeof raw.limits === 'object'
+      ? (raw.limits as Record<string, unknown>)
+      : {}
+  const pricing =
+    raw.pricing && typeof raw.pricing === 'object'
+      ? (raw.pricing as Record<string, unknown>)
+      : {}
+  const monthly =
+    raw.monthly && typeof raw.monthly === 'object'
+      ? (raw.monthly as Record<string, unknown>)
+      : {}
+  return {
+    deep_research_configured: asBoolean(raw.deep_research_configured),
+    limits: {
+      max_web_search_calls: asNumber(limits.max_web_search_calls, 10),
+      max_output_tokens: asNumber(limits.max_output_tokens, 6000),
+      max_attempts: asNumber(limits.max_attempts, 2),
+      max_run_usd: asNumber(limits.max_run_usd, 1),
+      monthly_limit_usd: asNumber(limits.monthly_limit_usd, 20),
+      cache_days: asNumber(limits.cache_days, 30),
+      dollar_limits_enforceable: asBoolean(limits.dollar_limits_enforceable),
+      estimated_max_run_usd:
+        limits.estimated_max_run_usd == null
+          ? null
+          : asNumber(limits.estimated_max_run_usd),
+      estimated_max_run_status: pick(limits, 'estimated_max_run_status') || 'unavailable',
+      estimated_max_run_note: pick(limits, 'estimated_max_run_note'),
+      pilot_admin_only: asBoolean(limits.pilot_admin_only ?? true),
+    },
+    pricing: {
+      estimate_available: asBoolean(pricing.estimate_available),
+      note: pick(pricing, 'note'),
+    },
+    monthly: {
+      month_start_utc: pick(monthly, 'month_start_utc'),
+      spent_usd: monthly.spent_usd == null ? null : asNumber(monthly.spent_usd),
+      remaining_usd:
+        monthly.remaining_usd == null ? null : asNumber(monthly.remaining_usd),
+      monthly_limit_usd: asNumber(monthly.monthly_limit_usd, 20),
+      status: pick(monthly, 'status') || 'unavailable',
+      dollar_limits_enforceable: asBoolean(monthly.dollar_limits_enforceable),
+    },
+  }
 }
 
 export async function fetchCompanyResearch(params: {
