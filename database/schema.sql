@@ -683,6 +683,7 @@ CREATE TABLE IF NOT EXISTS client_profiles (
     differentiators TEXT NOT NULL DEFAULT '',
     certifications TEXT NOT NULL DEFAULT '',
     equipment_capacity TEXT NOT NULL DEFAULT '',
+    materials TEXT NOT NULL DEFAULT '',
     value_proposition TEXT NOT NULL DEFAULT '',
     default_campaign_id INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -790,6 +791,49 @@ CREATE TABLE IF NOT EXISTS client_setup_audit (
 
 CREATE INDEX IF NOT EXISTS idx_client_setup_audit_client
     ON client_setup_audit(client_id, changed_at DESC);
+
+-- Client onboarding wizard drafts (administrator). Blank draft fields never erase live setup.
+CREATE TABLE IF NOT EXISTS client_onboarding_drafts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id INTEGER,
+    mode TEXT NOT NULL DEFAULT 'new',
+    status TEXT NOT NULL DEFAULT 'draft',
+    current_step INTEGER NOT NULL DEFAULT 1,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    template_id TEXT NOT NULL DEFAULT '',
+    copy_source_client_id INTEGER,
+    completion_percent INTEGER NOT NULL DEFAULT 0,
+    created_by_user_id INTEGER,
+    updated_by_user_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE SET NULL,
+    FOREIGN KEY (copy_source_client_id) REFERENCES clients(id) ON DELETE SET NULL,
+    FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_onboarding_drafts_client
+    ON client_onboarding_drafts(client_id, status, updated_at DESC);
+
+-- Relationship status labels seeded by onboarding (not CRM relationship rows).
+CREATE TABLE IF NOT EXISTS client_status_catalog (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id INTEGER NOT NULL,
+    status_label TEXT NOT NULL,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (client_id, status_label),
+    FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_client_status_catalog_client
+    ON client_status_catalog(client_id, sort_order, status_label);
+
 
 -- Controlled Next Action choices. client_id = 0 is the shared default catalog.
 -- A client may later insert its own rows to override the defaults.

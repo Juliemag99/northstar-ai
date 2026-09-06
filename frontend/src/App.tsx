@@ -55,6 +55,7 @@ import type { PriorityProspectItem } from './api/carmeco'
 import CrossClientOpportunities from './CrossClientOpportunities'
 import WorkQueue from './WorkQueue'
 import ClientSetup from './ClientSetup'
+import ClientOnboarding from './ClientOnboarding'
 import ClientKnowledge from './ClientKnowledge'
 import ContactWorkspacePage from './ContactWorkspace'
 import NextActionFields from './NextActionFields'
@@ -716,7 +717,9 @@ function navIdFromPath(pathname: string): string {
   if (
     matchPath({ path: '/clients/:clientId/setup', end: true }, pathname) ||
     matchPath({ path: '/clients/:clientId/knowledge', end: true }, pathname) ||
-    pathname === '/clients'
+    pathname === '/clients' ||
+    pathname === '/clients/onboarding' ||
+    matchPath({ path: '/clients/onboarding', end: true }, pathname)
   ) {
     return 'clients'
   }
@@ -777,6 +780,9 @@ function App() {
     { path: '/clients/:clientId/knowledge', end: true },
     location.pathname,
   )
+  const showClientOnboarding =
+    location.pathname === '/clients/onboarding' ||
+    Boolean(matchPath({ path: '/clients/onboarding', end: true }, location.pathname))
   const contactMatch = matchPath(
     { path: '/contacts/:contactId', end: true },
     location.pathname,
@@ -804,7 +810,8 @@ function App() {
     activeNav === 'clients' &&
     (location.pathname === '/clients' ||
       Boolean(clientSetupId) ||
-      Boolean(clientKnowledgeId))
+      Boolean(clientKnowledgeId) ||
+      showClientOnboarding)
   const selectedRecordNo = companyMatch?.params.recordNo
     ? decodeURIComponent(companyMatch.params.recordNo)
     : null
@@ -4140,11 +4147,24 @@ function App() {
             <CrossClientOpportunities client={client} />
           )}
 
-          {!loading && !error && showClientSetupPage && clientKnowledgeId && clientKnowledgeId > 0 && (
+          {!loading && !error && showClientSetupPage && showClientOnboarding && (
+            <ClientOnboarding />
+          )}
+
+          {!loading &&
+            !error &&
+            showClientSetupPage &&
+            !showClientOnboarding &&
+            clientKnowledgeId &&
+            clientKnowledgeId > 0 && (
             <ClientKnowledge clientId={clientKnowledgeId} />
           )}
 
-          {!loading && !error && showClientSetupPage && !clientKnowledgeId && (
+          {!loading &&
+            !error &&
+            showClientSetupPage &&
+            !showClientOnboarding &&
+            !clientKnowledgeId && (
             <ClientSetup clientId={clientSetupId && clientSetupId > 0 ? clientSetupId : null} />
           )}
 

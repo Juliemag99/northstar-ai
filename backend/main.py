@@ -353,6 +353,17 @@ from deep_research_data import (
     get_deep_research_job,
 )
 from deep_research_config import deep_research_is_configured
+from client_onboarding_data import (
+    apply_copy_to_draft,
+    apply_template_to_draft,
+    create_draft,
+    finish_draft,
+    get_draft,
+    list_drafts,
+    onboarding_templates_payload,
+    preview_copy_from_client,
+    save_draft,
+)
 from work_queue_data import (
     clients_for_work_queue,
     complete_follow_up_task,
@@ -1781,6 +1792,155 @@ def set_default_campaign_api(client_id: int, campaign_id: int):
 def delete_campaign_api(client_id: int, campaign_id: int):
     try:
         return delete_campaign(client_id, campaign_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# --- Client Onboarding Wizard (administrator) ---
+
+
+@app.get("/api/admin/onboarding/templates")
+def onboarding_templates_api(request: Request):
+    require_administrator(request)
+    return onboarding_templates_payload()
+
+
+@app.get("/api/admin/onboarding/drafts")
+def onboarding_list_drafts_api(request: Request):
+    actor = require_administrator(request)
+    return list_drafts(user=actor)
+
+
+@app.post("/api/admin/onboarding/drafts")
+def onboarding_create_draft_api(request: Request, body: dict | None = None):
+    actor = require_administrator(request)
+    data = body or {}
+    client_id = data.get("client_id")
+    try:
+        cid = int(client_id) if client_id is not None else None
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid client_id.") from None
+    try:
+        return create_draft(
+            user=actor,
+            client_id=cid,
+            template_id=str(data.get("template_id") or "") or None,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/admin/onboarding/drafts/{draft_id}")
+def onboarding_get_draft_api(draft_id: int, request: Request):
+    actor = require_administrator(request)
+    try:
+        return get_draft(draft_id, user=actor)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.put("/api/admin/onboarding/drafts/{draft_id}")
+def onboarding_save_draft_api(draft_id: int, request: Request, body: dict | None = None):
+    actor = require_administrator(request)
+    data = body or {}
+    try:
+        return save_draft(
+            draft_id,
+            user=actor,
+            current_step=data.get("current_step"),
+            payload_patch=data.get("payload") if isinstance(data.get("payload"), dict) else data,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/admin/onboarding/drafts/{draft_id}/apply-template")
+def onboarding_apply_template_api(draft_id: int, request: Request, body: dict | None = None):
+    actor = require_administrator(request)
+    data = body or {}
+    try:
+        return apply_template_to_draft(
+            draft_id,
+            user=actor,
+            template_id=str(data.get("template_id") or ""),
+            overwrite_populated=bool(data.get("overwrite_populated")),
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/admin/onboarding/copy-preview")
+def onboarding_copy_preview_api(request: Request, body: dict | None = None):
+    actor = require_administrator(request)
+    data = body or {}
+    try:
+        source_id = int(data.get("source_client_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="source_client_id required.") from None
+    draft_id = data.get("draft_id")
+    dest_id = data.get("destination_client_id")
+    try:
+        return preview_copy_from_client(
+            user=actor,
+            source_client_id=source_id,
+            draft_id=int(draft_id) if draft_id is not None else None,
+            destination_client_id=int(dest_id) if dest_id is not None else None,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/admin/onboarding/drafts/{draft_id}/apply-copy")
+def onboarding_apply_copy_api(draft_id: int, request: Request, body: dict | None = None):
+    actor = require_administrator(request)
+    data = body or {}
+    try:
+        source_id = int(data.get("source_client_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="source_client_id required.") from None
+    overwrite = data.get("overwrite_fields") if isinstance(data.get("overwrite_fields"), list) else []
+    try:
+        return apply_copy_to_draft(
+            draft_id,
+            user=actor,
+            source_client_id=source_id,
+            overwrite_fields=[str(x) for x in overwrite],
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/admin/onboarding/drafts/{draft_id}/finish")
+def onboarding_finish_api(draft_id: int, request: Request):
+    actor = require_administrator(request)
+    try:
+        return finish_draft(draft_id, user=actor)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except LookupError as exc:

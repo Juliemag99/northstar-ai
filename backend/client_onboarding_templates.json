@@ -1,0 +1,156 @@
+{
+  "version": 1,
+  "zoominfo_mapping_boundary": "See docs/client_onboarding_zoominfo_boundary.md — templates never include credentials or live ZoomInfo calls.",
+  "templates": [
+    {
+      "id": "cnc_machining",
+      "name": "CNC machining",
+      "description": "Job-shop and production CNC machining capabilities and buyer fit signals.",
+      "sells": {
+        "primary_service": "CNC machining",
+        "secondary_services": "milling, turning, multi-axis machining",
+        "products_services": "precision machined components",
+        "equipment_capacity": "CNC mills and lathes (configure specific machines)",
+        "materials": "aluminum, steel, stainless, plastics (configure alloys)",
+        "certifications": ""
+      },
+      "opportunities": {
+        "target_customer_types": "OEMs, Tier suppliers, industrial manufacturers",
+        "target_industries": "aerospace, industrial equipment, medical devices, energy",
+        "target_products": "precision parts, housings, shafts, fixtures",
+        "manufacturing_processes_sought": "CNC milling, CNC turning, multi-axis machining",
+        "production_preference": "prototype through mid-volume production",
+        "geographic_preferences": "",
+        "positive_signals": "outsourced machining, print/RFQ activity, recurring part numbers",
+        "negative_signals": "pure commodity fasteners only",
+        "exclusions": "companies with no metal or plastic machining spend"
+      },
+      "crm": {
+        "statuses": ["Prospect", "Working", "Quoted", "Customer", "Not a Fit"],
+        "default_status": "Prospect",
+        "campaign_name": "CNC Machining",
+        "campaign_description": "Default campaign for CNC machining opportunities"
+      }
+    },
+    {
+      "id": "metal_fabrication",
+      "name": "Metal fabrication",
+      "description": "Fabrication, welding, and formed-metal capabilities.",
+      "sells": {
+        "primary_service": "Metal fabrication",
+        "secondary_services": "welding, cutting, forming, assembly",
+        "products_services": "fabricated assemblies and weldments",
+        "equipment_capacity": "laser/plasma cutting, press brake, welding cells (configure)",
+        "materials": "carbon steel, stainless, aluminum",
+        "certifications": ""
+      },
+      "opportunities": {
+        "target_customer_types": "OEMs, equipment manufacturers, industrial fabricators",
+        "target_industries": "industrial equipment, agriculture, construction, energy",
+        "target_products": "frames, enclosures, brackets, weldments",
+        "manufacturing_processes_sought": "laser cutting, forming, welding, fabrication",
+        "production_preference": "prototype through production programs",
+        "geographic_preferences": "",
+        "positive_signals": "outsourced fabrication, BOM with formed/welded parts",
+        "negative_signals": "pure commodity plate distribution only",
+        "exclusions": "accounts with no fabrication spend"
+      },
+      "crm": {
+        "statuses": ["Prospect", "Working", "Quoted", "Customer", "Not a Fit"],
+        "default_status": "Prospect",
+        "campaign_name": "Metal Fabrication",
+        "campaign_description": "Default campaign for metal fabrication opportunities"
+      }
+    },
+    {
+      "id": "metal_stamping",
+      "name": "Metal stamping",
+      "description": "Stamping and stamped/formed component capabilities.",
+      "sells": {
+        "primary_service": "Metal stamping",
+        "secondary_services": "progressive die, transfer, secondary operations",
+        "products_services": "stamped and formed metal components",
+        "equipment_capacity": "stamping presses (configure tonnage)",
+        "materials": "steel, stainless, aluminum, copper alloys",
+        "certifications": ""
+      },
+      "opportunities": {
+        "target_customer_types": "OEMs and Tier suppliers needing stamped components",
+        "target_industries": "automotive, appliance, industrial, agriculture, trailer",
+        "target_products": "stamped brackets, formed parts, progressive-die components",
+        "manufacturing_processes_sought": "metal stamping, progressive die, transfer stamping",
+        "production_preference": "recurring production and new-program tooling",
+        "geographic_preferences": "",
+        "positive_signals": "existing stamping tooling, outsourced stamped parts, RFQ for stampings",
+        "negative_signals": "no metal forming spend",
+        "exclusions": "accounts that only buy finished assemblies with no stamp content"
+      },
+      "crm": {
+        "statuses": ["Prospect", "Working", "Quoted", "Customer", "Not a Fit"],
+        "default_status": "Prospect",
+        "campaign_name": "Metal Stamping",
+        "campaign_description": "Default campaign for metal stamping opportunities"
+      }
+    },
+    {
+      "id": "manufacturing_recruiting",
+      "name": "Manufacturing recruiting",
+      "description": "Staffing and recruiting for manufacturing roles.",
+      "sells": {
+        "primary_service": "Manufacturing recruiting",
+        "secondary_services": "direct hire, contract staffing, skilled trades placement",
+        "products_services": "recruiting and placement for manufacturing employers",
+        "equipment_capacity": "",
+        "materials": "",
+        "certifications": ""
+      },
+      "opportunities": {
+        "target_customer_types": "manufacturers and industrial employers hiring production and skilled trades",
+        "target_industries": "manufacturing, industrial, logistics",
+        "target_products": "open production, maintenance, quality, and engineering roles",
+        "manufacturing_processes_sought": "",
+        "production_preference": "",
+        "geographic_preferences": "",
+        "positive_signals": "open requisitions, plant expansion, high turnover roles",
+        "negative_signals": "no manufacturing hiring",
+        "exclusions": "non-employer entities"
+      },
+      "crm": {
+        "statuses": ["Prospect", "Working", "Placing", "Customer", "Not a Fit"],
+        "default_status": "Prospect",
+        "campaign_name": "Manufacturing Recruiting",
+        "campaign_description": "Default campaign for manufacturing recruiting"
+      }
+    },
+    {
+      "id": "blank_custom",
+      "name": "Blank / custom",
+      "description": "Empty structure — fill every field for this client. Never invent capabilities.",
+      "sells": {
+        "primary_service": "",
+        "secondary_services": "",
+        "products_services": "",
+        "equipment_capacity": "",
+        "materials": "",
+        "certifications": ""
+      },
+      "opportunities": {
+        "target_customer_types": "",
+        "target_industries": "",
+        "target_products": "",
+        "manufacturing_processes_sought": "",
+        "production_preference": "",
+        "geographic_preferences": "",
+        "positive_signals": "",
+        "negative_signals": "",
+        "exclusions": ""
+      },
+      "crm": {
+        "statuses": ["Prospect", "Working", "Customer", "Not a Fit"],
+        "default_status": "Prospect",
+        "campaign_name": "Default",
+        "campaign_description": ""
+      }
+    }
+  ]
+}

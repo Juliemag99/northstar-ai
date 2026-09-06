@@ -374,6 +374,9 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     from auth_sessions import ensure_staff_auth_schema
 
     ensure_staff_auth_schema(conn)
+    from client_onboarding_data import ensure_client_onboarding_schema
+
+    ensure_client_onboarding_schema(conn)
     conn.commit()
 
 

@@ -12,6 +12,8 @@ import {
   type ClientSetup,
   type ClientSetupListItem,
 } from './api/carmeco'
+import { useAuth } from './auth/useAuth'
+import { staffCanAdminister } from './auth/staffCanAdminister'
 
 function display(value: string | null | undefined): string {
   const t = (value || '').trim()
@@ -69,6 +71,8 @@ function ClientsHub() {
   const [rows, setRows] = useState<ClientSetupListItem[]>([])
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const { user, authenticated } = useAuth()
+  const isAdmin = staffCanAdminister(Boolean(authenticated), user)
 
   useEffect(() => {
     setLoading(true)
@@ -82,9 +86,18 @@ function ClientsHub() {
 
   return (
     <div className="client-setup-page">
-      <div className="page-heading">
-        <h1>Clients</h1>
-        <p>Open Client Setup to define what each client sells, who they target, and campaigns.</p>
+      <div className="page-heading page-heading--split">
+        <div>
+          <h1>Clients</h1>
+          <p>Open Client Setup to define what each client sells, who they target, and campaigns.</p>
+        </div>
+        {isAdmin ? (
+          <div className="heading-controls">
+            <Link className="primary-btn" to="/clients/onboarding">
+              Add Client
+            </Link>
+          </div>
+        ) : null}
       </div>
       {loading && <p className="data-status">Loading clients…</p>}
       {error && (
@@ -138,6 +151,17 @@ function ClientsHub() {
                   <Link className="link-btn" to={`/clients/${r.client_id}/setup`}>
                     Open Setup
                   </Link>
+                  {isAdmin && (r.target_profile_percent ?? r.completeness_percent) < 100 ? (
+                    <>
+                      {' · '}
+                      <Link
+                        className="link-btn"
+                        to={`/clients/onboarding?client_id=${r.client_id}`}
+                      >
+                        Complete Setup
+                      </Link>
+                    </>
+                  ) : null}
                 </td>
               </tr>
             ))}

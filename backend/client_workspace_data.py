@@ -1065,7 +1065,33 @@ def list_relationship_statuses(
             """,
             client_ids,
         ).fetchall()
-    return [_blank(r["status"]) for r in rows if _blank(r["status"])]
+        # Optional onboarding status catalog (labels only; never invents CRM rows).
+        catalog_rows: list = []
+        try:
+            catalog_rows = conn.execute(
+                f"""
+                SELECT DISTINCT status_label AS status
+                FROM client_status_catalog
+                WHERE client_id IN ({placeholders})
+                  AND active = 1
+                  AND TRIM(status_label) != ''
+                ORDER BY status_label COLLATE NOCASE ASC
+                """,
+                client_ids,
+            ).fetchall()
+        except Exception:
+            catalog_rows = []
+        merged: list[str] = []
+        seen: set[str] = set()
+        for r in list(rows) + list(catalog_rows):
+            label = _blank(r["status"])
+            key = label.lower()
+            if not label or key in seen:
+                continue
+            seen.add(key)
+            merged.append(label)
+        merged.sort(key=lambda s: s.lower())
+    return merged
 
 
 def _write_audit(
