@@ -16,11 +16,13 @@ import testdb
 from db import DB_PATH, PRODUCTION_DB_PATH
 from research_data import (
     FIT_CRITERIA_NOT_CONFIGURED,
+    FIT_NOT_YET_EVALUATED,
     _build_decision_summary,
     _build_summary,
     _campaign_criteria_configured,
     _compute_fit,
 )
+from recommendation_data import build_northstar_recommendation
 from research_providers import _PRODUCT_PHRASES, _find_phrases_with_page
 
 
@@ -154,9 +156,60 @@ class ValmontResearchVisibilityTests(unittest.TestCase):
                 "advancing agricultural productivity with a commitment to conserving resources."
             ],
         )
-        self.assertEqual(decision.fit_result, FIT_CRITERIA_NOT_CONFIGURED)
-        self.assertIn("criteria not configured", decision.why.lower())
+        self.assertEqual(decision.fit_result, FIT_NOT_YET_EVALUATED)
+        self.assertIn("no positive or negative fit determination", decision.why.lower())
+        self.assertIn("criteria", decision.why.lower())
         self.assertNotIn("stamped/formed", decision.why.lower())
+        self.assertNotIn("research company", decision.why.lower())
+        self.assertNotIn("little verified", decision.why.lower())
+
+        rec = build_northstar_recommendation(
+            fit_result=FIT_CRITERIA_NOT_CONFIGURED,
+            engagement_level="No Stored Engagement",
+            engagement_signals=[],
+            relationship_status="Left Message",
+            sales_events=[],
+            contacts=[],
+            missing_information=list(fit.missing_information),
+            campaign_name="Default",
+            client_name="Brown Industries",
+        )
+        self.assertNotEqual(rec.action, "Research Company")
+        self.assertNotIn("research company", rec.action.lower())
+        self.assertNotIn("little verified", rec.why.lower())
+        self.assertIn("no positive or negative fit determination", rec.why.lower())
+        self.assertIn("configure brown industries", rec.action.lower())
+        self.assertEqual(rec.fit_context, FIT_NOT_YET_EVALUATED)
+        # Engagement must not appear in the criteria-missing recommendation evidence.
+        joined_ev = " ".join(rec.evidence_used).lower()
+        self.assertNotIn("engagement", joined_ev)
+        self.assertNotIn("left message", joined_ev)
+
+    def test_completed_deep_research_style_recommendation_ignores_engagement(self):
+        """Completed Valmont research + missing Brown criteria must not read as weak fit."""
+        rec = build_northstar_recommendation(
+            fit_result=FIT_CRITERIA_NOT_CONFIGURED,
+            engagement_level="No Stored Engagement",
+            engagement_signals=[],
+            relationship_status="Left Message",
+            sales_events=[],
+            contacts=[],
+            research_gaps=["Campaign criteria not configured: set primary service…"],
+            campaign_name="Default",
+            client_name="Brown Industries",
+        )
+        banned = (
+            "research company",
+            "little verified",
+            "not a fit",
+            "weak fit",
+            "no immediate action",
+        )
+        blob = f"{rec.action}\n{rec.why}\n{rec.fit_context}".lower()
+        for phrase in banned:
+            self.assertNotIn(phrase, blob, phrase)
+        self.assertIn("configure brown industries", rec.action.lower())
+        self.assertIn("capabilities and target criteria", rec.action.lower())
 
     def test_product_phrases_match_valmont_style_copy(self):
         pages = [

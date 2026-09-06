@@ -16,6 +16,7 @@ import ZoomInfoAddModal from './ZoomInfoAddModal'
 import type { CrmAddContactInput } from './api/carmeco'
 import { ASK_NORTHSTAR_PATH, isFromAskNorthStar, withAskReturnParam } from './askNorthStarReturn'
 import { useAuth } from './auth/useAuth'
+import { researchFitPresentation } from './researchFitMessaging'
 
 function display(value: string | null | undefined): string {
   return value?.trim() || '—'
@@ -642,12 +643,24 @@ export default function ResearchCompany({
 
             {(() => {
               const decision = data.decision_summary
-              const fitResult =
+              const storedFit =
                 decision?.fit_result || data.fit?.fit_result || 'Insufficient Information'
               const clientLabel =
                 decision?.client_name || data.working_for_client_name || 'Client'
               const campaignLabel =
                 decision?.campaign_name || data.campaign_name || data.fit?.campaign_name || 'Default'
+              const jobFailed = (data.job?.status || '').toLowerCase() === 'failed'
+              const fitPresentation = researchFitPresentation({
+                fitResult: storedFit,
+                decisionWhy: decision?.why,
+                fitWhy: data.fit?.why,
+                clientName: clientLabel,
+                workingForClientId: data.working_for_client_id,
+                researchFailed: jobFailed,
+                researchIncomplete:
+                  Boolean(data.job) &&
+                  ['queued', 'running'].includes((data.job?.status || '').toLowerCase()),
+              })
               const overviewItems = (data.overview || []).filter(
                 (item) =>
                   (item.evidence_level || '').toLowerCase() !== 'not_verified' &&
@@ -720,19 +733,26 @@ export default function ResearchCompany({
                     )}
                   </div>
 
-                  <div className="research-decision__fit">
+                  <div
+                    className="research-decision__fit"
+                    aria-label="Campaign fit"
+                    data-fit-state={fitPresentation.state}
+                  >
                     <div className="research-decision__kicker">Campaign Fit</div>
                     <div className="research-decision__client">
                       {clientLabel} · {campaignLabel}
                     </div>
-                    <div className="research-decision__rating">{fitResult}</div>
+                    <div className="research-decision__rating">{fitPresentation.heading}</div>
                     <div className="research-decision__block">
                       <h3>Why</h3>
                       <p>
                         {display(
-                          decision?.why ||
-                            data.fit?.why ||
-                            'Not enough verified evidence to explain this rating yet.',
+                          fitPresentation.state === 'not_evaluated'
+                            ? fitPresentation.why
+                            : decision?.why ||
+                                data.fit?.why ||
+                                fitPresentation.why ||
+                                'Not enough verified evidence to explain this rating yet.',
                         )}
                       </p>
                     </div>
@@ -740,12 +760,28 @@ export default function ResearchCompany({
                       <h3>What we still need to know</h3>
                       <p>
                         {display(
-                          decision?.still_need ||
-                            (data.fit?.missing_information?.[0] as string) ||
-                            'Confirm the remaining campaign-specific gaps listed under Missing Information.',
+                          fitPresentation.state === 'not_evaluated'
+                            ? fitPresentation.nextAction || decision?.still_need || ''
+                            : decision?.still_need ||
+                                (data.fit?.missing_information?.[0] as string) ||
+                                'Confirm the remaining campaign-specific gaps listed under Missing Information.',
                         )}
                       </p>
                     </div>
+                    {fitPresentation.state === 'not_evaluated' && fitPresentation.nextAction ? (
+                      <div className="research-decision__block" data-testid="fit-configure-next">
+                        <h3>Next action</h3>
+                        {fitPresentation.configureHref ? (
+                          <p>
+                            <Link className="link-btn" to={fitPresentation.configureHref}>
+                              {fitPresentation.nextAction}
+                            </Link>
+                          </p>
+                        ) : (
+                          <p>{fitPresentation.nextAction}</p>
+                        )}
+                      </div>
+                    ) : null}
                   </div>
                 </>
               )
@@ -788,10 +824,29 @@ export default function ResearchCompany({
               <div
                 className="research-decision__engagement"
                 aria-label="NorthStar recommendation"
+                data-testid="northstar-recommendation"
                 style={{ marginTop: '0.85rem', borderTop: '1px solid rgba(0,0,0,0.08)', paddingTop: '0.85rem' }}
               >
                 <div className="research-decision__kicker">NorthStar Recommendation</div>
-                <div className="research-decision__rating">{display(data.recommendation.action)}</div>
+                <div className="research-decision__rating">
+                  {(() => {
+                    const action = String(data.recommendation.action || '')
+                    const configureHref =
+                      data.working_for_client_id != null && data.working_for_client_id > 0
+                        ? `/clients/${data.working_for_client_id}/setup`
+                        : null
+                    const isConfigure =
+                      /configure .+capabilities and target criteria/i.test(action)
+                    if (isConfigure && configureHref) {
+                      return (
+                        <Link className="link-btn" to={configureHref}>
+                          {display(action)}
+                        </Link>
+                      )
+                    }
+                    return display(action)
+                  })()}
+                </div>
                 <div className="research-decision__block">
                   <h3>Why</h3>
                   <p>{display(data.recommendation.why)}</p>

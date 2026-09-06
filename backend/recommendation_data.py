@@ -18,18 +18,25 @@ def _blank(value: Any) -> str:
     return str(value).strip()
 
 
+def _possessive(name: str) -> str:
+    n = _blank(name) or "this client"
+    if n.lower().endswith("s"):
+        return f"{n}'"
+    return f"{n}'s"
+
+
 def _norm_fit(fit_result: str) -> str:
     t = _blank(fit_result).lower()
     if not t:
         return "insufficient"
+    if "fit not yet evaluated" in t or "criteria not configured" in t:
+        return "criteria_missing"
     if "strong" in t:
         return "strong"
     if "possible" in t or "partial" in t:
         return "possible"
     if "weak" in t or "poor" in t or "not a fit" in t or "nofit" in t.replace(" ", ""):
         return "weak"
-    if "criteria not configured" in t:
-        return "insufficient"
     if "insufficient" in t or "unknown" in t or "not enough" in t:
         return "insufficient"
     return "insufficient"
@@ -253,6 +260,34 @@ def build_northstar_recommendation(
             advisory_note=advisory,
         )
 
+    # --- Criteria missing: research may be complete; fit was never evaluated ---
+    # Engagement must not influence this recommendation or appear in its evidence.
+    if fit == "criteria_missing":
+        action = (
+            f"Configure {_possessive(client)} capabilities and target criteria to evaluate fit."
+        )
+        return NorthStarRecommendation(
+            action=action,
+            why=(
+                "No positive or negative fit determination has been made. "
+                "Company research is complete, but Campaign Fit cannot be rated until "
+                f"{_possessive(client)} capabilities and target criteria are configured. "
+                "Engagement history is shown separately and does not imply weak or "
+                "strong fit."
+            ),
+            evidence_used=[
+                _blank(fit_result) or "Campaign Criteria Not Configured",
+            ],
+            still_need_to_know=[
+                f"Configure {_possessive(client)} capabilities (what the client sells) and "
+                f"campaign target criteria for {camp}.",
+            ],
+            fit_context="Fit Not Yet Evaluated",
+            engagement_context="— (separate from fit; not used in this recommendation)",
+            confidence="high",
+            advisory_note=advisory,
+        )
+
     # --- RFQ path ---
     if (has_rfq or recent_rfq) and eng in {"active", "engaged", "early"}:
         action = "Review RFQ"
@@ -419,7 +454,10 @@ def build_northstar_recommendation(
     }
     if action == "Start Outreach":
         action = "Follow Up Now"
-    if action not in allowed:
+    # Client-specific configure-criteria actions are allowed verbatim.
+    if action.startswith("Configure ") and "target criteria" in action:
+        pass
+    elif action not in allowed:
         action = "Review Account"
 
     return NorthStarRecommendation(

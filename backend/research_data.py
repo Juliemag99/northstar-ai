@@ -187,6 +187,8 @@ PROFILE_STRONG_FIT_REQUIRED = (
 
 # Explicit fit rating when the selected campaign has no usable ICP criteria.
 FIT_CRITERIA_NOT_CONFIGURED = "Campaign Criteria Not Configured"
+# Presentation heading when research completed but criteria were never configured.
+FIT_NOT_YET_EVALUATED = "Fit Not Yet Evaluated"
 
 
 def _now() -> str:
@@ -1995,15 +1997,17 @@ def _build_decision_summary(
             if stamping_campaign
             else "Revisit only if new evidence shows stronger campaign alignment."
         )
-    elif "criteria not configured" in key:
+    elif "criteria not configured" in key or "fit not yet evaluated" in key:
+        fit_result = FIT_NOT_YET_EVALUATED
+        client_poss = f"{client}'" if client.lower().endswith("s") else f"{client}'s"
         why = (
-            f"Campaign criteria not configured for {client}'s {camp} campaign. "
-            f"Public company research for {company_name} is still available; configure "
-            "primary service and fit signals before rating Campaign Fit."
+            "No positive or negative fit determination has been made. "
+            f"Company research for {company_name} is complete, but {client_poss} "
+            f"capabilities and target criteria for the {camp} campaign are not "
+            "configured yet, so Campaign Fit cannot be rated."
         )
         still = (
-            "Configure campaign targeting criteria (primary service, processes sought, "
-            "fit weighting, positive/negative signals), then refresh research to rate fit."
+            f"Configure {client_poss} capabilities and target criteria to evaluate fit."
         )
     else:
         # Insufficient Information (and default)
