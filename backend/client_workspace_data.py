@@ -215,10 +215,12 @@ def get_all_my_clients_summary(user_id: int | None = None) -> ActiveClient:
     if db_exists() and client_ids:
         placeholders = ",".join("?" * len(client_ids))
         with get_connection() as conn:
+            # One company row in All My Clients — count distinct companies, not CCRs.
             prospect_count = int(
                 conn.execute(
                     f"""
-                    SELECT COUNT(*) AS n FROM client_company_relationships
+                    SELECT COUNT(DISTINCT company_id) AS n
+                    FROM client_company_relationships
                     WHERE client_id IN ({placeholders})
                     """,
                     client_ids,
