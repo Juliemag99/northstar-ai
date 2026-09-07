@@ -559,6 +559,9 @@ def ensure_schema(db_path: Path | None = None) -> None:
         from crm_import_staging import ensure_crm_import_schema
 
         ensure_crm_import_schema(conn)
+        from shared_note_history_import import ensure_shared_note_history_schema
+
+        ensure_shared_note_history_schema(conn)
 
     # Build/refresh FTS index after schema is ready
     from search_data import rebuild_search_index

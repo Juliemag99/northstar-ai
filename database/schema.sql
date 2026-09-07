@@ -237,6 +237,58 @@ CREATE INDEX IF NOT EXISTS idx_ccr_client_record_no
     ON client_company_relationships(client_id, external_record_no);
 CREATE INDEX IF NOT EXISTS idx_legacy_notes_company
     ON legacy_notes(company_id);
+
+-- Company-scoped shared LeadMaster note-history events (chronological import).
+-- Idempotent on (company_id, event_hash). Visible across linked clients.
+CREATE TABLE IF NOT EXISTS company_shared_history_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL,
+    external_record_no TEXT NOT NULL DEFAULT '',
+    source_company_name TEXT NOT NULL DEFAULT '',
+    event_at TEXT NOT NULL DEFAULT '',
+    event_sequence TEXT NOT NULL DEFAULT '',
+    author TEXT NOT NULL DEFAULT '',
+    event_type TEXT NOT NULL DEFAULT '',
+    attribution TEXT NOT NULL DEFAULT '',
+    attribution_evidence TEXT NOT NULL DEFAULT '',
+    source_file TEXT NOT NULL DEFAULT '',
+    note_text TEXT NOT NULL DEFAULT '',
+    event_hash TEXT NOT NULL,
+    import_batch_id INTEGER,
+    imported_at TEXT NOT NULL DEFAULT '',
+    imported_by_user_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_company_shared_history_idempotency
+    ON company_shared_history_events(company_id, event_hash);
+CREATE INDEX IF NOT EXISTS idx_company_shared_history_company
+    ON company_shared_history_events(company_id, event_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_company_shared_history_record_no
+    ON company_shared_history_events(external_record_no);
+
+CREATE TABLE IF NOT EXISTS shared_note_history_import_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'previewed',
+    prospects_filename TEXT NOT NULL DEFAULT '',
+    history_filename TEXT NOT NULL DEFAULT '',
+    prospects_sha256 TEXT NOT NULL DEFAULT '',
+    history_sha256 TEXT NOT NULL DEFAULT '',
+    prospects_path TEXT NOT NULL DEFAULT '',
+    history_path TEXT NOT NULL DEFAULT '',
+    preview_json TEXT NOT NULL DEFAULT '',
+    result_json TEXT NOT NULL DEFAULT '',
+    created_by_user_id INTEGER,
+    created_by_name TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT '',
+    confirmed_at TEXT NOT NULL DEFAULT '',
+    cancelled_at TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_snh_import_batches_client
+    ON shared_note_history_import_batches(client_id, id DESC);
+
 CREATE INDEX IF NOT EXISTS idx_user_client_user
     ON user_client_assignments(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_client_client

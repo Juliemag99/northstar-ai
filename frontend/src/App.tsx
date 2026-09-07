@@ -3703,6 +3703,56 @@ function App() {
                         )}
 
                         <div className="panel-header panel-header--sub">
+                          <h3 id="shared-company-history-heading">Shared Company History</h3>
+                          <span className="queue-source">
+                            Chronological LeadMaster events · attribution preserved ·{' '}
+                            {(sharedHistory?.shared_company_history_items ?? []).length}
+                          </span>
+                        </div>
+                        {(sharedHistory?.shared_company_history_items ?? []).length === 0 ? (
+                          <p className="empty-state">
+                            No shared company note-history events for this company.
+                          </p>
+                        ) : (
+                          <ul
+                            className="activity-history shared-history-list"
+                            aria-labelledby="shared-company-history-heading"
+                          >
+                            {(sharedHistory?.shared_company_history_items ?? []).map((item) => (
+                              <li
+                                key={item.item_key}
+                                id={
+                                  item.source_id != null
+                                    ? `shared-history-${item.source_id}`
+                                    : undefined
+                                }
+                                className="activity-history__item activity-history__item--legacy"
+                              >
+                                <div className="activity-history__meta">
+                                  <span className="client-badge-pill">
+                                    {item.attribution || item.client_name || 'Shared history'}
+                                  </span>
+                                  <strong>{item.title || item.activity_type || 'Shared history'}</strong>
+                                  {item.attribution_evidence ? (
+                                    <span>{item.attribution_evidence}</span>
+                                  ) : null}
+                                  {item.event_at ? <span>{item.event_at}</span> : null}
+                                  {item.created_by ? <span>{item.created_by}</span> : null}
+                                  {item.source_file ? (
+                                    <span className="history-source-badge">{item.source_file}</span>
+                                  ) : null}
+                                </div>
+                                {item.body ? (
+                                  <pre className="note-history__body">{item.body}</pre>
+                                ) : (
+                                  <p className="muted-note">No detail text</p>
+                                )}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+
+                        <div className="panel-header panel-header--sub">
                           <h3 id="shared-legacy-heading">LeadMaster Legacy History</h3>
                           <span className="queue-source">
                             Shown once when identical across clients

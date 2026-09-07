@@ -174,6 +174,9 @@ from models import (
     SearchResponse,
     SetHotRequest,
     SharedHistoryResponse,
+    SharedNoteHistoryConfirmResponse,
+    SharedNoteHistoryImportBatchView,
+    SharedNoteHistoryUploadResult,
     StatusUpdateRequest,
     UserClientsResponse,
     WorkQueueCompleteRequest,
@@ -331,6 +334,12 @@ from crm_import_staging import (
 from crm_import_plan import dry_run_crm_import
 from crm_import_confirm import confirm_admin_crm_import_batch
 from crm_import_status_resolution import save_crm_import_status_resolution
+from shared_note_history_import import (
+    MAX_FILE_BYTES as SNH_MAX_FILE_BYTES,
+    confirm_shared_note_history_import,
+    get_shared_note_history_batch,
+    upload_shared_note_history_import,
+)
 from gmail_send import send_client_email
 from fastapi.responses import RedirectResponse
 from extraction_review_bulk import (
@@ -2849,6 +2858,80 @@ def confirm_admin_crm_import_api(
         )
     except BatchNotReusable as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Unexpected failure.") from exc
+
+
+@app.post(
+    "/api/clients/{client_id}/admin/shared-note-history-imports",
+    response_model=SharedNoteHistoryUploadResult,
+)
+async def upload_shared_note_history_import_api(
+    client_id: int,
+    request: Request,
+    prospects_file: UploadFile = File(...),
+    history_file: UploadFile = File(...),
+):
+    """Upload prospects + shared history CSVs and return dry-run preview counts."""
+    actor = _require_admin_client(request, client_id)
+    prospects_content = await prospects_file.read(SNH_MAX_FILE_BYTES + 1)
+    history_content = await history_file.read(SNH_MAX_FILE_BYTES + 1)
+    if len(prospects_content) > SNH_MAX_FILE_BYTES or len(history_content) > SNH_MAX_FILE_BYTES:
+        raise HTTPException(status_code=400, detail="This file is too large to upload.")
+    try:
+        return upload_shared_note_history_import(
+            client_id=client_id,
+            actor=actor,
+            prospects_filename=prospects_file.filename or "prospects.csv",
+            prospects_content=prospects_content,
+            history_filename=history_file.filename or "history.csv",
+            history_content=history_content,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get(
+    "/api/clients/{client_id}/admin/shared-note-history-imports/{batch_id}",
+    response_model=SharedNoteHistoryImportBatchView,
+)
+def get_shared_note_history_import_api(client_id: int, batch_id: int, request: Request):
+    _require_admin_client(request, client_id)
+    try:
+        return get_shared_note_history_batch(client_id, batch_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post(
+    "/api/clients/{client_id}/admin/shared-note-history-imports/{batch_id}/confirm",
+    response_model=SharedNoteHistoryConfirmResponse,
+)
+def confirm_shared_note_history_import_api(
+    client_id: int,
+    batch_id: int,
+    request: Request,
+    confirm: bool = True,
+):
+    actor = _require_admin_client(request, client_id)
+    if confirm is not True:
+        raise HTTPException(status_code=400, detail="confirm must be true.")
+    try:
+        return confirm_shared_note_history_import(
+            client_id=client_id,
+            batch_id=batch_id,
+            actor=actor,
+        )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except LookupError as exc:

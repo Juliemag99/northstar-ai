@@ -745,8 +745,8 @@ class SharedHistoryItem(BaseModel):
     """One history entry — NorthStar activity or legacy note (shared or distinct)."""
 
     item_key: str
-    item_type: str  # activity | shared_legacy | legacy_note | milestone
-    section: str = ""  # northstar | shared_legacy | distinct_legacy
+    item_type: str  # activity | shared_legacy | legacy_note | milestone | shared_history_event
+    section: str = ""  # northstar | shared_legacy | distinct_legacy | shared_company_history
     legacy_scope: str = ""  # shared | distinct | ""
     client_id: int
     client_code: str = ""
@@ -761,6 +761,10 @@ class SharedHistoryItem(BaseModel):
     source_table: str = ""
     source_id: int | None = None
     shared_client_names: list[str] = Field(default_factory=list)
+    attribution: str = ""
+    attribution_evidence: str = ""
+    source_file: str = ""
+    event_hash: str = ""
 
 
 class SharedHistoryResponse(BaseModel):
@@ -773,6 +777,7 @@ class SharedHistoryResponse(BaseModel):
     northstar_items: list[SharedHistoryItem] = Field(default_factory=list)
     shared_legacy_items: list[SharedHistoryItem] = Field(default_factory=list)
     distinct_legacy_items: list[SharedHistoryItem] = Field(default_factory=list)
+    shared_company_history_items: list[SharedHistoryItem] = Field(default_factory=list)
     count: int = 0
 
 
@@ -3300,3 +3305,68 @@ class CrmImportConfirmResponse(BaseModel):
     notes_appended_count: int = 0
     notes_duplicate_count: int = 0
     notes_unchanged_count: int = 0
+
+
+class SharedNoteHistoryPreviewCounts(BaseModel):
+    companies_included: int = 0
+    companies_excluded_closed: int = 0
+    contacts_included: int = 0
+    contacts_excluded_closed: int = 0
+    history_events_total: int = 0
+    history_events_excluded_closed: int = 0
+    history_long_notes: int = 0
+    history_unattributed: int = 0
+    companies_to_create: int = 0
+    companies_to_reuse: int = 0
+    contacts_to_create: int = 0
+    contacts_to_reuse: int = 0
+    relationships_to_create: int = 0
+    relationships_existing: int = 0
+    status_preserved: int = 0
+    status_set_on_new_relationships: int = 0
+    history_to_insert: int = 0
+    history_already_present: int = 0
+
+
+class SharedNoteHistoryPreviewResponse(BaseModel):
+    client_id: int
+    ok: bool = True
+    errors: list[str] = Field(default_factory=list)
+    counts: SharedNoteHistoryPreviewCounts = Field(
+        default_factory=SharedNoteHistoryPreviewCounts
+    )
+    included_record_nos: list[str] = Field(default_factory=list)
+
+
+class SharedNoteHistoryUploadResult(BaseModel):
+    batch_id: int
+    client_id: int
+    status: str = "previewed"
+    preview: SharedNoteHistoryPreviewResponse
+
+
+class SharedNoteHistoryImportBatchView(BaseModel):
+    batch_id: int
+    client_id: int
+    status: str = ""
+    prospects_filename: str = ""
+    history_filename: str = ""
+    created_at: str = ""
+    confirmed_at: str = ""
+    preview: SharedNoteHistoryPreviewResponse | None = None
+
+
+class SharedNoteHistoryConfirmResponse(BaseModel):
+    client_id: int
+    batch_id: int = 0
+    ok: bool = True
+    companies_created: int = 0
+    companies_reused: int = 0
+    contacts_created: int = 0
+    contacts_reused: int = 0
+    relationships_created: int = 0
+    relationships_existing: int = 0
+    status_preserved: int = 0
+    status_set_on_new_relationships: int = 0
+    history_inserted: int = 0
+    history_skipped_duplicates: int = 0

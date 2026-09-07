@@ -176,6 +176,7 @@ def list_shared_history(
                 northstar_items=[],
                 shared_legacy_items=[],
                 distinct_legacy_items=[],
+                shared_company_history_items=[],
                 count=0,
             )
 
@@ -312,7 +313,67 @@ def list_shared_history(
         shared_legacy_items.sort(key=_sort_key, reverse=True)
         distinct_legacy_items.sort(key=_sort_key, reverse=True)
 
-        items = [*northstar_items, *shared_legacy_items, *distinct_legacy_items]
+        # --- Company-scoped shared note-history events (chronological import) ---
+        shared_company_history_items: list[SharedHistoryItem] = []
+        try:
+            from shared_note_history_import import (
+                UNATTRIBUTED_LABEL,
+                ensure_shared_note_history_schema,
+            )
+
+            ensure_shared_note_history_schema(conn)
+            for ev in conn.execute(
+                """
+                SELECT *
+                FROM company_shared_history_events
+                WHERE company_id = ?
+                ORDER BY
+                    CASE
+                        WHEN TRIM(COALESCE(event_sequence, '')) GLOB '[0-9]*'
+                         AND TRIM(COALESCE(event_sequence, '')) != ''
+                        THEN CAST(TRIM(event_sequence) AS INTEGER)
+                        ELSE 999999999
+                    END ASC,
+                    event_at DESC,
+                    id DESC
+                """,
+                (company_id,),
+            ):
+                attribution = _blank(ev["attribution"]) or UNATTRIBUTED_LABEL
+                event_type = _blank(ev["event_type"]) or "Shared history"
+                title = f"{event_type} · {attribution}"
+                shared_company_history_items.append(
+                    SharedHistoryItem(
+                        item_key=f"shared-history-{ev['id']}",
+                        item_type="shared_history_event",
+                        section="shared_company_history",
+                        legacy_scope="shared",
+                        client_id=0,
+                        client_code="",
+                        client_name=attribution,
+                        external_record_no=_blank(ev["external_record_no"]),
+                        title=title,
+                        body=_blank(ev["note_text"]),
+                        event_at=_blank(ev["event_at"]),
+                        created_by=_blank(ev["author"]),
+                        activity_type=event_type,
+                        source_table="company_shared_history_events",
+                        source_id=int(ev["id"]),
+                        attribution=attribution,
+                        attribution_evidence=_blank(ev["attribution_evidence"]),
+                        source_file=_blank(ev["source_file"]),
+                        event_hash=_blank(ev["event_hash"]),
+                    )
+                )
+        except Exception:
+            shared_company_history_items = []
+
+        items = [
+            *northstar_items,
+            *shared_company_history_items,
+            *shared_legacy_items,
+            *distinct_legacy_items,
+        ]
 
     return SharedHistoryResponse(
         company_id=company_id,
@@ -324,5 +385,6 @@ def list_shared_history(
         northstar_items=northstar_items,
         shared_legacy_items=shared_legacy_items,
         distinct_legacy_items=distinct_legacy_items,
+        shared_company_history_items=shared_company_history_items,
         count=len(items),
     )

@@ -210,6 +210,10 @@ export interface SharedHistoryItem {
   source_table: string
   source_id: number | null
   shared_client_names: string[]
+  attribution?: string
+  attribution_evidence?: string
+  source_file?: string
+  event_hash?: string
 }
 
 export interface SharedHistoryResponse {
@@ -222,6 +226,7 @@ export interface SharedHistoryResponse {
   northstar_items: SharedHistoryItem[]
   shared_legacy_items: SharedHistoryItem[]
   distinct_legacy_items: SharedHistoryItem[]
+  shared_company_history_items?: SharedHistoryItem[]
   count: number
 }
 
