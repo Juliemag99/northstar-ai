@@ -3353,6 +3353,10 @@ class SharedNoteHistoryImportBatchView(BaseModel):
     history_filename: str = ""
     created_at: str = ""
     confirmed_at: str = ""
+    plan_fingerprint: str = ""
+    staging_cleanup_status: str = ""
+    staging_cleanup_error: str = ""
+    staging_cleanup_at: str = ""
     preview: SharedNoteHistoryPreviewResponse | None = None
 
 
@@ -3370,3 +3374,6 @@ class SharedNoteHistoryConfirmResponse(BaseModel):
     status_set_on_new_relationships: int = 0
     history_inserted: int = 0
     history_skipped_duplicates: int = 0
+    plan_fingerprint: str = ""
+    staging_cleanup_status: str = ""
+    staging_cleanup_error: str = ""

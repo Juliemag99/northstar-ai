@@ -24,13 +24,19 @@ from main import app
 from models import NorthStarUser
 from shared_history_data import list_shared_history
 from shared_note_history_import import (
+    CLEANUP_COMPLETED,
+    CLEANUP_PENDING,
     UNATTRIBUTED_LABEL,
+    build_preview_counts,
     confirm_shared_note_history_import,
     ensure_shared_note_history_schema,
     normalize_record_no,
     parse_history_csv,
     parse_prospects_csv,
+    plan_contact_actions,
+    retry_shared_note_history_staging_cleanup,
     upload_shared_note_history_import,
+    _company_by_record_no,
 )
 
 UPLOAD = "/api/clients/{client_id}/admin/shared-note-history-imports"
@@ -40,6 +46,10 @@ DAWSON_DIR = Path(r"C:\Users\julie\Downloads")
 DAWSON_PROSPECTS = DAWSON_DIR / "Dawson_NorthStar_Prospects_No_Closed.csv"
 DAWSON_HISTORY = DAWSON_DIR / "Dawson_Shared_Note_History_No_Closed.csv"
 DAWSON_VALIDATION_XLSX = DAWSON_DIR / "Dawson_Event_History_Validation.xlsx"
+DAWSON_PREIMPORT_BACKUP = (
+    PRODUCTION_DB_PATH.parent
+    / "northstar.db.backup-shared-history-activate-20260907-152255"
+)
 
 FREEZE_TABLES = (
     "activities",
@@ -703,17 +713,40 @@ def test_preview_confirm_visibility_order_idempotency_freeze() -> None:
     assert UNATTRIBUTED_LABEL in shared_attrs
     assert "Brown Industries" in shared_attrs
 
-    # Idempotent rerun
+    # Idempotent rerun: returns stored result; does not double-insert.
     retry = confirm_shared_note_history_import(
         client_id=client_a, batch_id=upload.batch_id, actor=actor
     )
-    assert retry.history_inserted == 0
-    assert retry.history_skipped_duplicates == 4
+    assert retry.ok
+    assert retry.history_inserted == 4
+    assert retry.staging_cleanup_status == "completed"
     with get_connection() as conn:
         total = int(
-            conn.execute("SELECT COUNT(*) AS c FROM company_shared_history_events").fetchone()["c"]
+            conn.execute(
+                """
+                SELECT COUNT(*) AS c FROM company_shared_history_events
+                WHERE import_batch_id = ?
+                """,
+                (upload.batch_id,),
+            ).fetchone()["c"]
         )
         assert total == 4
+        batch = conn.execute(
+            "SELECT status, prospects_path, history_path, staging_cleanup_status, "
+            "prospects_filename, history_filename, prospects_sha256, history_sha256, "
+            "plan_fingerprint, result_json FROM shared_note_history_import_batches WHERE id = ?",
+            (upload.batch_id,),
+        ).fetchone()
+        assert batch["status"] == "confirmed"
+        assert batch["staging_cleanup_status"] == "completed"
+        assert batch["prospects_path"] == ""
+        assert batch["history_path"] == ""
+        assert batch["prospects_filename"]
+        assert batch["history_filename"]
+        assert batch["prospects_sha256"]
+        assert batch["history_sha256"]
+        assert batch["plan_fingerprint"]
+        assert batch["result_json"]
 
     assert _freeze_snapshot() == before_freeze
     _delete_user(user_id)
@@ -969,6 +1002,278 @@ def test_http_admin_preview_and_confirm() -> None:
     print("PASS http preview/confirm")
 
 
+def _history_csv_for_rn(rn: str, company: str, event_hash: str) -> bytes:
+    return _csv_bytes(
+        [
+            "LeadMaster Record No.",
+            "Company",
+            "Current Dawson Status",
+            "Event Sequence",
+            "Event Timestamp",
+            "Author",
+            "Event Type",
+            "Attributed Client/Campaign",
+            "Attribution Evidence",
+            "Note Text",
+            "Source File",
+            "Event Hash",
+        ],
+        [
+            [
+                rn,
+                company,
+                "New",
+                "1",
+                "2026-01-01T12:00:00Z",
+                "Author",
+                "Note",
+                "Dawson Fabrication",
+                "Dawson -",
+                "note",
+                "fixture.csv",
+                event_hash,
+            ]
+        ],
+    )
+
+
+def test_preview_confirm_contact_counters_reconcile_with_in_batch_registry() -> None:
+    """Preview must count in-batch contact identity collisions the same as confirm."""
+    _prove_isolated()
+    with get_connection() as conn:
+        ensure_shared_note_history_schema(conn)
+        migrate_schema(conn)
+        conn.commit()
+    client_a, _ = _client_ids()
+    password = _secret_password()
+    email = f"snh.contact.reconcile.{secrets.token_hex(6)}@example.test"
+    user_id = _create_user(email=email, password=password, administrator=1)
+    _assign(user_id, client_a)
+    actor = _actor(user_id)
+    rn = f"91{secrets.token_hex(3)}"
+    prospects = _csv_bytes(
+        [
+            "Record No.",
+            "Company",
+            "Status",
+            "FirstName",
+            "LastName",
+            "Email",
+            "Phone",
+        ],
+        [
+            [rn, "Dup Co", "New", "Ann", "Alpha", "ann@dup.example", ""],
+            [rn, "Dup Co", "New", "Ann", "Alpha", "ann@dup.example", ""],
+            [rn, "Dup Co", "New", "Bob", "Beta", "", "555-0100"],
+            [rn, "Dup Co", "New", "Bob", "Beta", "", "555-0199"],
+        ],
+    )
+    history = _history_csv_for_rn(rn, "Dup Co", f"hash-dup-{rn}")
+    upload = upload_shared_note_history_import(
+        client_id=client_a,
+        actor=actor,
+        prospects_filename="p.csv",
+        prospects_content=prospects,
+        history_filename="h.csv",
+        history_content=history,
+    )
+    assert upload.preview.ok
+    assert upload.preview.counts.contacts_to_create == 2
+    assert upload.preview.counts.contacts_to_reuse == 2
+    result = confirm_shared_note_history_import(
+        client_id=client_a, batch_id=upload.batch_id, actor=actor
+    )
+    assert result.contacts_created == upload.preview.counts.contacts_to_create == 2
+    assert result.contacts_reused == upload.preview.counts.contacts_to_reuse == 2
+    assert result.staging_cleanup_status == CLEANUP_COMPLETED
+    with get_connection() as conn:
+        n = int(
+            conn.execute(
+                "SELECT COUNT(*) AS c FROM contacts WHERE external_record_no = ?",
+                (rn,),
+            ).fetchone()["c"]
+        )
+        assert n == 2
+        batch = conn.execute(
+            "SELECT prospects_path, history_path, staging_cleanup_status FROM "
+            "shared_note_history_import_batches WHERE id = ?",
+            (upload.batch_id,),
+        ).fetchone()
+        assert batch["staging_cleanup_status"] == CLEANUP_COMPLETED
+        assert batch["prospects_path"] == ""
+        assert batch["history_path"] == ""
+    _delete_user(user_id)
+    print("PASS preview/confirm contact counter reconcile")
+
+
+def test_staging_cleanup_failure_pending_and_retry() -> None:
+    _prove_isolated()
+    with get_connection() as conn:
+        ensure_shared_note_history_schema(conn)
+        conn.commit()
+    client_a, _ = _client_ids()
+    password = _secret_password()
+    email = f"snh.cleanup.{secrets.token_hex(6)}@example.test"
+    user_id = _create_user(email=email, password=password, administrator=1)
+    _assign(user_id, client_a)
+    actor = _actor(user_id)
+    rn = f"92{secrets.token_hex(3)}"
+    prospects = _csv_bytes(
+        ["Record No.", "Company", "Status", "FirstName", "LastName"],
+        [[rn, "Cleanup Co", "New", "Cara", "Clean"]],
+    )
+    history = _history_csv_for_rn(rn, "Cleanup Co", f"hash-clean-{rn}")
+    upload = upload_shared_note_history_import(
+        client_id=client_a,
+        actor=actor,
+        prospects_filename="p.csv",
+        prospects_content=prospects,
+        history_filename="h.csv",
+        history_content=history,
+    )
+    with get_connection() as conn:
+        paths = conn.execute(
+            "SELECT prospects_path, history_path FROM shared_note_history_import_batches "
+            "WHERE id = ?",
+            (upload.batch_id,),
+        ).fetchone()
+    assert Path(paths["prospects_path"]).is_file()
+    assert Path(paths["history_path"]).is_file()
+
+    def boom(_path: Path) -> None:
+        raise OSError("simulated staging delete failure")
+
+    result = confirm_shared_note_history_import(
+        client_id=client_a,
+        batch_id=upload.batch_id,
+        actor=actor,
+        unlink_fn=boom,
+    )
+    assert result.ok
+    assert result.history_inserted == 1
+    assert result.staging_cleanup_status == CLEANUP_PENDING
+    assert "simulated staging delete failure" in result.staging_cleanup_error
+    with get_connection() as conn:
+        batch = conn.execute(
+            "SELECT status, prospects_path, history_path, staging_cleanup_status, "
+            "prospects_filename, prospects_sha256, result_json, plan_fingerprint "
+            "FROM shared_note_history_import_batches WHERE id = ?",
+            (upload.batch_id,),
+        ).fetchone()
+        assert batch["status"] == "confirmed"
+        assert batch["staging_cleanup_status"] == CLEANUP_PENDING
+        assert batch["prospects_path"] == paths["prospects_path"]
+        assert batch["history_path"] == paths["history_path"]
+        assert batch["prospects_filename"]
+        assert batch["prospects_sha256"]
+        assert batch["result_json"]
+        assert batch["plan_fingerprint"]
+        assert Path(batch["prospects_path"]).is_file()
+
+    retry = retry_shared_note_history_staging_cleanup(
+        client_id=client_a, batch_id=upload.batch_id, actor=actor
+    )
+    assert retry.staging_cleanup_status == CLEANUP_COMPLETED
+    with get_connection() as conn:
+        batch = conn.execute(
+            "SELECT status, prospects_path, history_path, staging_cleanup_status, "
+            "prospects_filename, prospects_sha256 FROM shared_note_history_import_batches "
+            "WHERE id = ?",
+            (upload.batch_id,),
+        ).fetchone()
+        events = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM company_shared_history_events WHERE import_batch_id = ?",
+                (upload.batch_id,),
+            ).fetchone()[0]
+        )
+        assert batch["status"] == "confirmed"
+        assert batch["staging_cleanup_status"] == CLEANUP_COMPLETED
+        assert batch["prospects_path"] == ""
+        assert batch["history_path"] == ""
+        assert batch["prospects_filename"]
+        assert batch["prospects_sha256"]
+        assert events == 1
+        assert not Path(paths["prospects_path"]).exists()
+        assert not Path(paths["history_path"]).exists()
+
+    again = confirm_shared_note_history_import(
+        client_id=client_a, batch_id=upload.batch_id, actor=actor
+    )
+    assert again.history_inserted == 1
+    assert again.staging_cleanup_status == CLEANUP_COMPLETED
+    with get_connection() as conn:
+        events = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM company_shared_history_events WHERE import_batch_id = ?",
+                (upload.batch_id,),
+            ).fetchone()[0]
+        )
+        assert events == 1
+    _delete_user(user_id)
+    print("PASS staging cleanup failure/pending/retry/idempotency")
+
+
+def test_dawson_batch1_retrospective_contact_plan_read_only() -> None:
+    """Against pre-import backup, corrected planner yields 783/214 and lists 10 in-batch reuses."""
+    if not DAWSON_PROSPECTS.is_file() or not DAWSON_HISTORY.is_file():
+        print("SKIP dawson retrospective (prepared CSVs missing)")
+        return
+    if not DAWSON_PREIMPORT_BACKUP.is_file():
+        print("SKIP dawson retrospective (pre-import backup missing)")
+        return
+    import shutil
+    import sqlite3
+    import tempfile
+
+    prospects = parse_prospects_csv(DAWSON_PROSPECTS.read_bytes())
+    history = parse_history_csv(
+        DAWSON_HISTORY.read_bytes(),
+        allowed_record_nos=set(prospects.included_company_record_nos),
+    )
+    # Copy pre-import backup to a throwaway file; never open production for writes.
+    tmp = tempfile.NamedTemporaryFile(prefix="snh-dawson-retro-", suffix=".db", delete=False)
+    tmp_path = Path(tmp.name)
+    tmp.close()
+    shutil.copy2(DAWSON_PREIMPORT_BACKUP, tmp_path)
+    conn = sqlite3.connect(str(tmp_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        ensure_shared_note_history_schema(conn)
+        counts = build_preview_counts(
+            conn, client_id=3, prospects=prospects, history=history
+        )
+        assert counts.companies_to_create == 208
+        assert counts.companies_to_reuse == 35
+        assert counts.contacts_to_create == 783
+        assert counts.contacts_to_reuse == 214
+        assert counts.history_to_insert == 13319
+
+        company_ids: dict[str, int] = {}
+        for rn in prospects.included_company_record_nos:
+            existing = _company_by_record_no(conn, rn)
+            if existing is not None:
+                company_ids[rn] = int(existing["id"])
+        _create, _reuse, in_batch = plan_contact_actions(
+            conn, prospects=prospects, company_ids=company_ids
+        )
+        assert len(in_batch) == 10
+        print("DAWSON_IN_BATCH_CONTACT_REUSES")
+        for item in in_batch:
+            print(
+                f"  RN={item.record_no} company={item.company_name!r} "
+                f"row={item.source_row} matched_row={item.matched_source_row} "
+                f"name={item.first_name} {item.last_name} email={item.email}"
+            )
+    finally:
+        conn.close()
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    print("PASS dawson retrospective 783/214 + 10 in-batch reuses")
+
+
 def main() -> None:
     _prove_isolated()
     test_normalize_record_no()
@@ -980,6 +1285,9 @@ def main() -> None:
     test_authorization_and_csrf()
     test_atomic_rollback_on_failure()
     test_http_admin_preview_and_confirm()
+    test_preview_confirm_contact_counters_reconcile_with_in_batch_registry()
+    test_staging_cleanup_failure_pending_and_retry()
+    test_dawson_batch1_retrospective_contact_plan_read_only()
     print("ALL SHARED NOTE-HISTORY IMPORT TESTS PASSED")
 
 

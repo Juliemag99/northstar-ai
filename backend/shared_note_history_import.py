@@ -48,6 +48,9 @@ STATUS_CONFIRMED = "confirmed"
 STATUS_FAILED = "failed"
 STATUS_CANCELLED = "cancelled"
 
+CLEANUP_PENDING = "pending"
+CLEANUP_COMPLETED = "completed"
+
 IMPORT_ROOT = DATABASE_DIR / "shared_note_history_imports"
 
 _PROSPECT_ALIASES: dict[str, tuple[str, ...]] = {
@@ -423,6 +426,10 @@ def ensure_shared_note_history_schema(conn=None) -> None:
                 history_path TEXT NOT NULL DEFAULT '',
                 preview_json TEXT NOT NULL DEFAULT '',
                 result_json TEXT NOT NULL DEFAULT '',
+                plan_fingerprint TEXT NOT NULL DEFAULT '',
+                staging_cleanup_status TEXT NOT NULL DEFAULT '',
+                staging_cleanup_error TEXT NOT NULL DEFAULT '',
+                staging_cleanup_at TEXT NOT NULL DEFAULT '',
                 created_by_user_id INTEGER,
                 created_by_name TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT '',
@@ -450,6 +457,22 @@ def ensure_shared_note_history_schema(conn=None) -> None:
                 "ALTER TABLE company_shared_history_events "
                 "ADD COLUMN event_sequence TEXT NOT NULL DEFAULT ''"
             )
+        batch_cols = {
+            r[1]
+            for r in conn.execute(
+                "PRAGMA table_info(shared_note_history_import_batches)"
+            ).fetchall()
+        }
+        for name, decl in (
+            ("plan_fingerprint", "TEXT NOT NULL DEFAULT ''"),
+            ("staging_cleanup_status", "TEXT NOT NULL DEFAULT ''"),
+            ("staging_cleanup_error", "TEXT NOT NULL DEFAULT ''"),
+            ("staging_cleanup_at", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if name not in batch_cols:
+                conn.execute(
+                    f"ALTER TABLE shared_note_history_import_batches ADD COLUMN {name} {decl}"
+                )
         if owns:
             conn.commit()
     finally:
@@ -484,12 +507,65 @@ def _company_by_record_no(conn, record_no: str) -> Any | None:
     ).fetchone()
 
 
+def contact_identity_matches(
+    first: str,
+    last: str,
+    email: str,
+    other_first: str,
+    other_last: str,
+    other_email: str,
+) -> bool:
+    """Exact confirm-time identity rules: email (casefold) OR first+last (casefold)."""
+    email_l = _blank(email).casefold()
+    if email_l and _blank(other_email).casefold() == email_l:
+        return True
+    first_l = _blank(first).casefold()
+    last_l = _blank(last).casefold()
+    if (
+        first_l
+        and last_l
+        and _blank(other_first).casefold() == first_l
+        and _blank(other_last).casefold() == last_l
+    ):
+        return True
+    return False
+
+
+@dataclass
+class ProposedContact:
+    first_name: str
+    last_name: str
+    email: str
+    source_row: int = 0
+
+
+@dataclass
+class InBatchContactReuse:
+    """A prospect contact row reused against an earlier in-batch proposed create."""
+
+    record_no: str
+    company_name: str
+    source_row: int
+    first_name: str
+    last_name: str
+    email: str
+    matched_source_row: int
+
+
+def _match_proposed_contact(
+    proposed: list[ProposedContact], first: str, last: str, email: str
+) -> ProposedContact | None:
+    for item in proposed:
+        if contact_identity_matches(
+            first, last, email, item.first_name, item.last_name, item.email
+        ):
+            return item
+    return None
+
+
 def _contact_match(
     conn, company_id: int, first: str, last: str, email: str
 ) -> int | None:
-    first_l = first.casefold()
-    last_l = last.casefold()
-    email_l = email.casefold()
     rows = conn.execute(
         """
         SELECT id, first_name, last_name, email
@@ -499,13 +575,13 @@ def _contact_match(
         (company_id,),
     ).fetchall()
     for row in rows:
-        if email_l and _blank(row["email"]).casefold() == email_l:
-            return int(row["id"])
-        if (
-            first_l
-            and last_l
-            and _blank(row["first_name"]).casefold() == first_l
-            and _blank(row["last_name"]).casefold() == last_l
+        if contact_identity_matches(
+            first,
+            last,
+            email,
+            _blank(row["first_name"]),
+            _blank(row["last_name"]),
+            _blank(row["email"]),
         ):
             return int(row["id"])
     return None
@@ -522,6 +598,79 @@ def _relationship(conn, client_id: int, company_id: int) -> Any | None:
     ).fetchone()
 
 
+def compute_plan_fingerprint(
+    *,
+    client_id: int,
+    prospects_sha256: str,
+    history_sha256: str,
+    counts: dict[str, Any],
+) -> str:
+    return hashlib.sha256(
+        "|".join(
+            [
+                str(client_id),
+                _blank(prospects_sha256),
+                _blank(history_sha256),
+                json.dumps(counts, sort_keys=True, separators=(",", ":")),
+            ]
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def plan_contact_actions(
+    conn,
+    *,
+    prospects: ParsedProspects,
+    company_ids: dict[str, int],
+) -> tuple[int, int, list[InBatchContactReuse]]:
+    """Plan contact create/reuse using live matches + in-batch proposed registry."""
+    contacts_to_create = 0
+    contacts_to_reuse = 0
+    in_batch_reuses: list[InBatchContactReuse] = []
+    proposed_by_rn: dict[str, list[ProposedContact]] = {}
+
+    for row in prospects.contacts:
+        has_contact = bool(row.first_name or row.last_name or row.email or row.phone)
+        if not has_contact:
+            continue
+        company_id = company_ids.get(row.record_no)
+        if company_id is not None:
+            live = _contact_match(
+                conn, company_id, row.first_name, row.last_name, row.email
+            )
+            if live is not None:
+                contacts_to_reuse += 1
+                continue
+        proposed = proposed_by_rn.setdefault(row.record_no, [])
+        hit = _match_proposed_contact(
+            proposed, row.first_name, row.last_name, row.email
+        )
+        if hit is not None:
+            contacts_to_reuse += 1
+            in_batch_reuses.append(
+                InBatchContactReuse(
+                    record_no=row.record_no,
+                    company_name=row.company_name,
+                    source_row=row.source_row,
+                    first_name=row.first_name,
+                    last_name=row.last_name,
+                    email=row.email,
+                    matched_source_row=hit.source_row,
+                )
+            )
+            continue
+        contacts_to_create += 1
+        proposed.append(
+            ProposedContact(
+                first_name=row.first_name,
+                last_name=row.last_name,
+                email=row.email,
+                source_row=row.source_row,
+            )
+        )
+    return contacts_to_create, contacts_to_reuse, in_batch_reuses
+
+
 def build_preview_counts(
     conn,
     *,
@@ -531,20 +680,16 @@ def build_preview_counts(
 ) -> SharedNoteHistoryPreviewCounts:
     companies_to_create = 0
     companies_to_reuse = 0
-    contacts_to_create = 0
-    contacts_to_reuse = 0
     relationships_to_create = 0
     relationships_existing = 0
     status_preserved = 0
     status_set_new = 0
-    seen_companies: set[str] = set()
     company_ids: dict[str, int] = {}
     first_by_rn: dict[str, ProspectContactRow] = {}
     for row in prospects.contacts:
         first_by_rn.setdefault(row.record_no, row)
 
     for rn, row in first_by_rn.items():
-        seen_companies.add(rn)
         existing = _company_by_record_no(conn, rn)
         if existing is None:
             companies_to_create += 1
@@ -563,21 +708,9 @@ def build_preview_counts(
                 relationships_existing += 1
                 status_preserved += 1
 
-    for row in prospects.contacts:
-        company_id = company_ids.get(row.record_no)
-        has_contact = bool(row.first_name or row.last_name or row.email or row.phone)
-        if not has_contact:
-            continue
-        if company_id is not None:
-            match = _contact_match(
-                conn, company_id, row.first_name, row.last_name, row.email
-            )
-            if match is None:
-                contacts_to_create += 1
-            else:
-                contacts_to_reuse += 1
-        else:
-            contacts_to_create += 1
+    contacts_to_create, contacts_to_reuse, _in_batch = plan_contact_actions(
+        conn, prospects=prospects, company_ids=company_ids
+    )
 
     history_already = 0
     history_to_insert = 0
@@ -698,24 +831,34 @@ def upload_shared_note_history_import(
             conn, client_id=client_id, prospects=prospects, history=history
         )
         now = _now()
+        prospects_sha = _sha256_bytes(prospects_content)
+        history_sha = _sha256_bytes(history_content)
+        fingerprint = compute_plan_fingerprint(
+            client_id=client_id,
+            prospects_sha256=prospects_sha,
+            history_sha256=history_sha,
+            counts=preview.counts.model_dump(),
+        )
         cur = conn.execute(
             """
             INSERT INTO shared_note_history_import_batches (
                 client_id, status, prospects_filename, history_filename,
                 prospects_sha256, history_sha256, prospects_path, history_path,
-                preview_json, created_by_user_id, created_by_name, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                preview_json, plan_fingerprint,
+                created_by_user_id, created_by_name, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 client_id,
                 STATUS_PREVIEWED if preview.ok else STATUS_FAILED,
                 _blank(prospects_filename) or "prospects.csv",
                 _blank(history_filename) or "history.csv",
-                _sha256_bytes(prospects_content),
-                _sha256_bytes(history_content),
+                prospects_sha,
+                history_sha,
                 str(prospects_path),
                 str(history_path),
                 json.dumps(preview.model_dump()),
+                fingerprint,
                 int(actor.id),
                 _blank(getattr(actor, "full_name", "")),
                 now,
@@ -763,6 +906,18 @@ def get_shared_note_history_batch(
             history_filename=_blank(row["history_filename"]),
             created_at=_blank(row["created_at"]),
             confirmed_at=_blank(row["confirmed_at"]),
+            plan_fingerprint=_blank(row["plan_fingerprint"])
+            if "plan_fingerprint" in row.keys()
+            else "",
+            staging_cleanup_status=_blank(row["staging_cleanup_status"])
+            if "staging_cleanup_status" in row.keys()
+            else "",
+            staging_cleanup_error=_blank(row["staging_cleanup_error"])
+            if "staging_cleanup_error" in row.keys()
+            else "",
+            staging_cleanup_at=_blank(row["staging_cleanup_at"])
+            if "staging_cleanup_at" in row.keys()
+            else "",
             preview=preview,
         )
 
@@ -785,6 +940,129 @@ def _load_batch_files(conn, client_id: int, batch_id: int) -> tuple[Any, bytes, 
         raise ValueError("Staged import files are missing.")
     return row, prospects_path.read_bytes(), history_path.read_bytes()
 
+
+def _batch_row(conn, client_id: int, batch_id: int) -> Any:
+    row = conn.execute(
+        """
+        SELECT * FROM shared_note_history_import_batches
+        WHERE id = ? AND client_id = ?
+        """,
+        (batch_id, client_id),
+    ).fetchone()
+    if row is None:
+        raise LookupError("Import batch not found.")
+    return row
+
+
+def _result_from_batch_row(row: Any) -> SharedNoteHistoryConfirmResponse:
+    raw = _blank(row["result_json"])
+    if not raw:
+        raise ValueError("Confirmed batch is missing result_json.")
+    result = SharedNoteHistoryConfirmResponse.model_validate(json.loads(raw))
+    if "plan_fingerprint" in row.keys():
+        result.plan_fingerprint = _blank(row["plan_fingerprint"]) or result.plan_fingerprint
+    if "staging_cleanup_status" in row.keys():
+        result.staging_cleanup_status = _blank(row["staging_cleanup_status"])
+        result.staging_cleanup_error = _blank(row["staging_cleanup_error"])
+    return result
+
+
+def _unlink_staged_csv(path: Path) -> None:
+    if path.is_file():
+        path.unlink()
+
+
+def cleanup_shared_note_history_staging(
+    conn,
+    *,
+    client_id: int,
+    batch_id: int,
+    unlink_fn: Any | None = None,
+) -> str:
+    """Delete staged CSVs after a successful confirm. Never rolls back the import.
+
+    Returns cleanup status: 'completed' or 'pending'.
+    Preserves filenames, SHA-256 hashes, preview/result JSON, actor, timestamps,
+    and plan_fingerprint on the batch row.
+    """
+    unlink = unlink_fn or _unlink_staged_csv
+    row = _batch_row(conn, client_id, batch_id)
+    if _blank(row["status"]) != STATUS_CONFIRMED:
+        raise ValueError("Staging cleanup is only allowed for confirmed batches.")
+
+    prospects_raw = _blank(row["prospects_path"])
+    history_raw = _blank(row["history_path"])
+    errors: list[str] = []
+
+    for label, raw in (("prospects", prospects_raw), ("history", history_raw)):
+        if not raw:
+            continue
+        path = Path(raw)
+        if not path.is_file():
+            continue
+        try:
+            unlink(path)
+        except Exception as exc:  # noqa: BLE001 — cleanup must not raise into confirm
+            errors.append(f"{label}: {exc}")
+
+    now = _now()
+    if errors:
+        conn.execute(
+            """
+            UPDATE shared_note_history_import_batches
+            SET staging_cleanup_status = ?,
+                staging_cleanup_error = ?,
+                staging_cleanup_at = ?
+            WHERE id = ? AND client_id = ?
+            """,
+            (
+                CLEANUP_PENDING,
+                "; ".join(errors)[:2000],
+                now,
+                batch_id,
+                client_id,
+            ),
+        )
+        conn.commit()
+        return CLEANUP_PENDING
+
+    # Clear path fields only after both files are gone; keep names/hashes/audit.
+    conn.execute(
+        """
+        UPDATE shared_note_history_import_batches
+        SET prospects_path = '',
+            history_path = '',
+            staging_cleanup_status = ?,
+            staging_cleanup_error = '',
+            staging_cleanup_at = ?
+        WHERE id = ? AND client_id = ?
+        """,
+        (CLEANUP_COMPLETED, now, batch_id, client_id),
+    )
+    conn.commit()
+    return CLEANUP_COMPLETED
+
+
+def retry_shared_note_history_staging_cleanup(
+    *,
+    client_id: int,
+    batch_id: int,
+    actor: NorthStarUser,
+    unlink_fn: Any | None = None,
+) -> SharedNoteHistoryConfirmResponse:
+    """Retry pending staging-file cleanup without re-running the import."""
+    _require_admin_client_access(actor, client_id)
+    ensure_shared_note_history_schema()
+    with get_connection() as conn:
+        ensure_shared_note_history_schema(conn)
+        row = _batch_row(conn, client_id, batch_id)
+        if _blank(row["status"]) != STATUS_CONFIRMED:
+            raise ValueError("Only confirmed batches support staging cleanup retry.")
+        cleanup_shared_note_history_staging(
+            conn, client_id=client_id, batch_id=batch_id, unlink_fn=unlink_fn
+        )
+        row = _batch_row(conn, client_id, batch_id)
+        return _result_from_batch_row(row)
 
 def apply_shared_note_history_import(
     conn,
@@ -1004,21 +1282,45 @@ def confirm_shared_note_history_import(
     batch_id: int,
     actor: NorthStarUser,
     fail_after: str | None = None,
+    unlink_fn: Any | None = None,
 ) -> SharedNoteHistoryConfirmResponse:
     _require_admin_client_access(actor, client_id)
     ensure_shared_note_history_schema()
 
     with get_connection() as conn:
         ensure_shared_note_history_schema(conn)
+        batch_row = _batch_row(conn, client_id, batch_id)
+        status = _blank(batch_row["status"])
+
+        if status == STATUS_CONFIRMED:
+            # Idempotent: do not re-apply; optionally retry pending cleanup.
+            cleanup_status = (
+                _blank(batch_row["staging_cleanup_status"])
+                if "staging_cleanup_status" in batch_row.keys()
+                else ""
+            )
+            if cleanup_status == CLEANUP_PENDING or (
+                cleanup_status != CLEANUP_COMPLETED
+                and (
+                    _blank(batch_row["prospects_path"])
+                    or _blank(batch_row["history_path"])
+                )
+            ):
+                cleanup_shared_note_history_staging(
+                    conn,
+                    client_id=client_id,
+                    batch_id=batch_id,
+                    unlink_fn=unlink_fn,
+                )
+                batch_row = _batch_row(conn, client_id, batch_id)
+            return _result_from_batch_row(batch_row)
+
+        if status != STATUS_PREVIEWED:
+            raise ValueError("This import batch can no longer be confirmed.")
+
         batch_row, prospects_bytes, history_bytes = _load_batch_files(
             conn, client_id, batch_id
         )
-        if _blank(batch_row["status"]) == STATUS_CONFIRMED:
-            # Idempotent re-confirm: re-run apply (history inserts skip duplicates).
-            pass
-        elif _blank(batch_row["status"]) != STATUS_PREVIEWED:
-            raise ValueError("This import batch can no longer be confirmed.")
-
         prospects = parse_prospects_csv(prospects_bytes)
         text = prospects_bytes.decode("utf-8-sig")
         reader = csv.DictReader(io.StringIO(text))
@@ -1033,9 +1335,28 @@ def confirm_shared_note_history_import(
             allowed_record_nos=set(prospects.included_company_record_nos),
             closed_record_nos=closed_rns,
         )
+        if prospects.errors or history.errors:
+            raise ValueError("Import files have validation errors.")
 
         conn.execute("BEGIN IMMEDIATE")
         try:
+            plan = build_preview_counts(
+                conn, client_id=client_id, prospects=prospects, history=history
+            )
+            fingerprint = compute_plan_fingerprint(
+                client_id=client_id,
+                prospects_sha256=_blank(batch_row["prospects_sha256"]),
+                history_sha256=_blank(batch_row["history_sha256"]),
+                counts=plan.model_dump(),
+            )
+            stored_fp = (
+                _blank(batch_row["plan_fingerprint"])
+                if "plan_fingerprint" in batch_row.keys()
+                else ""
+            )
+            if stored_fp and stored_fp != fingerprint:
+                raise ValueError("Plan fingerprint no longer matches this batch.")
+
             result = apply_shared_note_history_import(
                 conn,
                 client_id=client_id,
@@ -1045,26 +1366,50 @@ def confirm_shared_note_history_import(
                 batch_id=batch_id,
                 fail_after=fail_after,
             )
+            # Preview/confirm contact counters must reconcile (in-batch registry).
+            if (
+                result.contacts_created != plan.contacts_to_create
+                or result.contacts_reused != plan.contacts_to_reuse
+            ):
+                raise ValueError(
+                    "Contact create/reuse counters drifted between preview and confirm."
+                )
+
+            result.plan_fingerprint = fingerprint
+            confirmed_at = _now()
             conn.execute(
                 """
                 UPDATE shared_note_history_import_batches
-                SET status = ?, confirmed_at = ?, result_json = ?
-                WHERE id = ? AND client_id = ?
+                SET status = ?,
+                    confirmed_at = ?,
+                    result_json = ?,
+                    plan_fingerprint = ?
+                WHERE id = ? AND client_id = ? AND status = ?
                 """,
                 (
                     STATUS_CONFIRMED,
-                    _now(),
+                    confirmed_at,
                     json.dumps(result.model_dump()),
+                    fingerprint,
                     batch_id,
                     client_id,
+                    STATUS_PREVIEWED,
                 ),
             )
             conn.commit()
-            return result
         except Exception:
             conn.rollback()
             raise
 
+        # Staging cleanup only after a successful commit. Failures stay pending.
+        cleanup_status = cleanup_shared_note_history_staging(
+            conn, client_id=client_id, batch_id=batch_id, unlink_fn=unlink_fn
+        )
+        result.staging_cleanup_status = cleanup_status
+        if cleanup_status == CLEANUP_PENDING:
+            row = _batch_row(conn, client_id, batch_id)
+            result.staging_cleanup_error = _blank(row["staging_cleanup_error"])
+        return result
 
 def preview_shared_note_history_paths(
     *,
