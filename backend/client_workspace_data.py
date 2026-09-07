@@ -15,6 +15,7 @@ from appointments_data import is_hot_prospect_status
 from db import DB_PATH, get_connection
 from models import (
     ActiveClient,
+    ClientRelationshipStatusChip,
     CompanyWorkspace,
     ContactListItem,
     ContactSummary,
@@ -462,7 +463,8 @@ def list_prospects_page(
     if uid is None:
         return empty
 
-    if all_clients or client_id == 0:
+    all_clients_mode = bool(all_clients or client_id == 0)
+    if all_clients_mode:
         client_ids = resolve_dashboard_client_ids(uid, selected_client_id=None)
     elif client_id is not None:
         client_ids = resolve_dashboard_client_ids(
@@ -481,6 +483,14 @@ def list_prospects_page(
 
     if not client_ids:
         return empty
+
+    if all_clients_mode:
+        return _list_prospects_page_all_clients(
+            client_ids=client_ids,
+            q=q,
+            limit=limit,
+            offset=offset,
+        )
 
     page_offset = max(0, int(offset or 0))
     page_size: int | None
@@ -647,6 +657,7 @@ def list_prospects_page(
                     state=_blank(row["state"]),
                     status=status,
                     relationship_status=status,
+                    client_statuses=[],
                     primary_contact=primary,
                     phone=phone,
                     last_updated=_blank(row["last_updated_at"]),
@@ -670,6 +681,291 @@ def list_prospects_page(
                     relationship_id=int(row["relationship_id"]),
                 )
             )
+    return {
+        "prospects": prospects,
+        "total": total,
+        "client_total": client_total,
+        "offset": page_offset,
+        "limit": page_size,
+    }
+
+
+def _list_prospects_page_all_clients(
+    *,
+    client_ids: list[int],
+    q: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> dict:
+    """All My Clients: one row per shared company with labeled client status chips."""
+    page_offset = max(0, int(offset or 0))
+    page_size: int | None
+    if limit is None:
+        page_size = None
+    else:
+        page_size = max(1, min(int(limit), 500))
+
+    placeholders = ",".join("?" * len(client_ids))
+    tokens = [t for t in _blank(q).split() if t]
+    search_clauses: list[str] = []
+    search_params: list[object] = []
+    for token in tokens:
+        esc = (
+            token.replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        like = f"%{esc}%"
+        search_clauses.append(
+            f"""
+            (
+              co.company_name LIKE ? ESCAPE '\\'
+              OR co.external_record_no LIKE ? ESCAPE '\\'
+              OR co.city LIKE ? ESCAPE '\\'
+              OR co.state LIKE ? ESCAPE '\\'
+              OR co.website LIKE ? ESCAPE '\\'
+              OR EXISTS (
+                SELECT 1 FROM client_company_relationships ccr_s
+                WHERE ccr_s.company_id = co.id
+                  AND ccr_s.client_id IN ({placeholders})
+                  AND (
+                    COALESCE(NULLIF(TRIM(ccr_s.external_record_no), ''), '') LIKE ? ESCAPE '\\'
+                    OR COALESCE(ccr_s.status, '') LIKE ? ESCAPE '\\'
+                  )
+              )
+              OR EXISTS (
+                SELECT 1 FROM contacts ct
+                WHERE ct.company_id = co.id
+                  AND (
+                    ct.first_name LIKE ? ESCAPE '\\'
+                    OR ct.last_name LIKE ? ESCAPE '\\'
+                    OR ct.email LIKE ? ESCAPE '\\'
+                    OR ct.phone LIKE ? ESCAPE '\\'
+                  )
+              )
+            )
+            """
+        )
+        # 5 company fields + (client_ids for EXISTS) + 2 CCR fields + 4 contact fields
+        search_params.extend([like] * 5)
+        search_params.extend(list(client_ids))
+        search_params.extend([like] * 2)
+        search_params.extend([like] * 4)
+
+    search_sql = ""
+    if search_clauses:
+        search_sql = " AND " + " AND ".join(search_clauses)
+
+    from_sql = f"""
+        FROM companies co
+        WHERE EXISTS (
+            SELECT 1 FROM client_company_relationships ccr
+            WHERE ccr.company_id = co.id
+              AND ccr.client_id IN ({placeholders})
+        )
+        {search_sql}
+    """
+    select_sql = f"""
+        SELECT
+            co.id,
+            co.external_record_no AS master_external_record_no,
+            co.company_name,
+            co.city,
+            co.state,
+            co.address,
+            co.zip,
+            co.website,
+            co.customer_campaign,
+            co.last_updated_at,
+            co.legacy_phone,
+            co.legacy_first_name,
+            co.legacy_last_name,
+            (
+                SELECT COUNT(*) FROM contacts ct
+                WHERE ct.company_id = co.id
+            ) AS contact_count,
+            (
+                SELECT ct.first_name FROM contacts ct
+                WHERE ct.company_id = co.id
+                ORDER BY ct.source_row_index ASC, ct.id ASC
+                LIMIT 1
+            ) AS contact_first,
+            (
+                SELECT ct.last_name FROM contacts ct
+                WHERE ct.company_id = co.id
+                ORDER BY ct.source_row_index ASC, ct.id ASC
+                LIMIT 1
+            ) AS contact_last,
+            (
+                SELECT ct.phone FROM contacts ct
+                WHERE ct.company_id = co.id
+                ORDER BY ct.source_row_index ASC, ct.id ASC
+                LIMIT 1
+            ) AS contact_phone
+        {from_sql}
+        ORDER BY co.company_name COLLATE NOCASE ASC, co.id ASC
+    """
+
+    prospects: list[ProspectListItem] = []
+    with get_connection() as conn:
+        from milestones_data import companies_with_milestone_flags
+        from work_queue_data import due_record_nos
+
+        match_params = [*client_ids, *search_params]
+        client_total = int(
+            conn.execute(
+                f"""
+                SELECT COUNT(DISTINCT ccr.company_id) AS n
+                FROM client_company_relationships ccr
+                WHERE ccr.client_id IN ({placeholders})
+                """,
+                client_ids,
+            ).fetchone()["n"]
+        )
+        total = int(
+            conn.execute(
+                f"SELECT COUNT(*) AS n {from_sql}",
+                match_params,
+            ).fetchone()["n"]
+        )
+
+        flags_by_client: dict[int, dict[int, dict[str, bool]]] = {}
+        call_due: dict[int, set[str]] = {}
+        follow_due: dict[int, set[str]] = {}
+        for cid in client_ids:
+            flags_by_client[cid] = companies_with_milestone_flags(conn, cid)
+            call_due[cid] = due_record_nos(kind="call", client_id=cid)
+            follow_due[cid] = due_record_nos(kind="follow_up", client_id=cid)
+
+        if page_size is None:
+            company_rows = list(conn.execute(select_sql, match_params))
+        else:
+            company_rows = list(
+                conn.execute(
+                    select_sql + " LIMIT ? OFFSET ?",
+                    [*match_params, page_size, page_offset],
+                )
+            )
+
+        company_ids = [int(r["id"]) for r in company_rows]
+        chips_by_company: dict[int, list[ClientRelationshipStatusChip]] = {
+            cid: [] for cid in company_ids
+        }
+        primary_rel_by_company: dict[int, ClientRelationshipStatusChip] = {}
+        next_action_by_company: dict[int, str] = {}
+        follow_up_by_company: dict[int, str | None] = {}
+        record_no_by_company: dict[int, str] = {}
+        if company_ids:
+            co_placeholders = ",".join("?" * len(company_ids))
+            rel_rows = conn.execute(
+                f"""
+                SELECT
+                    ccr.company_id,
+                    ccr.id AS relationship_id,
+                    ccr.client_id,
+                    COALESCE(ccr.status, '') AS status,
+                    COALESCE(ccr.next_action, '') AS next_action,
+                    ccr.follow_up_date,
+                    COALESCE(NULLIF(TRIM(ccr.external_record_no), ''), '')
+                        AS relationship_record_no,
+                    cl.code AS client_code,
+                    cl.name AS client_name
+                FROM client_company_relationships ccr
+                JOIN clients cl ON cl.id = ccr.client_id
+                WHERE ccr.company_id IN ({co_placeholders})
+                  AND ccr.client_id IN ({placeholders})
+                ORDER BY cl.name COLLATE NOCASE ASC, cl.id ASC
+                """,
+                [*company_ids, *client_ids],
+            ).fetchall()
+            for rel in rel_rows:
+                company_id = int(rel["company_id"])
+                chip = ClientRelationshipStatusChip(
+                    client_id=int(rel["client_id"]),
+                    client_code=_blank(rel["client_code"]),
+                    client_name=_blank(rel["client_name"]),
+                    status=_blank(rel["status"]),
+                    relationship_id=int(rel["relationship_id"]),
+                )
+                chips_by_company[company_id].append(chip)
+                if company_id not in primary_rel_by_company:
+                    primary_rel_by_company[company_id] = chip
+                    next_action_by_company[company_id] = _blank(rel["next_action"])
+                    follow_up_by_company[company_id] = (
+                        _blank(rel["follow_up_date"]) or None
+                    )
+                    record_no_by_company[company_id] = _blank(
+                        rel["relationship_record_no"]
+                    )
+
+        for row in company_rows:
+            company_id = int(row["id"])
+            chips = chips_by_company.get(company_id, [])
+            primary_chip = primary_rel_by_company.get(company_id)
+            primary = _contact_display_name(
+                _blank(row["contact_first"]), _blank(row["contact_last"])
+            )
+            if not primary:
+                primary = _contact_display_name(
+                    _blank(row["legacy_first_name"]), _blank(row["legacy_last_name"])
+                )
+            phone = _blank(row["contact_phone"]) or _blank(row["legacy_phone"])
+            record_no = record_no_by_company.get(company_id, "") or _blank(
+                row["master_external_record_no"]
+            )
+
+            has_appt = has_quote = has_po = has_web = False
+            is_hot = False
+            any_call_due = False
+            any_follow_due = False
+            for chip in chips:
+                flags = flags_by_client.get(chip.client_id, {}).get(company_id, {})
+                has_appt = has_appt or bool(flags.get("has_appointment_set"))
+                has_quote = has_quote or bool(flags.get("has_quote"))
+                has_po = has_po or bool(flags.get("has_purchase_order"))
+                has_web = has_web or bool(flags.get("has_weblead"))
+                is_hot = is_hot or is_hot_prospect_status(chip.status)
+                any_call_due = any_call_due or record_no in call_due.get(
+                    chip.client_id, set()
+                )
+                any_follow_due = any_follow_due or record_no in follow_due.get(
+                    chip.client_id, set()
+                )
+
+            prospects.append(
+                ProspectListItem(
+                    id=company_id,
+                    external_record_no=record_no,
+                    company=_blank(row["company_name"]),
+                    city=_blank(row["city"]),
+                    state=_blank(row["state"]),
+                    status="",
+                    relationship_status="",
+                    client_statuses=chips,
+                    primary_contact=primary,
+                    phone=phone,
+                    last_updated=_blank(row["last_updated_at"]),
+                    website=_blank(row["website"]),
+                    address=_blank(row["address"]),
+                    zip=_blank(row["zip"]),
+                    customer_campaign=_blank(row["customer_campaign"]),
+                    contact_count=int(row["contact_count"] or 0),
+                    is_hot=is_hot,
+                    has_appointment_set=has_appt,
+                    has_quote=has_quote,
+                    has_purchase_order=has_po,
+                    has_weblead=has_web,
+                    next_action=next_action_by_company.get(company_id, ""),
+                    follow_up_date=follow_up_by_company.get(company_id),
+                    call_due=any_call_due,
+                    follow_up_due=any_follow_due,
+                    client_id=primary_chip.client_id if primary_chip else 0,
+                    client_code=primary_chip.client_code if primary_chip else "",
+                    client_name=primary_chip.client_name if primary_chip else "",
+                    relationship_id=primary_chip.relationship_id if primary_chip else 0,
+                )
+            )
+
     return {
         "prospects": prospects,
         "total": total,

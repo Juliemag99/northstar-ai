@@ -34,6 +34,11 @@ import {
 } from './api/carmeco'
 import { pathAfterActiveClientChange } from './activeClientNavigation'
 import { ASK_NORTHSTAR_PATH, isFromAskNorthStar, withAskReturnParam } from './askNorthStarReturn'
+import {
+  formatClientStatusChip,
+  prospectMatchesStatusFilter,
+  sortedClientStatuses,
+} from './clientStatusesDisplay'
 import { SELECT_CLIENT_FOR_WRITE } from './writeClient'
 import type {
   ActiveClient,
@@ -1371,10 +1376,13 @@ function App() {
   const filteredProspects = useMemo(() => {
     let rows = filterProspectsByKey(prospects, prospectFilter)
     if (prospectStatusFilter) {
-      rows = rows.filter((p) => statusEquals(prospectStatus(p), prospectStatusFilter))
+      const allClients = activeClientId === 0
+      rows = rows.filter((p) =>
+        prospectMatchesStatusFilter(p, prospectStatusFilter, allClients),
+      )
     }
     return rows
-  }, [prospects, prospectFilter, prospectStatusFilter])
+  }, [prospects, prospectFilter, prospectStatusFilter, activeClientId])
 
   const priorityProspects = useMemo(() => priorityQueue.slice(0, 8), [priorityQueue])
 
@@ -4021,7 +4029,9 @@ function App() {
                               <th>Company</th>
                               <th>City</th>
                               <th>State</th>
-                              <th>Status</th>
+                              <th>
+                                {activeClientId === 0 ? 'Client Statuses' : 'Status'}
+                              </th>
                               <th>Primary Contact</th>
                               <th>Phone</th>
                               <th>Last Updated</th>
@@ -4030,7 +4040,11 @@ function App() {
                           <tbody>
                             {rows.map((prospect) => (
                               <tr
-                                key={`${prospect.client_id}-${prospect.relationship_id || prospect.id}`}
+                                key={
+                                  activeClientId === 0
+                                    ? `company-${prospect.id}`
+                                    : `${prospect.client_id}-${prospect.relationship_id || prospect.id}`
+                                }
                               >
                                 <td>
                                   <Link
@@ -4049,7 +4063,30 @@ function App() {
                                 </td>
                                 <td>{displayOrDash(prospect.city)}</td>
                                 <td>{displayOrDash(prospect.state)}</td>
-                                <td>{displayOrDash(prospectStatus(prospect))}</td>
+                                <td>
+                                  {activeClientId === 0 ? (
+                                    (() => {
+                                      const chips = sortedClientStatuses(
+                                        prospect.client_statuses,
+                                      )
+                                      if (chips.length === 0) return '—'
+                                      return (
+                                        <div className="client-status-chips">
+                                          {chips.map((chip) => (
+                                            <span
+                                              key={`${chip.client_id}-${chip.relationship_id}`}
+                                              className="client-status-chip"
+                                            >
+                                              {formatClientStatusChip(chip)}
+                                            </span>
+                                          ))}
+                                        </div>
+                                      )
+                                    })()
+                                  ) : (
+                                    displayOrDash(prospectStatus(prospect))
+                                  )}
+                                </td>
                                 <td>{displayOrDash(prospect.primary_contact)}</td>
                                 <td>{displayOrDash(prospect.phone)}</td>
                                 <td>{displayOrDash(prospect.last_updated)}</td>

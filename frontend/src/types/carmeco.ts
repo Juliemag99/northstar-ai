@@ -30,6 +30,14 @@ export interface ContactListItem {
   status: string
 }
 
+export interface ClientRelationshipStatusChip {
+  client_id: number
+  client_code: string
+  client_name: string
+  status: string
+  relationship_id: number
+}
+
 export interface ProspectListItem {
   id: number
   external_record_no: string
@@ -40,6 +48,8 @@ export interface ProspectListItem {
   status: string
   /** Client-neutral alias of status (same CCR value). */
   relationship_status: string
+  /** All My Clients: labeled statuses for every accessible client relationship. */
+  client_statuses?: ClientRelationshipStatusChip[]
   primary_contact: string
   phone: string
   last_updated: string

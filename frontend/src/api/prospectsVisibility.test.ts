@@ -114,4 +114,70 @@ describe('Companies page prospects visibility API', () => {
     expect(page.offset).toBe(100)
     expect(page.prospects.some((p) => p.id === 541 && p.company === 'Valmont')).toBe(true)
   })
+
+  it('preserves client_statuses chips for All My Clients responses', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          client: {
+            name: 'All My Clients',
+            client_id: 0,
+            code: '',
+            mode: 'all_my_clients',
+          },
+          prospects: [
+            {
+              id: 100,
+              company: 'Multi Status Co',
+              status: 'New',
+              client_statuses: [
+                {
+                  client_id: 1,
+                  client_code: 'carmeco',
+                  client_name: 'Carmeco',
+                  status: 'Qualified',
+                  relationship_id: 10,
+                },
+                {
+                  client_id: 3,
+                  client_code: 'dawson',
+                  client_name: 'Dawson Fabrication',
+                  status: 'New',
+                  relationship_id: 11,
+                },
+              ],
+            },
+          ],
+          total: 697,
+          client_total: 697,
+          offset: 0,
+          limit: 50,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const page = await fetchProspects({ all_clients: true, limit: 50 })
+    const url = String(fetchMock.mock.calls[0]?.[0] ?? '')
+    expect(url).toContain('all_clients=true')
+    expect(url).not.toContain('client_id=')
+    expect(page.total).toBe(697)
+    expect(page.prospects[0]?.client_statuses).toEqual([
+      {
+        client_id: 1,
+        client_code: 'carmeco',
+        client_name: 'Carmeco',
+        status: 'Qualified',
+        relationship_id: 10,
+      },
+      {
+        client_id: 3,
+        client_code: 'dawson',
+        client_name: 'Dawson Fabrication',
+        status: 'New',
+        relationship_id: 11,
+      },
+    ])
+  })
 })

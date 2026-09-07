@@ -69,6 +69,16 @@ class ContactsResponse(BaseModel):
     limit: int = 50
 
 
+class ClientRelationshipStatusChip(BaseModel):
+    """One accessible client-company relationship status for All My Clients rows."""
+
+    client_id: int
+    client_code: str = ""
+    client_name: str = ""
+    status: str = ""
+    relationship_id: int = 0
+
+
 class ProspectListItem(BaseModel):
     """Prospects table / dashboard row for a client-company relationship."""
 
@@ -80,6 +90,9 @@ class ProspectListItem(BaseModel):
     status: str = ""
     # Client-neutral alias of status (CCR status for the Active/Working client).
     relationship_status: str = ""
+    # All My Clients: labeled statuses for every accessible client relationship.
+    # Empty in single-client mode (use status / relationship_status instead).
+    client_statuses: list[ClientRelationshipStatusChip] = Field(default_factory=list)
     primary_contact: str = ""
     phone: str = ""
     last_updated: str = ""

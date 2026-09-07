@@ -150,10 +150,31 @@ function normalizeClientHistory(raw: unknown): ClientMilestoneHistory {
   }
 }
 
+function normalizeClientStatusChip(raw: unknown): {
+  client_id: number
+  client_code: string
+  client_name: string
+  status: string
+  relationship_id: number
+} {
+  const record = (raw ?? {}) as Record<string, unknown>
+  return {
+    client_id: asNumber(record.client_id),
+    client_code: pick(record, 'client_code'),
+    client_name: pick(record, 'client_name'),
+    status: pick(record, 'status'),
+    relationship_id: asNumber(record.relationship_id),
+  }
+}
+
 function normalizeProspect(raw: unknown): ProspectListItem {
   const record = (raw ?? {}) as Record<string, unknown>
   // Canonical: CCR status for the Active/Working client (never a Carmeco-owned field).
   const status = pick(record, 'status', 'relationship_status')
+  const clientStatusesRaw = record.client_statuses
+  const client_statuses = Array.isArray(clientStatusesRaw)
+    ? clientStatusesRaw.map(normalizeClientStatusChip)
+    : []
   return {
     id: asNumber(record.id),
     external_record_no: pick(record, 'external_record_no', 'master_id', 'Master ID'),
@@ -162,6 +183,7 @@ function normalizeProspect(raw: unknown): ProspectListItem {
     state: pick(record, 'state', 'State'),
     status,
     relationship_status: status,
+    client_statuses,
     primary_contact: pick(
       record,
       'primary_contact',

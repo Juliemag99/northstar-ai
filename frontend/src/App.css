@@ -1056,6 +1056,25 @@
   max-width: 16rem;
 }
 
+.client-status-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.client-status-chip {
+  display: inline-block;
+  max-width: 100%;
+  padding: 0.15rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--navy-mid);
+  font-size: 0.78rem;
+  line-height: 1.25;
+  white-space: normal;
+}
+
 .priority-pill {
   display: inline-flex;
   align-items: center;
