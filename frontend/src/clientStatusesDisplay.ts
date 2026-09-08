@@ -1,4 +1,4 @@
-import type { ClientRelationshipStatusChip, ProspectListItem } from '../types/carmeco'
+import type { ClientRelationshipStatusChip, ProspectListItem } from './types/carmeco'
 
 function asText(value: unknown): string {
   if (value == null) return ''

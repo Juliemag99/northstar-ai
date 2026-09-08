@@ -39,6 +39,7 @@ import {
   prospectMatchesStatusFilter,
   sortedClientStatuses,
 } from './clientStatusesDisplay'
+import { formatDisplayDateTime } from './formatDisplayDateTime'
 import { SELECT_CLIENT_FOR_WRITE } from './writeClient'
 import type {
   ActiveClient,
@@ -2746,7 +2747,10 @@ function App() {
                       <InfoRow label="Zip" value={workspace.zip} />
                       <InfoRow label="Website" value={workspace.website} />
                       <InfoRow label="Phone" value={workspace.legacy_phone} />
-                      <InfoRow label="Last Updated" value={workspace.last_updated_at} />
+                      <InfoRow
+                        label="Last Updated"
+                        value={formatDisplayDateTime(workspace.last_updated_at)}
+                      />
                       <InfoRow label="Sales Volume Range" value={workspace.sales_volume_range} />
                       <InfoRow
                         label="Location Sales Volume"
@@ -2773,7 +2777,10 @@ function App() {
                       />
                       <InfoRow label="Type of Industry" value={workspace.type_of_industry} />
                       <InfoRow label="Customer Campaign" value={workspace.customer_campaign} />
-                      <InfoRow label="Entered" value={workspace.entered_at} />
+                      <InfoRow
+                        label="Entered"
+                        value={formatDisplayDateTime(workspace.entered_at)}
+                      />
                     </dl>
                   </section>
 
@@ -4089,7 +4096,7 @@ function App() {
                                 </td>
                                 <td>{displayOrDash(prospect.primary_contact)}</td>
                                 <td>{displayOrDash(prospect.phone)}</td>
-                                <td>{displayOrDash(prospect.last_updated)}</td>
+                                <td>{formatDisplayDateTime(prospect.last_updated)}</td>
                               </tr>
                             ))}
                           </tbody>
