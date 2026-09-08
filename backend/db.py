@@ -377,6 +377,10 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     from client_onboarding_data import ensure_client_onboarding_schema
 
     ensure_client_onboarding_schema(conn)
+    # Lazy import avoids circular import with client_data_import → db.
+    from client_data_import import ensure_client_data_import_schema
+
+    ensure_client_data_import_schema(conn)
     conn.commit()
 
 
@@ -562,9 +566,7 @@ def ensure_schema(db_path: Path | None = None) -> None:
         from shared_note_history_import import ensure_shared_note_history_schema
 
         ensure_shared_note_history_schema(conn)
-        from client_data_import import ensure_client_data_import_schema
-
-        ensure_client_data_import_schema(conn)
+        # client_data_import_batches is activated by migrate_schema() above.
 
     # Build/refresh FTS index after schema is ready
     from search_data import rebuild_search_index
