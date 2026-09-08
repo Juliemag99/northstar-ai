@@ -169,6 +169,107 @@ def _mock_transport(method, url, body, headers):
     raise AssertionError(f"unexpected mock call {method} {url}")
 
 
+def _install_brown_campaign_fixture(
+    conn,
+    client_id: int,
+    *,
+    configured: bool,
+) -> int:
+    """Install a deterministic Default campaign for Deep Research tests.
+
+    Deactivates any existing campaigns for the client, then inserts a fresh
+    Default row. Does not copy or depend on live Brown campaign configuration.
+
+    - configured=False → incomplete criteria (fit must be
+      Campaign Criteria Not Configured)
+    - configured=True → usable criteria (evaluated fit such as Possible Fit
+      is allowed)
+    """
+    from client_setup_data import ensure_client_setup_schema
+
+    ensure_client_setup_schema(conn)
+    conn.execute(
+        """
+        UPDATE client_campaigns
+        SET is_active = 0, is_default = 0, updated_at = datetime('now')
+        WHERE client_id = ?
+        """,
+        (client_id,),
+    )
+    if configured:
+        fields = {
+            "primary_service": "Metal fabrication",
+            "secondary_services": "CNC machining",
+            "target_customer_types": "OEM; tier-1",
+            "manufacturing_processes_sought": "stamping; welding",
+            "positive_signals": "OEM metal component buyers",
+            "negative_signals": "pure distribution",
+            "fit_weighting_notes": "Prefer production metalwork over assembly-only",
+            "notes": "configured deep-research test fixture",
+        }
+    else:
+        fields = {
+            "primary_service": "",
+            "secondary_services": "",
+            "target_customer_types": "",
+            "manufacturing_processes_sought": "",
+            "positive_signals": "",
+            "negative_signals": "",
+            "fit_weighting_notes": "",
+            "notes": "",
+        }
+    cur = conn.execute(
+        """
+        INSERT INTO client_campaigns (
+            client_id, campaign_name, description, is_active, is_default,
+            primary_service, secondary_services, target_industries,
+            target_customer_types, target_products,
+            manufacturing_processes_sought, production_preference,
+            stamping_capability, tooling_notes, geographic_preferences,
+            geography_mode, geography_required, company_size_preferences,
+            positive_signals, negative_signals, exclusions, target_titles,
+            fit_weighting_notes, notes, created_at, updated_at
+        ) VALUES (
+            ?, 'Default', 'deep-research test fixture', 1, 1,
+            ?, ?, '',
+            ?, '',
+            ?, '',
+            '', '', '',
+            '', 0, '',
+            ?, ?, '', '',
+            ?, ?,
+            datetime('now'), datetime('now')
+        )
+        """,
+        (
+            client_id,
+            fields["primary_service"],
+            fields["secondary_services"],
+            fields["target_customer_types"],
+            fields["manufacturing_processes_sought"],
+            fields["positive_signals"],
+            fields["negative_signals"],
+            fields["fit_weighting_notes"],
+            fields["notes"],
+        ),
+    )
+    campaign_id = int(cur.lastrowid)
+    conn.execute(
+        """
+        INSERT INTO client_profiles (
+            client_id, description, is_active, default_campaign_id,
+            created_at, updated_at
+        ) VALUES (?, '', 1, ?, datetime('now'), datetime('now'))
+        ON CONFLICT(client_id) DO UPDATE SET
+            default_campaign_id = excluded.default_campaign_id,
+            updated_at = excluded.updated_at
+        """,
+        (client_id, campaign_id),
+    )
+    conn.commit()
+    return campaign_id
+
+
 class DeepResearchTests(unittest.TestCase):
     def setUp(self) -> None:
         opened = Path(os.fspath(DB_PATH)).resolve()
@@ -259,6 +360,10 @@ class DeepResearchTests(unittest.TestCase):
         self.assertIn("Valmont", prompt)
 
     def test_valmont_mocked_deep_research_completes_with_profile_and_criteria_message(self):
+        with get_connection() as conn:
+            _install_brown_campaign_fixture(
+                conn, self.client_id, configured=False
+            )
         body = ResearchStartRequest(
             company_id=self.company_id,
             external_record_no=self.record_no,
@@ -297,6 +402,27 @@ class DeepResearchTests(unittest.TestCase):
                 ("resp_mock_valmont",),
             ).fetchone()
             self.assertGreaterEqual(int(runs["n"]), 1)
+
+    def test_configured_campaign_allows_evaluated_fit(self):
+        """Usable campaign criteria must not force Campaign Criteria Not Configured."""
+        with get_connection() as conn:
+            _install_brown_campaign_fixture(
+                conn, self.client_id, configured=True
+            )
+        body = ResearchStartRequest(
+            company_id=self.company_id,
+            external_record_no=self.record_no,
+            working_for_client_id=self.client_id,
+            force_refresh=True,
+            confirm_paid_refresh=True,
+            research_depth="deep",
+        )
+        queued = start_deep_research_job(body)
+        done = get_deep_research_job(queued.job.job_id)
+        self.assertEqual(done.job.status, "completed")
+        self.assertNotEqual(done.fit.fit_result, FIT_CRITERIA_NOT_CONFIGURED)
+        # Evaluated outcomes remain allowed (e.g. Possible Fit).
+        self.assertTrue(bool(done.fit.fit_result))
 
     def test_quick_research_depth_still_routes_to_deterministic_path(self):
         body = ResearchStartRequest(

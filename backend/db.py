@@ -1,4 +1,11 @@
-"""SQLite connection helpers for the NorthStar local database."""
+"""SQLite connection helpers for the NorthStar local database.
+
+Phase 0C: configuration is explicit via ``db_config.load_database_config``.
+Live application traffic remains SQLite. PostgreSQL DSNs are accepted for
+tooling/tests only — ``get_connection`` refuses PG until a later cutover.
+All runtime modules must obtain connections through this module (not
+``sqlite3.connect``).
+"""
 
 from __future__ import annotations
 
@@ -8,9 +15,16 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
+from db_config import (
+    DEFAULT_SQLITE_PATH,
+    DatabaseConfigError,
+    DatabaseEngine,
+    load_database_config,
+)
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATABASE_DIR = REPO_ROOT / "database"
-PRODUCTION_DB_PATH = DATABASE_DIR / "northstar.db"
+PRODUCTION_DB_PATH = DEFAULT_SQLITE_PATH
 SCHEMA_PATH = DATABASE_DIR / "schema.sql"
 DEFAULT_USER_EMAIL = "juliem@n-star.us"
 
@@ -50,6 +64,10 @@ _TEST_ISOLATED = False
 
 # Additive column migrations for existing local DBs (CREATE IF NOT EXISTS will not alter).
 _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
+    "clients": [
+        ("code", "TEXT NOT NULL DEFAULT ''"),
+        ("name", "TEXT NOT NULL DEFAULT ''"),
+    ],
     "users": [
         ("is_internal_northstar", "INTEGER NOT NULL DEFAULT 1"),
         ("password_hash", "TEXT NOT NULL DEFAULT ''"),
@@ -77,11 +95,25 @@ _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("source_summary", "TEXT NOT NULL DEFAULT ''"),
     ],
     "companies": [
+        ("website", "TEXT NOT NULL DEFAULT ''"),
+        ("address", "TEXT NOT NULL DEFAULT ''"),
+        ("city", "TEXT NOT NULL DEFAULT ''"),
+        ("state", "TEXT NOT NULL DEFAULT ''"),
+        ("zip", "TEXT NOT NULL DEFAULT ''"),
+        ("legacy_phone", "TEXT NOT NULL DEFAULT ''"),
+        ("legacy_first_name", "TEXT NOT NULL DEFAULT ''"),
+        ("legacy_last_name", "TEXT NOT NULL DEFAULT ''"),
+        ("legacy_title", "TEXT NOT NULL DEFAULT ''"),
+        ("legacy_alt_phone", "TEXT NOT NULL DEFAULT ''"),
+        ("legacy_mobile", "TEXT NOT NULL DEFAULT ''"),
+        ("legacy_email", "TEXT NOT NULL DEFAULT ''"),
         ("zoominfo_company_id", "TEXT NOT NULL DEFAULT ''"),
         ("source", "TEXT NOT NULL DEFAULT ''"),
         ("source_updated_at", "TEXT NOT NULL DEFAULT ''"),
     ],
     "contacts": [
+        ("first_name", "TEXT NOT NULL DEFAULT ''"),
+        ("last_name", "TEXT NOT NULL DEFAULT ''"),
         ("linkedin_url", "TEXT NOT NULL DEFAULT ''"),
         ("location", "TEXT NOT NULL DEFAULT ''"),
         ("zoominfo_contact_id", "TEXT NOT NULL DEFAULT ''"),
@@ -140,7 +172,26 @@ def _resolved_db_path(db_path: Path | str | None = None) -> Path:
     return path
 
 
+def active_database_config():
+    """Return the resolved database configuration (secrets redacted via .safe_summary())."""
+    return load_database_config()
+
+
 def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
+    """Open the active SQLite database with registered normalization UDFs.
+
+    Connection and transaction ownership stay in this module. Callers must not
+    open ad hoc ``sqlite3.connect`` handles for production writes (identity-key
+    and phone-key triggers require these UDFs).
+    """
+    cfg = load_database_config()
+    if cfg.engine is DatabaseEngine.POSTGRESQL:
+        raise DatabaseConfigError(
+            "PostgreSQL application connections are not enabled in Phase 0C. "
+            "Keep the live engine on SQLite (unset NORTHSTAR_DB_ENGINE / "
+            "DATABASE_URL, or set NORTHSTAR_DB_ENGINE=sqlite). "
+            f"Resolved config: {cfg.safe_summary()}"
+        )
     path = _resolved_db_path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
