@@ -50,6 +50,7 @@ from crm_import_status_resolution import (
     load_batch_status_resolutions,
 )
 from import_brown_industries import digits_phone, domain, norm_addr, norm_name
+from shared_note_history_import import is_closed_status, normalize_record_no
 from models import (
     CrmImportDryRunCompanyPlan,
     CrmImportDryRunCompanyPossible,
@@ -61,7 +62,10 @@ from models import (
     CrmImportDryRunRow,
 )
 
-PLANNER_VERSION = "crm-import-plan-v4"
+PLANNER_VERSION = "crm-import-plan-v5"
+IDENTITY_CRM = "crm"
+IDENTITY_CLIENT_DATA = "client_data"
+EXCLUDED_CLOSED = "excluded_closed"
 MAX_DRY_RUN_PAGE = 100
 IN_CHUNK = 400
 INVALID_PAGING = "Invalid paging."
@@ -285,7 +289,8 @@ class ImportPlan:
 
 def _company_score(reasons: list[str]) -> int:
     return (
-        ("domain_exact" in reasons) * 100
+        ("record_no_exact" in reasons) * 200
+        + ("domain_exact" in reasons) * 100
         + ("name_exact" in reasons) * 40
         + ("phone" in reasons) * 20
         + ("address_city_state" in reasons) * 15
@@ -295,6 +300,11 @@ def _company_score(reasons: list[str]) -> int:
 
 def _company_reasons(query: CompanyRec, cand: CompanyRec) -> list[str]:
     reasons: list[str] = []
+    qrn = normalize_record_no(query.record_no)
+    crn = normalize_record_no(cand.record_no)
+    if qrn and crn and qrn == crn:
+        reasons.append("record_no_exact")
+        return reasons
     if query.domain and cand.domain and query.domain == cand.domain:
         reasons.append("domain_exact")
     if query.norm_name and cand.norm_name and query.norm_name == cand.norm_name:
@@ -312,17 +322,24 @@ def _company_reasons(query: CompanyRec, cand: CompanyRec) -> list[str]:
 
 def _classify_company(
     hits: list[tuple[CompanyRec, list[str]]],
+    *,
+    allow_name_only: bool = True,
 ) -> tuple[str, CompanyRec | None, list[str], list[tuple[CompanyRec, list[str]]]]:
     high: list[tuple[CompanyRec, list[str]]] = []
     possible: list[tuple[CompanyRec, list[str]]] = []
     for cand, reasons in hits:
-        if "domain_exact" in reasons:
+        if "record_no_exact" in reasons:
+            high.append((cand, reasons))
+        elif "domain_exact" in reasons:
             high.append((cand, reasons))
         elif "name_exact" in reasons and (
             "phone" in reasons or "address_city_state" in reasons or "domain_exact" in reasons
         ):
             high.append((cand, reasons))
         elif "name_exact" in reasons and len(reasons) == 1:
+            if not allow_name_only:
+                possible.append((cand, reasons))
+                continue
             name_only = [item for item in hits if "name_exact" in item[1]]
             if len(name_only) == 1:
                 high.append((cand, reasons))
@@ -407,7 +424,7 @@ def _query_company(mapped: dict[str, str]) -> CompanyRec:
         addr=norm_addr(address) if address else "",
         city=_blank(city).lower(),
         state=state,
-        record_no="",
+        record_no=normalize_record_no(mapped.get("external_record_no")),
     )
 
 
@@ -559,13 +576,26 @@ def _match_company(
     query: CompanyRec,
     db_companies: list[CompanyRec],
     proposed: list[CompanyRec],
+    *,
+    allow_name_only: bool = True,
+    record_no_exclusive: bool = False,
 ) -> tuple[str, CompanyRec | None, list[str], list[tuple[CompanyRec, list[str]]]]:
+    qrn = normalize_record_no(query.record_no)
+    if qrn:
+        exact: list[tuple[CompanyRec, list[str]]] = []
+        for cand in (*db_companies, *proposed):
+            if normalize_record_no(cand.record_no) == qrn:
+                exact.append((cand, ["record_no_exact"]))
+        if exact:
+            return _classify_company(exact, allow_name_only=allow_name_only)
+        if record_no_exclusive:
+            return "create_company", None, [], []
     hits: list[tuple[CompanyRec, list[str]]] = []
     for cand in (*db_companies, *proposed):
         reasons = _company_reasons(query, cand)
         if reasons:
             hits.append((cand, reasons))
-    return _classify_company(hits)
+    return _classify_company(hits, allow_name_only=allow_name_only)
 
 
 def _counts_from_rows(rows: list[RowDecision]) -> dict[str, int]:
@@ -596,8 +626,12 @@ def _counts_from_rows(rows: list[RowDecision]) -> dict[str, int]:
         "imported_notes_already_present": 0,
         "importable_rows": 0,
         "needs_review_rows": 0,
+        "excluded_closed": 0,
     }
     for row in rows:
+        if row.company_action == EXCLUDED_CLOSED:
+            counts["excluded_closed"] += 1
+            continue
         if row.validity == "blocking_error":
             counts["blocking_error"] += 1
         elif row.validity == "invalid_mapping_data":
@@ -720,13 +754,18 @@ def _load_matching_companies(conn, staged: list[StagedPlanRow]) -> list[CompanyR
     names = {r.norm_company for r in staged if r.norm_company}
     phones = {r.company_phone_digits for r in staged if r.company_phone_digits}
     last7 = {p[-7:] for p in phones if len(p) >= 7}
+    record_nos = {
+        normalize_record_no(r.mapped.get("external_record_no"))
+        for r in staged
+        if normalize_record_no(r.mapped.get("external_record_no"))
+    }
     addr_keys = {
         (r.company_addr, _blank(r.city).lower(), state_for_match(r.state))
         for r in staged
         if r.company_addr and _blank(r.city) and _blank(r.state) and not r.state_invalid
     }
     kept: list[CompanyRec] = []
-    if not (domains or names or last7 or addr_keys):
+    if not (domains or names or last7 or addr_keys or record_nos):
         return kept
     for raw in conn.execute(
         """
@@ -746,7 +785,7 @@ def _load_matching_companies(conn, staged: list[StagedPlanRow]) -> list[CompanyR
             addr=norm_addr(_blank(raw["address"])) if _blank(raw["address"]) else "",
             city=_blank(raw["city"]).lower(),
             state=state_for_match(raw["state"]),
-            record_no=_blank(raw["external_record_no"]),
+            record_no=normalize_record_no(raw["external_record_no"]),
         )
         phone_hit = bool(rec.phone) and (
             rec.phone in phones
@@ -757,8 +796,10 @@ def _load_matching_companies(conn, staged: list[StagedPlanRow]) -> list[CompanyR
             rec.city,
             rec.state,
         ) in addr_keys
+        rn_hit = bool(rec.record_no) and rec.record_no in record_nos
         if (
-            (rec.domain and rec.domain in domains)
+            rn_hit
+            or (rec.domain and rec.domain in domains)
             or (rec.norm_name and rec.norm_name in names)
             or phone_hit
             or addr_hit
@@ -891,12 +932,29 @@ def _name_exists_elsewhere(
     return any(cid != resolved_company_id for cid in seen)
 
 
-def plan_crm_import_batch(conn, *, client_id: int, batch_id: int) -> ImportPlan:
+def plan_crm_import_batch(
+    conn,
+    *,
+    client_id: int,
+    batch_id: int,
+    identity_mode: str = IDENTITY_CRM,
+    exclude_closed: bool = False,
+) -> ImportPlan:
     """Read-only full-batch plan. Caller supplies the connection.
 
     Does not set PRAGMA query_only. The HTTP dry-run wrapper enables that
     guard. A future confirm may call this inside BEGIN IMMEDIATE and then write.
+
+    identity_mode:
+      - crm: existing Company & contact import behavior
+      - client_data: LeadMaster Record No. first; never reuse on name alone;
+        when Record No. present and unmatched → create (no fuzzy fallback)
+    exclude_closed: Closed status rows are excluded for the selected client
+      (not deleted from the shared master).
     """
+    client_data_mode = identity_mode == IDENTITY_CLIENT_DATA
+    allow_name_only = not client_data_mode
+    record_no_exclusive = client_data_mode
     if not conn.in_transaction:
         conn.execute("BEGIN")
     now = _now_iso()
@@ -966,9 +1024,24 @@ def plan_crm_import_batch(conn, *, client_id: int, batch_id: int) -> ImportPlan:
                 _empty_decision(row, "invalid_mapping_data", INVALID_DATE_DETAIL)
             )
             continue
+        if exclude_closed and is_closed_status(row.relationship_status):
+            decision = _empty_decision(row, "ok", "")
+            decision.company_name = row.company_name
+            decision.company_action = EXCLUDED_CLOSED
+            decision.contact_action = EXCLUDED_CLOSED
+            decision.relationship_action = EXCLUDED_CLOSED
+            decision.status_action = EXCLUDED_CLOSED
+            decision.notes_action = EXCLUDED_CLOSED
+            decision.mapped = dict(row.mapped)
+            decisions.append(decision)
+            continue
         query = _query_company(row.mapped)
         action, matched, reasons, extras = _match_company(
-            query, db_companies, proposed_companies
+            query,
+            db_companies,
+            proposed_companies,
+            allow_name_only=allow_name_only,
+            record_no_exclusive=record_no_exclusive,
         )
         decision = _empty_decision(row, "ok", "")
         decision.company_name = row.company_name
@@ -998,7 +1071,7 @@ def plan_crm_import_batch(conn, *, client_id: int, batch_id: int) -> ImportPlan:
                 addr=query.addr,
                 city=query.city,
                 state=query.state,
-                record_no="",
+                record_no=query.record_no,
                 source_row=row.source_row_number,
             )
             proposed_companies.append(created)
@@ -1020,7 +1093,11 @@ def plan_crm_import_batch(conn, *, client_id: int, batch_id: int) -> ImportPlan:
     proposed_relationships: dict[str, ProposedRelationshipState] = {}
 
     for staged_row, decision in zip(staged, decisions):
-        if decision.validity != "ok" or decision.company_action == "possible_company_match":
+        if (
+            decision.validity != "ok"
+            or decision.company_action
+            in {"possible_company_match", EXCLUDED_CLOSED}
+        ):
             continue
         company_key = _company_ref(decision.company_id, decision.company_proposed_key)
         if not company_key:

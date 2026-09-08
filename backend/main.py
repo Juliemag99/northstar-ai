@@ -127,6 +127,13 @@ from models import (
     CrmImportStatusResolutionRequest,
     CrmImportStatusResolutionResponse,
     CrmImportUploadResult,
+    ClientDataImportBatchView,
+    ClientDataImportConfirmRequest,
+    ClientDataImportConfirmResponse,
+    ClientDataImportDryRunRequest,
+    ClientDataImportDryRunResponse,
+    ClientDataImportMappingRequest,
+    ClientDataImportUploadResult,
     ClientEmailTemplateView,
     ClientExtractionBulkRejectRequest,
     ClientExtractionBulkResolveRequest,
@@ -339,6 +346,15 @@ from shared_note_history_import import (
     confirm_shared_note_history_import,
     get_shared_note_history_batch,
     upload_shared_note_history_import,
+)
+from client_data_import import (
+    cancel_client_data_import,
+    confirm_client_data_import,
+    dry_run_client_data_import,
+    get_client_data_import_batch,
+    retry_client_data_import_staging_cleanup,
+    save_client_data_import_mapping,
+    upload_client_data_import,
 )
 from gmail_send import send_client_email
 from fastapi.responses import RedirectResponse
@@ -2940,6 +2956,188 @@ def confirm_shared_note_history_import_api(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Unexpected failure.") from exc
+
+
+@app.post(
+    "/api/clients/{client_id}/admin/client-data-imports",
+    response_model=ClientDataImportUploadResult,
+)
+async def upload_admin_client_data_import_api(
+    client_id: int,
+    request: Request,
+    prospects_file: UploadFile = File(...),
+    history_file: UploadFile | None = File(default=None),
+    worksheet: str = Form(default=""),
+):
+    actor = _require_admin_client(request, client_id)
+    prospects_content = await prospects_file.read(MAX_FILE_BYTES + 1)
+    if len(prospects_content) > MAX_FILE_BYTES:
+        raise HTTPException(status_code=400, detail="This file is too large to upload.")
+    history_content = None
+    history_name = None
+    if history_file is not None and _blank_filename(history_file.filename):
+        history_content = await history_file.read(SNH_MAX_FILE_BYTES + 1)
+        if len(history_content) > SNH_MAX_FILE_BYTES:
+            raise HTTPException(status_code=400, detail="This file is too large to upload.")
+        history_name = history_file.filename or "history.csv"
+    try:
+        return upload_client_data_import(
+            client_id=client_id,
+            actor=actor,
+            prospects_filename=prospects_file.filename or "prospects.csv",
+            prospects_content=prospects_content,
+            history_filename=history_name,
+            history_content=history_content,
+            worksheet=worksheet or "",
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _blank_filename(name: str | None) -> bool:
+    return bool(str(name or "").strip())
+
+
+@app.get(
+    "/api/clients/{client_id}/admin/client-data-imports/{batch_id}",
+    response_model=ClientDataImportBatchView,
+)
+def get_admin_client_data_import_api(client_id: int, batch_id: int, request: Request):
+    _require_admin_client(request, client_id)
+    try:
+        return get_client_data_import_batch(client_id, batch_id, include_sample=True)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.delete(
+    "/api/clients/{client_id}/admin/client-data-imports/{batch_id}",
+    response_model=ClientDataImportBatchView,
+)
+def cancel_admin_client_data_import_api(client_id: int, batch_id: int, request: Request):
+    actor = _require_admin_client(request, client_id)
+    try:
+        return cancel_client_data_import(client_id, batch_id, actor=actor)
+    except BatchNotReusable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.put(
+    "/api/clients/{client_id}/admin/client-data-imports/{batch_id}/mapping",
+    response_model=ClientDataImportBatchView,
+)
+def save_admin_client_data_import_mapping_api(
+    client_id: int,
+    batch_id: int,
+    body: ClientDataImportMappingRequest,
+    request: Request,
+):
+    actor = _require_admin_client(request, client_id)
+    try:
+        return save_client_data_import_mapping(
+            client_id,
+            batch_id,
+            actor=actor,
+            prospects_mapping=body.prospects_mapping,
+            history_mapping=body.history_mapping,
+        )
+    except BatchNotReusable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post(
+    "/api/clients/{client_id}/admin/client-data-imports/{batch_id}/dry-run",
+    response_model=ClientDataImportDryRunResponse,
+)
+def dry_run_admin_client_data_import_api(
+    client_id: int,
+    batch_id: int,
+    request: Request,
+    body: ClientDataImportDryRunRequest | None = None,
+):
+    actor = _require_admin_client(request, client_id)
+    _ = body
+    try:
+        return dry_run_client_data_import(client_id, batch_id, actor=actor)
+    except BatchNotReusable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post(
+    "/api/clients/{client_id}/admin/client-data-imports/{batch_id}/confirm",
+    response_model=ClientDataImportConfirmResponse,
+)
+def confirm_admin_client_data_import_api(
+    client_id: int,
+    batch_id: int,
+    body: ClientDataImportConfirmRequest,
+    request: Request,
+):
+    actor = _require_admin_client(request, client_id)
+    if body.confirm is not True:
+        raise HTTPException(status_code=400, detail="confirm must be true.")
+    try:
+        return confirm_client_data_import(
+            client_id=client_id,
+            batch_id=batch_id,
+            plan_fingerprint=body.plan_fingerprint,
+            actor=actor,
+            confirm=True,
+        )
+    except BatchNotReusable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Unexpected failure.") from exc
+
+
+@app.post(
+    "/api/clients/{client_id}/admin/client-data-imports/{batch_id}/retry-staging-cleanup",
+    response_model=ClientDataImportConfirmResponse,
+)
+def retry_admin_client_data_import_staging_cleanup_api(
+    client_id: int,
+    batch_id: int,
+    request: Request,
+):
+    actor = _require_admin_client(request, client_id)
+    try:
+        return retry_client_data_import_staging_cleanup(
+            client_id=client_id,
+            batch_id=batch_id,
+            actor=actor,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.put(

@@ -15,6 +15,7 @@ import {
 import { useAuth } from './auth/useAuth'
 import { staffCanAdminister } from './auth/staffCanAdminister'
 import AdministrationImport from './AdministrationImport'
+import AdministrationClientDataImport from './AdministrationClientDataImport'
 
 type AssignedClient = {
   client_id: number
@@ -80,7 +81,7 @@ export default function Administration({
     null,
   )
   const loadGen = useRef(0)
-  const [adminTab, setAdminTab] = useState<'email' | 'import'>('email')
+  const [adminTab, setAdminTab] = useState<'email' | 'import' | 'client-data-import'>('email')
 
   const allMyClients = activeClientId == null || activeClientId <= 0
   const connectClientId = allMyClients ? scopedClientId : activeClientId
@@ -247,10 +248,34 @@ export default function Administration({
         >
           Company & contact import
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={adminTab === 'client-data-import'}
+          className={
+            adminTab === 'client-data-import'
+              ? 'setup-campaign-tab setup-campaign-tab--active'
+              : 'setup-campaign-tab'
+          }
+          onClick={() => setAdminTab('client-data-import')}
+        >
+          Client Data Import
+        </button>
       </div>
 
       {adminTab === 'import' ? (
         <AdministrationImport
+          allMyClients={allMyClients}
+          connectClientId={canConnect ? connectClientId : 0}
+          scopedClientId={scopedClientId}
+          availableClients={availableClients}
+          onScopedClientId={setScopedClientId}
+          clientName={scopedClientName}
+        />
+      ) : null}
+
+      {adminTab === 'client-data-import' ? (
+        <AdministrationClientDataImport
           allMyClients={allMyClients}
           connectClientId={canConnect ? connectClientId : 0}
           scopedClientId={scopedClientId}

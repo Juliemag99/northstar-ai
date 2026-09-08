@@ -84,6 +84,7 @@ MAPPING_NO_ROWS = "This import has no staged rows to map."
 
 CANONICAL_MAPPING_FIELDS = frozenset(
     {
+        "external_record_no",
         "company_name",
         "website",
         "phone",
@@ -376,7 +377,7 @@ def purge_expired_staging_rows(conn=None) -> int:
 
         conn = get_connection()
     try:
-        ensure_crm_import_schema(conn)
+        # Schema must already exist from controlled migration (no request-time DDL).
         now = _iso(_now())
         rows = conn.execute(
             """
@@ -842,7 +843,6 @@ def upload_crm_import(
     except ValueError as exc:
         message = str(exc) or GENERIC_PARSE_ERROR
         with get_connection() as conn:
-            ensure_crm_import_schema(conn)
             purge_expired_staging_rows(conn)
             batch_id = _insert_batch(
                 conn,
@@ -875,7 +875,6 @@ def upload_crm_import(
         )
 
     with get_connection() as conn:
-        ensure_crm_import_schema(conn)
         purge_expired_staging_rows(conn)
         batch_id = _insert_batch(
             conn,
@@ -909,7 +908,6 @@ def get_crm_import_batch(
     from db import get_connection
 
     with get_connection() as conn:
-        ensure_crm_import_schema(conn)
         purge_expired_staging_rows(conn)
         row = _load_batch_row(conn, client_id, batch_id)
         if row is None:
@@ -925,7 +923,6 @@ def list_crm_import_rows(
     page = max(1, min(int(limit or SAMPLE_ROWS), MAX_PAGE_SIZE))
     start = max(0, int(offset or 0))
     with get_connection() as conn:
-        ensure_crm_import_schema(conn)
         purge_expired_staging_rows(conn)
         row = _load_batch_row(conn, client_id, batch_id)
         if row is None:
@@ -964,7 +961,6 @@ def cancel_crm_import(client_id: int, batch_id: int, *, actor: NorthStarUser) ->
 
     now = _iso(_now())
     with get_connection() as conn:
-        ensure_crm_import_schema(conn)
         purge_expired_staging_rows(conn)
         row = _load_batch_row(conn, client_id, batch_id)
         if row is None:
@@ -1049,7 +1045,6 @@ def save_crm_import_mapping(
 
     now = _iso(_now())
     with get_connection() as conn:
-        ensure_crm_import_schema(conn)
         purge_expired_staging_rows(conn)
         row = _load_batch_row(conn, client_id, batch_id)
         if row is None:

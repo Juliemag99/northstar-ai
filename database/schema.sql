@@ -1052,6 +1052,42 @@ CREATE INDEX IF NOT EXISTS idx_crm_import_results_batch_source
 CREATE INDEX IF NOT EXISTS idx_crm_import_results_batch
     ON crm_import_results(batch_id);
 
+-- Client Data Import: orchestrates CRM prospects staging + optional history CSV.
+CREATE TABLE IF NOT EXISTS client_data_import_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id INTEGER NOT NULL,
+    crm_batch_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'previewed',
+    history_original_filename TEXT NOT NULL DEFAULT '',
+    history_sha256 TEXT NOT NULL DEFAULT '',
+    history_file_size_bytes INTEGER NOT NULL DEFAULT 0,
+    history_staging_path TEXT NOT NULL DEFAULT '',
+    history_headers_json TEXT NOT NULL DEFAULT '[]',
+    history_mapping_json TEXT NOT NULL DEFAULT '{}',
+    history_row_count INTEGER NOT NULL DEFAULT 0,
+    plan_fingerprint TEXT NOT NULL DEFAULT '',
+    preview_json TEXT NOT NULL DEFAULT '',
+    result_json TEXT NOT NULL DEFAULT '',
+    staging_cleanup_status TEXT NOT NULL DEFAULT '',
+    staging_cleanup_error TEXT NOT NULL DEFAULT '',
+    staging_cleanup_at TEXT NOT NULL DEFAULT '',
+    uploaded_by_user_id INTEGER,
+    uploaded_by_name TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT '',
+    confirmed_at TEXT NOT NULL DEFAULT '',
+    confirmed_by_user_id INTEGER,
+    closed_excluded_count INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE,
+    FOREIGN KEY (crm_batch_id) REFERENCES crm_import_batches(id) ON DELETE CASCADE,
+    FOREIGN KEY (uploaded_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (confirmed_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_client_data_import_batches_client
+    ON client_data_import_batches(client_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_client_data_import_batches_crm
+    ON client_data_import_batches(crm_batch_id);
+
 -- Full-text search index for companies, contacts, legacy notes, and activities
 CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
     doc_type,

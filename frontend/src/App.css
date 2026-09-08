@@ -3973,6 +3973,27 @@ a.primary-btn:hover {
   margin: 0 0 0.55rem;
 }
 
+.administration-import-closed-policy {
+  margin: 1rem 0 1.25rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--border, #d7dce3);
+  background: var(--panel, #f7f8fa);
+}
+
+.administration-import-closed-policy h3 {
+  margin: 0 0 0.45rem;
+  font-size: 1rem;
+}
+
+.administration-import-audit-json {
+  margin: 0.35rem 0 0;
+  max-width: 100%;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.78rem;
+}
+
 .login-page {
   min-height: 100vh;
   display: grid;

@@ -3390,3 +3390,178 @@ class SharedNoteHistoryConfirmResponse(BaseModel):
     plan_fingerprint: str = ""
     staging_cleanup_status: str = ""
     staging_cleanup_error: str = ""
+
+
+class ClientDataImportProspectsCounts(BaseModel):
+    companies_create: int = 0
+    companies_reuse: int = 0
+    companies_possible: int = 0
+    contacts_create: int = 0
+    contacts_reuse: int = 0
+    contacts_possible: int = 0
+    relationships_create: int = 0
+    relationships_existing: int = 0
+    statuses_imported: int = 0
+    statuses_conflicting: int = 0
+    statuses_invalid: int = 0
+    notes_set: int = 0
+    notes_appended: int = 0
+    notes_duplicate: int = 0
+    blocking: int = 0
+    needs_review: int = 0
+    possible_company_match: int = 0
+    possible_contact_match: int = 0
+    create_company: int = 0
+    use_existing_company: int = 0
+    possible_company_match_count: int = 0
+    create_contact: int = 0
+    use_existing_contact: int = 0
+    create_client_relationship: int = 0
+    relationship_already_exists: int = 0
+    use_imported_status: int = 0
+    status_conflict: int = 0
+    invalid_status: int = 0
+    set_imported_notes: int = 0
+    append_imported_notes: int = 0
+    imported_notes_already_present: int = 0
+    blocking_error: int = 0
+    needs_review_rows: int = 0
+    excluded_closed: int = 0
+
+
+class ClientDataImportHistoryCounts(BaseModel):
+    insert: int = 0
+    already_present: int = 0
+    invalid: int = 0
+    unresolved: int = 0
+    excluded_closed: int = 0
+
+
+class ClientDataImportBatchView(BaseModel):
+    id: int = 0
+    batch_id: int = 0
+    client_id: int
+    crm_batch_id: int = 0
+    status: str = ""
+    original_filename: str = ""
+    history_filename: str = ""
+    history_original_filename: str = ""
+    file_type: str = ""
+    worksheet_name: str = ""
+    file_size_bytes: int = 0
+    sha256: str = ""
+    headers: list[str] = Field(default_factory=list)
+    history_headers: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    error_message: str = ""
+    total_rows: int = 0
+    source_row_count: int = 0
+    blank_row_count: int = 0
+    error_row_count: int = 0
+    history_row_count: int = 0
+    reusable: bool = False
+    expires_at: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    cancelled_at: str = ""
+    uploaded_by_user_id: int | None = None
+    uploaded_by_name: str = ""
+    mapping: dict[str, str] = Field(default_factory=dict)
+    prospects_mapping: dict[str, str] = Field(default_factory=dict)
+    history_mapping: dict[str, str] = Field(default_factory=dict)
+    mapping_updated_at: str = ""
+    mapping_updated_by_user_id: int | None = None
+    closed_policy: str = ""
+    closed_policy_note: str = ""
+    closed_policy_notes: str = ""
+    sample_rows: list[CrmImportRowView] = Field(default_factory=list)
+    history_sample_rows: list[dict[str, str]] = Field(default_factory=list)
+    staging_cleanup_status: str = ""
+    staging_cleanup_error: str = ""
+    staging_cleanup_at: str = ""
+    plan_fingerprint: str = ""
+    closed_excluded_count: int = 0
+
+
+class ClientDataImportUploadResult(BaseModel):
+    kind: str = ""
+    needs_worksheet: bool = False
+    visible_sheets: list[str] = Field(default_factory=list)
+    filename: str = ""
+    file_type: str = ""
+    message: str = ""
+    batch: ClientDataImportBatchView | None = None
+
+
+class ClientDataImportMappingRequest(BaseModel):
+    prospects_mapping: dict[str, str] = Field(default_factory=dict)
+    history_mapping: dict[str, str] | None = None
+
+
+class ClientDataImportDryRunRequest(BaseModel):
+    pass
+
+
+class ClientDataImportDryRunResponse(BaseModel):
+    id: int = 0
+    batch_id: int = 0
+    client_id: int = 0
+    plan_fingerprint: str = ""
+    status: str = ""
+    status_catalog: list[str] = Field(default_factory=list)
+    closed_excluded_count: int = 0
+    closed_policy: str = ""
+    closed_policy_note: str = ""
+    closed_policy_notes: str = ""
+    confirm_allowed: bool = False
+    prospects: ClientDataImportProspectsCounts = Field(
+        default_factory=ClientDataImportProspectsCounts
+    )
+    history: ClientDataImportHistoryCounts = Field(
+        default_factory=ClientDataImportHistoryCounts
+    )
+    counts: dict[str, int] = Field(default_factory=dict)
+    rows: list[dict[str, object]] = Field(default_factory=list)
+    sample_rows: list[dict[str, object]] = Field(default_factory=list)
+    total_rows: int = 0
+    crm_plan_fingerprint: str = ""
+    companies_excluded_closed: int = 0
+    contacts_excluded_closed: int = 0
+    history_events_excluded_closed: int = 0
+
+
+class ClientDataImportConfirmRequest(BaseModel):
+    confirm: bool = False
+    plan_fingerprint: str = ""
+
+
+class ClientDataImportConfirmResponse(BaseModel):
+    id: int = 0
+    batch_id: int = 0
+    client_id: int = 0
+    status: str = "confirmed"
+    imported_at: str = ""
+    imported_by_user_id: int | None = None
+    confirmed_plan_fingerprint: str = ""
+    companies_created: int = 0
+    companies_reused: int = 0
+    contacts_created: int = 0
+    contacts_reused: int = 0
+    relationships_created: int = 0
+    relationships_existing: int = 0
+    statuses_imported: int = 0
+    notes_set: int = 0
+    notes_appended: int = 0
+    notes_duplicate: int = 0
+    history_inserted: int = 0
+    history_already_present: int = 0
+    closed_excluded_count: int = 0
+    created_company_count: int = 0
+    reused_company_count: int = 0
+    created_contact_count: int = 0
+    reused_contact_count: int = 0
+    created_relationship_count: int = 0
+    existing_relationship_count: int = 0
+    staging_cleanup_status: str = ""
+    staging_cleanup_error: str = ""
+    audit: dict[str, object] = Field(default_factory=dict)

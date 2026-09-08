@@ -562,6 +562,9 @@ def ensure_schema(db_path: Path | None = None) -> None:
         from shared_note_history_import import ensure_shared_note_history_schema
 
         ensure_shared_note_history_schema(conn)
+        from client_data_import import ensure_client_data_import_schema
+
+        ensure_client_data_import_schema(conn)
 
     # Build/refresh FTS index after schema is ready
     from search_data import rebuild_search_index

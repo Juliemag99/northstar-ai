@@ -8,6 +8,7 @@ export type CanonicalMappingField = {
 }
 
 export const CANONICAL_MAPPING_FIELDS: CanonicalMappingField[] = [
+  { key: 'external_record_no', label: 'LeadMaster Record No.', group: 'company' },
   { key: 'company_name', label: 'Company name', group: 'company', required: true },
   { key: 'website', label: 'Website', group: 'company' },
   { key: 'phone', label: 'Company phone', group: 'company' },
@@ -99,6 +100,10 @@ const HEADER_ALIASES: Record<string, string> = {
   updateddate: 'source_updated_at',
   dateupdated: 'source_updated_at',
   lastupdated: 'source_updated_at',
+  externalrecordno: 'external_record_no',
+  leadmasterrecordno: 'external_record_no',
+  recordno: 'external_record_no',
+  recordnumber: 'external_record_no',
 }
 
 export function normalizeHeaderKey(raw: string): string {
