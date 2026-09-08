@@ -339,6 +339,7 @@ from crm_import_staging import (
     upload_crm_import,
 )
 from crm_import_plan import dry_run_crm_import
+from crm_identity_keys import IdentityKeysNotReady
 from crm_import_confirm import confirm_admin_crm_import_batch
 from crm_import_status_resolution import save_crm_import_status_resolution
 from shared_note_history_import import (
@@ -2844,6 +2845,8 @@ def dry_run_admin_crm_import_api(
         )
     except BatchNotReusable as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except IdentityKeysNotReady as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except LookupError as exc:
@@ -2874,6 +2877,8 @@ def confirm_admin_crm_import_api(
         )
     except BatchNotReusable as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except IdentityKeysNotReady as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except LookupError as exc:
@@ -3075,6 +3080,8 @@ def dry_run_admin_client_data_import_api(
         return dry_run_client_data_import(client_id, batch_id, actor=actor)
     except BatchNotReusable as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except IdentityKeysNotReady as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except LookupError as exc:
@@ -3106,6 +3113,8 @@ def confirm_admin_client_data_import_api(
         )
     except BatchNotReusable as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except IdentityKeysNotReady as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except LookupError as exc:

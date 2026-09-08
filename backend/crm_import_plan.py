@@ -749,7 +749,81 @@ def _fingerprint_payload(
     }
 
 
+def _chunked_values(values: list[Any], size: int = IN_CHUNK) -> Iterable[list[Any]]:
+    for i in range(0, len(values), size):
+        yield values[i : i + size]
+
+
+def _collect_identity_company_ids(
+    conn,
+    *,
+    record_nos: set[str],
+    domains: set[str],
+    names: set[str],
+    phones: set[str],
+    last7: set[str],
+    addr_keys: set[tuple[str, str, str]],
+) -> set[int]:
+    """Probe company_identity_keys in chunks. Never scan companies."""
+    found: set[int] = set()
+
+    def _add_from(sql: str, values: list[Any]) -> None:
+        if not values:
+            return
+        for chunk in _chunked_values(values):
+            placeholders = ",".join("?" * len(chunk))
+            for raw in conn.execute(sql.format(placeholders=placeholders), chunk):
+                found.add(int(raw[0] if not hasattr(raw, "keys") else raw["company_id"]))
+
+    # Include partial-index predicates (col != '') so SQLite uses covering indexes.
+    _add_from(
+        "SELECT company_id FROM company_identity_keys "
+        "WHERE record_no != '' AND record_no IN ({placeholders})",
+        sorted(record_nos),
+    )
+    _add_from(
+        "SELECT company_id FROM company_identity_keys "
+        "WHERE domain != '' AND domain IN ({placeholders})",
+        sorted(domains),
+    )
+    _add_from(
+        "SELECT company_id FROM company_identity_keys "
+        "WHERE norm_name != '' AND norm_name IN ({placeholders})",
+        sorted(names),
+    )
+    _add_from(
+        "SELECT company_id FROM company_identity_keys "
+        "WHERE phone_digits != '' AND phone_digits IN ({placeholders})",
+        sorted(phones),
+    )
+    _add_from(
+        "SELECT company_id FROM company_identity_keys "
+        "WHERE phone_last7 != '' AND phone_last7 IN ({placeholders})",
+        sorted(last7),
+    )
+    addr_list = sorted(addr_keys)
+    for chunk in _chunked_values(addr_list):
+        clauses = " OR ".join(
+            [
+                "(addr_norm != '' AND addr_norm = ? AND city_norm = ? AND state_norm = ?)"
+            ]
+            * len(chunk)
+        )
+        params: list[str] = []
+        for addr, city, state in chunk:
+            params.extend([addr, city, state])
+        for raw in conn.execute(
+            f"SELECT company_id FROM company_identity_keys WHERE {clauses}",
+            params,
+        ):
+            found.add(int(raw[0] if not hasattr(raw, "keys") else raw["company_id"]))
+    return found
+
+
 def _load_matching_companies(conn, staged: list[StagedPlanRow]) -> list[CompanyRec]:
+    from crm_identity_keys import require_company_identity_ready
+
+    require_company_identity_ready(conn)
     domains = {r.company_domain for r in staged if r.company_domain}
     names = {r.norm_company for r in staged if r.norm_company}
     phones = {r.company_phone_digits for r in staged if r.company_phone_digits}
@@ -764,47 +838,60 @@ def _load_matching_companies(conn, staged: list[StagedPlanRow]) -> list[CompanyR
         for r in staged
         if r.company_addr and _blank(r.city) and _blank(r.state) and not r.state_invalid
     }
+    # Drop incomplete address triples (state_for_match may blank invalid states).
+    addr_keys = {
+        (a, c, s) for (a, c, s) in addr_keys if a and c and s
+    }
+    if not (domains or names or last7 or addr_keys or record_nos or phones):
+        return []
+
+    company_ids = _collect_identity_company_ids(
+        conn,
+        record_nos=record_nos,
+        domains=domains,
+        names=names,
+        phones=phones,
+        last7=last7,
+        addr_keys=addr_keys,
+    )
+    if not company_ids:
+        return []
+
     kept: list[CompanyRec] = []
-    if not (domains or names or last7 or addr_keys or record_nos):
-        return kept
-    for raw in conn.execute(
-        """
-        SELECT id, company_name, external_record_no, website, address, city, state, zip,
-               legacy_phone
-        FROM companies
-        """
-    ):
-        name = _blank(raw["company_name"])
-        rec = CompanyRec(
-            company_id=int(raw["id"]),
-            proposed_key=None,
-            name=name,
-            norm_name=norm_name(name) if name else "",
-            domain=domain(_blank(raw["website"])),
-            phone=digits_phone(_blank(raw["legacy_phone"])),
-            addr=norm_addr(_blank(raw["address"])) if _blank(raw["address"]) else "",
-            city=_blank(raw["city"]).lower(),
-            state=state_for_match(raw["state"]),
-            record_no=normalize_record_no(raw["external_record_no"]),
-        )
-        phone_hit = bool(rec.phone) and (
-            rec.phone in phones
-            or (len(rec.phone) >= 7 and rec.phone[-7:] in last7)
-        )
-        addr_hit = bool(rec.addr and rec.city and rec.state) and (
-            rec.addr,
-            rec.city,
-            rec.state,
-        ) in addr_keys
-        rn_hit = bool(rec.record_no) and rec.record_no in record_nos
-        if (
-            rn_hit
-            or (rec.domain and rec.domain in domains)
-            or (rec.norm_name and rec.norm_name in names)
-            or phone_hit
-            or addr_hit
+    for chunk in _chunked(sorted(company_ids)):
+        placeholders = ",".join("?" * len(chunk))
+        for raw in conn.execute(
+            f"""
+            SELECT
+                c.id,
+                c.company_name,
+                k.record_no,
+                k.domain,
+                k.norm_name,
+                k.phone_digits,
+                k.addr_norm,
+                k.city_norm,
+                k.state_norm
+            FROM companies c
+            JOIN company_identity_keys k ON k.company_id = c.id
+            WHERE c.id IN ({placeholders})
+            """,
+            chunk,
         ):
-            kept.append(rec)
+            kept.append(
+                CompanyRec(
+                    company_id=int(raw["id"]),
+                    proposed_key=None,
+                    name=_blank(raw["company_name"]),
+                    norm_name=_blank(raw["norm_name"]),
+                    domain=_blank(raw["domain"]),
+                    phone=_blank(raw["phone_digits"]),
+                    addr=_blank(raw["addr_norm"]),
+                    city=_blank(raw["city_norm"]),
+                    state=_blank(raw["state_norm"]),
+                    record_no=_blank(raw["record_no"]),
+                )
+            )
     return kept
 
 
@@ -904,16 +991,32 @@ def _load_contacts_for_companies(
 
 
 def _load_name_elsewhere(conn, staged_names: set[str]) -> dict[str, set[int]]:
+    """Batched person_norm lookup — never scans the full contacts table."""
     found: dict[str, set[int]] = {name: set() for name in staged_names if name}
     if not found:
         return found
-    for raw in conn.execute("SELECT company_id, first_name, last_name FROM contacts"):
-        display = f"{_blank(raw['first_name'])} {_blank(raw['last_name'])}".strip()
-        key = _norm_person_name(display)
-        bucket = found.get(key)
-        if bucket is None or len(bucket) >= 2:
-            continue
-        bucket.add(int(raw["company_id"]))
+    from crm_identity_keys import _table_exists as _id_table_exists
+
+    if not _id_table_exists(conn, "contact_person_keys"):
+        # Optional warning only; omit rather than full-table scan at scale.
+        return found
+    names = sorted(found)
+    for chunk in _chunked_values(names):
+        placeholders = ",".join("?" * len(chunk))
+        for raw in conn.execute(
+            f"""
+            SELECT company_id, person_norm
+            FROM contact_person_keys
+            WHERE person_norm != ''
+              AND person_norm IN ({placeholders})
+            """,
+            chunk,
+        ):
+            key = _blank(raw["person_norm"])
+            bucket = found.get(key)
+            if bucket is None or len(bucket) >= 2:
+                continue
+            bucket.add(int(raw["company_id"]))
     return found
 
 
@@ -998,6 +1101,10 @@ def plan_crm_import_batch(
         raise BatchNotReusable(MAPPING_NO_ROWS)
 
     staged = [_build_staged_row(row, mapping) for row in staged_raw]
+    from crm_identity_keys import require_company_identity_ready
+
+    # Fail closed before any classify: incomplete keys would look like creates.
+    require_company_identity_ready(conn)
     db_companies = _load_matching_companies(conn, staged)
     relationships = _load_relationships(conn, client_id)
     status_catalog = load_client_status_catalog(conn, client_id)

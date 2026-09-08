@@ -16,6 +16,8 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
+from db import DB_PATH as _CANONICAL_DB_PATH, get_connection
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATABASE_DIR = REPO_ROOT / "database"
 DB_PATH = DATABASE_DIR / "northstar.db"
@@ -242,9 +244,13 @@ def reload() -> dict:
     print(f"Matched blank legacy notes (treated as no notes): {len(blank_matched)}")
     print(f"Duplicate note Record Nos (kept first): {len(note_dup_recs)}")
 
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
+    # Canonical helper registers CRM identity UDFs required by identity-key triggers.
+    if Path(DB_PATH).resolve() != Path(_CANONICAL_DB_PATH).resolve():
+        raise RuntimeError(
+            f"reload_carmeco_source DB_PATH ({DB_PATH}) diverges from db.DB_PATH "
+            f"({_CANONICAL_DB_PATH}); refusing raw connect."
+        )
+    conn = get_connection()
     before = snapshot_preserve(conn)
     print("PRESERVE SNAPSHOT BEFORE:", before)
 

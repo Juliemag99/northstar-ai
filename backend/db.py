@@ -150,6 +150,9 @@ def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
     from contact_phone import register_contact_phone_functions
 
     register_contact_phone_functions(conn)
+    from crm_identity_keys import register_crm_identity_functions
+
+    register_crm_identity_functions(conn)
     return conn
 
 
@@ -371,6 +374,14 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
 
         # Derived phone keys only. Does not rewrite contacts.phone / alt_phone.
         ensure_contact_phone_key_schema(conn)
+        from crm_identity_keys import ensure_crm_identity_key_schema
+
+        # Indexed CRM import matching keys. Does not rewrite master display values.
+        ensure_crm_identity_key_schema(conn)
+    elif _table_exists(conn, "companies"):
+        from crm_identity_keys import ensure_crm_identity_key_schema
+
+        ensure_crm_identity_key_schema(conn)
     from auth_sessions import ensure_staff_auth_schema
 
     ensure_staff_auth_schema(conn)

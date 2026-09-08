@@ -174,6 +174,55 @@ CREATE TABLE IF NOT EXISTS legacy_notes (
 
 CREATE INDEX IF NOT EXISTS idx_companies_external_record_no
     ON companies(external_record_no);
+
+-- Maintained identity keys for indexed CRM / Client Data Import matching.
+-- PostgreSQL: same tables with btree indexes on the signal columns (partial
+-- WHERE col <> '' is supported). Prefer triggers or app upserts over
+-- SQLite-only generated columns.
+CREATE TABLE IF NOT EXISTS company_identity_keys (
+    company_id INTEGER PRIMARY KEY,
+    record_no TEXT NOT NULL DEFAULT '',
+    domain TEXT NOT NULL DEFAULT '',
+    norm_name TEXT NOT NULL DEFAULT '',
+    phone_digits TEXT NOT NULL DEFAULT '',
+    phone_last7 TEXT NOT NULL DEFAULT '',
+    addr_norm TEXT NOT NULL DEFAULT '',
+    city_norm TEXT NOT NULL DEFAULT '',
+    state_norm TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_company_identity_record_no
+    ON company_identity_keys(record_no)
+    WHERE record_no != '';
+CREATE INDEX IF NOT EXISTS idx_company_identity_domain
+    ON company_identity_keys(domain)
+    WHERE domain != '';
+CREATE INDEX IF NOT EXISTS idx_company_identity_norm_name
+    ON company_identity_keys(norm_name)
+    WHERE norm_name != '';
+CREATE INDEX IF NOT EXISTS idx_company_identity_phone
+    ON company_identity_keys(phone_digits)
+    WHERE phone_digits != '';
+CREATE INDEX IF NOT EXISTS idx_company_identity_phone_last7
+    ON company_identity_keys(phone_last7)
+    WHERE phone_last7 != '';
+CREATE INDEX IF NOT EXISTS idx_company_identity_addr
+    ON company_identity_keys(addr_norm, city_norm, state_norm)
+    WHERE addr_norm != '';
+
+CREATE TABLE IF NOT EXISTS contact_person_keys (
+    contact_id INTEGER PRIMARY KEY,
+    company_id INTEGER NOT NULL,
+    person_norm TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_contact_person_keys_norm
+    ON contact_person_keys(person_norm)
+    WHERE person_norm != '';
+CREATE INDEX IF NOT EXISTS idx_contact_person_keys_company
+    ON contact_person_keys(company_id);
+
 CREATE INDEX IF NOT EXISTS idx_contacts_company_id
     ON contacts(company_id);
 CREATE INDEX IF NOT EXISTS idx_contacts_last_first_nocase

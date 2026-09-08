@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from db import DEFAULT_USER_EMAIL
+from db import DEFAULT_USER_EMAIL, DB_PATH as _CANONICAL_DB_PATH, get_connection
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATABASE_DIR = REPO_ROOT / "database"
@@ -557,9 +557,13 @@ def run_import() -> ImportReport:
         ),
     }
 
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
+    if Path(DB_PATH).resolve() != Path(_CANONICAL_DB_PATH).resolve():
+        raise RuntimeError(
+            f"import_brown_industries DB_PATH ({DB_PATH}) diverges from db.DB_PATH "
+            f"({_CANONICAL_DB_PATH}); refusing raw connect."
+        )
+    # Canonical helper registers CRM identity UDFs required by identity-key triggers.
+    conn = get_connection()
 
     max_contact_before = int(
         conn.execute("SELECT COALESCE(MAX(id), 0) AS n FROM contacts").fetchone()["n"]
@@ -942,8 +946,7 @@ def _run_opportunity_report() -> dict:
         return {"error": "No default user"}
 
     result: dict = {}
-    with sqlite3.connect(str(DB_PATH)) as conn:
-        conn.row_factory = sqlite3.Row
+    with get_connection() as conn:
         clients = {
             str(r["code"]): int(r["id"])
             for r in conn.execute("SELECT id, code, name FROM clients")
