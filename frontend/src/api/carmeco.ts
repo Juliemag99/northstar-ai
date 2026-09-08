@@ -29,6 +29,7 @@ import type {
   CrossClientOpportunityList,
   OpportunityActionResult,
   WorkQueueListResponse,
+  WorkQueueNextResponse,
   WorkQueueRow,
   WorkQueueSummaryV2,
   DashboardFollowUpItem,
@@ -239,22 +240,31 @@ function normalizeProspectsResponse(raw: unknown): ProspectsResponse {
     client_total?: unknown
     offset?: unknown
     limit?: unknown
+    has_previous?: unknown
+    has_next?: unknown
   }
   const prospects = (payload.prospects ?? []).map(normalizeProspect)
   const total = asNumber(payload.total, prospects.length)
   const clientTotal = asNumber(payload.client_total, total)
-  const limitRaw = payload.limit
-  const limit =
-    limitRaw == null || limitRaw === ''
-      ? null
-      : asNumber(limitRaw, prospects.length)
+  const offset = asNumber(payload.offset, 0)
+  const limit = Math.max(1, Math.min(100, asNumber(payload.limit, 50) || 50))
+  const hasPrevious =
+    typeof payload.has_previous === 'boolean'
+      ? payload.has_previous
+      : offset > 0
+  const hasNext =
+    typeof payload.has_next === 'boolean'
+      ? payload.has_next
+      : offset + limit < total
   return {
     client: normalizeActiveClient(payload.client, clientTotal),
     prospects,
     total,
     client_total: clientTotal,
-    offset: asNumber(payload.offset, 0),
+    offset,
     limit,
+    has_previous: hasPrevious,
+    has_next: hasNext,
   }
 }
 
@@ -342,7 +352,8 @@ export async function fetchProspects(params?: {
   client_id?: number | null
   all_clients?: boolean
   q?: string
-  limit?: number | null
+  status?: string
+  limit?: number
   offset?: number
 }): Promise<ProspectsResponse> {
   const query = new URLSearchParams()
@@ -354,11 +365,24 @@ export async function fetchProspects(params?: {
   if (params?.q != null && String(params.q).trim()) {
     query.set('q', String(params.q).trim())
   }
-  if (params?.limit != null && Number.isFinite(params.limit) && params.limit > 0) {
-    query.set('limit', String(params.limit))
+  if (params?.status != null && String(params.status).trim()) {
+    query.set('status', String(params.status).trim())
   }
-  if (params?.offset != null && Number.isFinite(params.offset) && params.offset > 0) {
-    query.set('offset', String(params.offset))
+  const limitRaw = params?.limit
+  const limit =
+    limitRaw == null || !Number.isFinite(limitRaw) ? 50 : Math.trunc(limitRaw)
+  if (limit < 1 || limit > 100) {
+    throw new Error('Prospects limit must be between 1 and 100.')
+  }
+  query.set('limit', String(limit))
+  const offsetRaw = params?.offset
+  const offset =
+    offsetRaw == null || !Number.isFinite(offsetRaw) ? 0 : Math.trunc(offsetRaw)
+  if (offset < 0) {
+    throw new Error('Prospects offset must be >= 0.')
+  }
+  if (offset > 0) {
+    query.set('offset', String(offset))
   }
   const qs = query.toString()
   const response = await fetch(`/api/prospects${qs ? `?${qs}` : ''}`)
@@ -927,10 +951,55 @@ export interface WorkQueueFilters {
   ai_recommendation?: string
   ai_fit?: string
   ai_engagement?: string
+  limit?: number
+  offset?: number
 }
 
 function workQueueQuery(params: WorkQueueFilters): string {
   const query = new URLSearchParams()
+  if (params.client_id != null) query.set('client_id', String(params.client_id))
+  if (params.type) query.set('type', params.type)
+  if (params.status) query.set('status', params.status)
+  if (params.due) query.set('due', params.due)
+  if (params.priority) query.set('priority', params.priority)
+  if (params.hot) query.set('hot', 'true')
+  if (params.weblead) query.set('weblead', 'true')
+  if (params.cross_client) query.set('cross_client', 'true')
+  if (params.overdue) query.set('overdue', 'true')
+  if (params.assigned_user_id != null) query.set('assigned_user_id', String(params.assigned_user_id))
+  if (params.q) query.set('q', params.q)
+  if (params.ai_alignment) query.set('ai_alignment', params.ai_alignment)
+  if (params.ai_recommendation) query.set('ai_recommendation', params.ai_recommendation)
+  if (params.ai_fit) query.set('ai_fit', params.ai_fit)
+  if (params.ai_engagement) query.set('ai_engagement', params.ai_engagement)
+  const limit = params.limit != null && Number.isFinite(params.limit) ? params.limit : 50
+  query.set('limit', String(limit))
+  const offset = params.offset != null && Number.isFinite(params.offset) ? Math.max(0, params.offset) : 0
+  query.set('offset', String(offset))
+  return query.toString()
+}
+
+function workQueueNextQuery(
+  params: WorkQueueFilters & {
+    after_queue_item_id: string
+    after_work_priority?: number
+    after_due_date?: string | null
+    after_due_time?: string
+    after_company_name?: string
+    after_company_id?: number
+  },
+): string {
+  const query = new URLSearchParams()
+  query.set('after_queue_item_id', params.after_queue_item_id)
+  if (params.after_work_priority != null) {
+    query.set('after_work_priority', String(params.after_work_priority))
+  }
+  if (params.after_due_date) query.set('after_due_date', params.after_due_date)
+  if (params.after_due_time) query.set('after_due_time', params.after_due_time)
+  if (params.after_company_name) query.set('after_company_name', params.after_company_name)
+  if (params.after_company_id != null) {
+    query.set('after_company_id', String(params.after_company_id))
+  }
   if (params.client_id != null) query.set('client_id', String(params.client_id))
   if (params.type) query.set('type', params.type)
   if (params.status) query.set('status', params.status)
@@ -1035,11 +1104,19 @@ export async function fetchWorkQueue(params: WorkQueueFilters = {}): Promise<Wor
   }
   const items = Array.isArray(raw.items) ? raw.items.map(normalizeWorkQueueRow) : []
   const insightRaw = (raw.northstar_insight_summary ?? {}) as Record<string, unknown>
+  const total = asNumber(raw.total, asNumber(raw.count, items.length))
+  const limit = asNumber(raw.limit, params.limit ?? 50)
+  const offset = asNumber(raw.offset, params.offset ?? 0)
   return {
     user_id: asNumber(raw.user_id),
     mode: pick(raw, 'mode') || 'all_my_clients',
     client_ids: Array.isArray(raw.client_ids) ? raw.client_ids.map((v) => asNumber(v)) : [],
-    count: asNumber(raw.count),
+    count: asNumber(raw.count, total),
+    total,
+    offset,
+    limit,
+    has_previous: asBoolean(raw.has_previous ?? offset > 0),
+    has_next: asBoolean(raw.has_next ?? offset + items.length < total),
     summary,
     items,
     northstar_insight_summary: {
@@ -1049,6 +1126,35 @@ export async function fetchWorkQueue(params: WorkQueueFilters = {}): Promise<Wor
       evaluated: asNumber(insightRaw.evaluated),
       not_evaluated: asNumber(insightRaw.not_evaluated),
     },
+  }
+}
+
+export async function fetchWorkQueueNext(
+  params: WorkQueueFilters & {
+    after_queue_item_id: string
+    after_work_priority?: number
+    after_due_date?: string | null
+    after_due_time?: string
+    after_company_name?: string
+    after_company_id?: number
+  },
+): Promise<WorkQueueNextResponse> {
+  const query = workQueueNextQuery(params)
+  const response = await fetch(`/api/work-queue/next?${query}`)
+  const raw = await parseJson<Record<string, unknown>>(response)
+  const itemRaw = raw.item
+  return {
+    user_id: asNumber(raw.user_id),
+    mode: pick(raw, 'mode') || 'all_my_clients',
+    client_ids: Array.isArray(raw.client_ids) ? raw.client_ids.map((v) => asNumber(v)) : [],
+    after_queue_item_id: pick(raw, 'after_queue_item_id'),
+    has_next: asBoolean(raw.has_next),
+    end_of_results: asBoolean(raw.end_of_results ?? !raw.has_next),
+    total: asNumber(raw.total),
+    position:
+      raw.position == null || raw.position === '' ? null : asNumber(raw.position),
+    item: itemRaw == null ? null : normalizeWorkQueueRow(itemRaw),
+    message: pick(raw, 'message'),
   }
 }
 

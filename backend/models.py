@@ -170,7 +170,9 @@ class ProspectsResponse(BaseModel):
     total: int = 0
     client_total: int = 0
     offset: int = 0
-    limit: int | None = None
+    limit: int = 50
+    has_previous: bool = False
+    has_next: bool = False
 
 
 class ImportStats(BaseModel):
@@ -449,11 +451,31 @@ class WorkQueueListResponse(BaseModel):
     mode: str = "all_my_clients"
     client_ids: list[int] = Field(default_factory=list)
     count: int = 0
+    total: int = 0
+    offset: int = 0
+    limit: int = 50
+    has_previous: bool = False
+    has_next: bool = False
     summary: WorkQueueSummaryV2 = Field(default_factory=WorkQueueSummaryV2)
     items: list[WorkQueueRow] = Field(default_factory=list)
     northstar_insight_summary: WorkQueueInsightSummary = Field(
         default_factory=WorkQueueInsightSummary
     )
+
+
+class WorkQueueNextResponse(BaseModel):
+    """Next eligible Work Queue item after a completed/current queue_item_id."""
+
+    user_id: int = 0
+    mode: str = "all_my_clients"
+    client_ids: list[int] = Field(default_factory=list)
+    after_queue_item_id: str = ""
+    has_next: bool = False
+    end_of_results: bool = True
+    total: int = 0
+    position: int | None = None
+    item: WorkQueueRow | None = None
+    message: str = ""
 
 
 class WorkQueueCompleteRequest(BaseModel):

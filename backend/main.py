@@ -190,6 +190,7 @@ from models import (
     WorkQueueListResponse,
     WorkQueueLogCallRequest,
     WorkQueueLogCallResult,
+    WorkQueueNextResponse,
     OutreachLogRequest,
     OutreachLogResult,
     PriorityProspectsResponse,
@@ -394,6 +395,7 @@ from work_queue_data import (
     clients_for_work_queue,
     complete_follow_up_task,
     complete_work_queue_item,
+    get_work_queue_next,
     list_dashboard_follow_ups,
     list_work_queue,
     log_work_queue_call,
@@ -494,17 +496,22 @@ def list_prospects_api(
     client_id: int | None = Query(default=None),
     all_clients: bool = Query(default=False),
     q: str | None = Query(default=None),
-    limit: int | None = Query(default=None, ge=1, le=500),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ):
-    """Return prospects for the Active Client (or all assigned clients)."""
-    page = list_prospects_page(
-        client_id=client_id,
-        all_clients=all_clients,
-        q=q,
-        limit=limit,
-        offset=offset,
-    )
+    """Return a bounded page of prospects for the Active Client (or all assigned)."""
+    try:
+        page = list_prospects_page(
+            client_id=client_id,
+            all_clients=all_clients,
+            q=q,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     client = get_active_client(client_id=client_id, all_clients=all_clients)
     return ProspectsResponse(
         client=client,
@@ -512,7 +519,9 @@ def list_prospects_api(
         total=int(page["total"]),
         client_total=int(page["client_total"]),
         offset=int(page["offset"]),
-        limit=page["limit"],
+        limit=int(page["limit"]),
+        has_previous=bool(page["has_previous"]),
+        has_next=bool(page["has_next"]),
     )
 
 
@@ -1313,6 +1322,8 @@ def work_queue_list_api(
     ai_recommendation: str | None = Query(default=None),
     ai_fit: str | None = Query(default=None),
     ai_engagement: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
 ):
     """Rev Development Specialist Work Queue across authorized clients."""
     try:
@@ -1333,9 +1344,70 @@ def work_queue_list_api(
             ai_recommendation=ai_recommendation,
             ai_fit=ai_fit,
             ai_engagement=ai_engagement,
+            limit=limit,
+            offset=offset,
         )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/work-queue/next", response_model=WorkQueueNextResponse)
+def work_queue_next_api(
+    after_queue_item_id: str = Query(...),
+    after_work_priority: int | None = Query(default=None),
+    after_due_date: str | None = Query(default=None),
+    after_due_time: str | None = Query(default=None),
+    after_company_name: str | None = Query(default=None),
+    after_company_id: int | None = Query(default=None),
+    user_id: int | None = Query(default=None),
+    client_id: int | None = Query(default=None),
+    work_type: str | None = Query(default=None, alias="type"),
+    status: str | None = Query(default=None),
+    due: str | None = Query(default=None),
+    priority: str | None = Query(default=None),
+    hot: bool = Query(default=False),
+    weblead: bool = Query(default=False),
+    cross_client: bool = Query(default=False),
+    overdue: bool = Query(default=False),
+    assigned_user_id: int | None = Query(default=None),
+    q: str | None = Query(default=None),
+    ai_alignment: str | None = Query(default=None),
+    ai_recommendation: str | None = Query(default=None),
+    ai_fit: str | None = Query(default=None),
+    ai_engagement: str | None = Query(default=None),
+):
+    """Next eligible Work Queue item after the given queue_item_id (Save & Next)."""
+    try:
+        return get_work_queue_next(
+            user_id,
+            after_queue_item_id=after_queue_item_id,
+            after_work_priority=after_work_priority,
+            after_due_date=after_due_date,
+            after_due_time=after_due_time,
+            after_company_name=after_company_name,
+            after_company_id=after_company_id,
+            client_id=client_id,
+            work_type=work_type,
+            status=status,
+            due=due,
+            priority=priority,
+            hot=hot,
+            weblead=weblead,
+            cross_client=cross_client,
+            overdue_only=overdue,
+            assigned_user_id=assigned_user_id,
+            q=q,
+            ai_alignment=ai_alignment,
+            ai_recommendation=ai_recommendation,
+            ai_fit=ai_fit,
+            ai_engagement=ai_engagement,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/work-queue/complete")

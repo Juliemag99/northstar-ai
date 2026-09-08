@@ -187,7 +187,10 @@ class AllClientsCompanyStatusesTests(unittest.TestCase):
         self._link(client_id=self.client_a, company_id=company_id, status="Hot Prospect")
         self._link(client_id=self.client_b, company_id=company_id, status="New")
         page = list_prospects_page(
-            client_id=self.client_a, all_clients=False, user_id=self.limited_uid
+            client_id=self.client_a,
+            all_clients=False,
+            user_id=self.limited_uid,
+            q="Specific Mode Co",
         )
         rows = [p for p in page["prospects"] if p.id == company_id]
         self.assertEqual(len(rows), 1)
@@ -200,7 +203,9 @@ class AllClientsCompanyStatusesTests(unittest.TestCase):
         company_id = self._insert_company("No Dup Co")
         self._link(client_id=self.client_a, company_id=company_id, status="A")
         self._link(client_id=self.client_b, company_id=company_id, status="B")
-        page = list_prospects_page(all_clients=True, user_id=self.limited_uid)
+        page = list_prospects_page(
+            all_clients=True, user_id=self.limited_uid, q="No Dup Co"
+        )
         ids = [p.id for p in page["prospects"] if p.id == company_id]
         self.assertEqual(ids, [company_id])
 

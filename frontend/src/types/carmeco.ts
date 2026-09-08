@@ -246,7 +246,9 @@ export interface ProspectsResponse {
   total: number
   client_total: number
   offset: number
-  limit: number | null
+  limit: number
+  has_previous: boolean
+  has_next: boolean
 }
 
 export interface ContactsResponse {
@@ -527,9 +529,27 @@ export interface WorkQueueListResponse {
   mode: string
   client_ids: number[]
   count: number
+  total: number
+  offset: number
+  limit: number
+  has_previous: boolean
+  has_next: boolean
   summary: WorkQueueSummaryV2
   items: WorkQueueRow[]
   northstar_insight_summary?: WorkQueueInsightSummary
+}
+
+export interface WorkQueueNextResponse {
+  user_id: number
+  mode: string
+  client_ids: number[]
+  after_queue_item_id: string
+  has_next: boolean
+  end_of_results: boolean
+  total: number
+  position: number | null
+  item: WorkQueueRow | null
+  message: string
 }
 
 export type AskScope = 'all' | 'active_client'

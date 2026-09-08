@@ -28,10 +28,12 @@ from models import (
     FollowUpTaskCompleteRequest,
     FollowUpTaskRescheduleRequest,
     WorkQueueCompleteRequest,
+    WorkQueueInsightSummary,
     WorkQueueItem,
     WorkQueueListResponse,
     WorkQueueLogCallRequest,
     WorkQueueLogCallResult,
+    WorkQueueNextResponse,
     WorkQueueRow,
     WorkQueueSummary,
     WorkQueueSummaryV2,
@@ -822,6 +824,141 @@ def _is_overdue(due_date: str | None, due_time: str) -> bool:
     return due_time < now_hm
 
 
+WORK_QUEUE_DEFAULT_LIMIT = 50
+WORK_QUEUE_MAX_LIMIT = 100
+_CCR_KEY_CHUNK = 400
+
+
+def _work_queue_sort_key(row: WorkQueueRow) -> tuple:
+    """Deterministic Work Queue order (priority desc, due, name, ids)."""
+    return (
+        -int(row.work_priority or 0),
+        row.due_date or "9999-99-99",
+        row.due_time or "99:99",
+        (row.company_name or "").lower(),
+        int(row.company_id or 0),
+        row.queue_item_id or "",
+    )
+
+
+def _cursor_sort_key(
+    *,
+    work_priority: int,
+    due_date: str | None,
+    due_time: str,
+    company_name: str,
+    company_id: int,
+    queue_item_id: str,
+) -> tuple:
+    return (
+        -int(work_priority or 0),
+        due_date or "9999-99-99",
+        due_time or "99:99",
+        (company_name or "").lower(),
+        int(company_id or 0),
+        queue_item_id or "",
+    )
+
+_CCR_CONTEXT_SELECT = """
+    SELECT
+        ccr.id AS relationship_id,
+        ccr.client_id,
+        cl.code AS client_code,
+        cl.name AS client_name,
+        ccr.company_id,
+        COALESCE(
+            NULLIF(TRIM(ccr.external_record_no), ''),
+            co.external_record_no
+        ) AS external_record_no,
+        co.company_name,
+        co.city,
+        co.state,
+        COALESCE(ccr.status, '') AS status,
+        COALESCE(ccr.next_action, '') AS next_action,
+        ccr.follow_up_date,
+        COALESCE(ccr.priority, '') AS ccr_priority,
+        ccr.assigned_user_id,
+        COALESCE(u.full_name, '') AS assignee_name,
+        COALESCE(ccr.is_hot, 0) AS is_hot,
+        COALESCE(ccr.notes, '') AS notes
+    FROM client_company_relationships ccr
+    JOIN clients cl ON cl.id = ccr.client_id
+    JOIN companies co ON co.id = ccr.company_id
+    LEFT JOIN users u ON u.id = ccr.assigned_user_id
+"""
+
+
+def _normalize_work_queue_page(
+    limit: int | None = None,
+    offset: int | None = None,
+) -> tuple[int, int]:
+    """Bounded paging. Rejects invalid / negative values with ValueError."""
+    if limit is None:
+        limit_i = WORK_QUEUE_DEFAULT_LIMIT
+    else:
+        try:
+            limit_i = int(limit)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("limit must be an integer") from exc
+    if offset is None:
+        offset_i = 0
+    else:
+        try:
+            offset_i = int(offset)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("offset must be an integer") from exc
+    if limit_i < 1 or limit_i > WORK_QUEUE_MAX_LIMIT:
+        raise ValueError(f"limit must be between 1 and {WORK_QUEUE_MAX_LIMIT}")
+    if offset_i < 0:
+        raise ValueError("offset must be >= 0")
+    return limit_i, offset_i
+
+
+def _load_ccr_context_for_keys(conn, keys: set[tuple[int, int]]) -> dict[tuple[int, int], object]:
+    """Hydrate CCR + company + client context only for candidate (client_id, company_id) keys."""
+    out: dict[tuple[int, int], object] = {}
+    if not keys:
+        return out
+    key_list = list(keys)
+    for i in range(0, len(key_list), _CCR_KEY_CHUNK):
+        chunk = key_list[i : i + _CCR_KEY_CHUNK]
+        clauses = " OR ".join(
+            ["(ccr.client_id = ? AND ccr.company_id = ?)"] * len(chunk)
+        )
+        params: list[object] = []
+        for cid, company_id in chunk:
+            params.extend([int(cid), int(company_id)])
+        for r in conn.execute(
+            f"{_CCR_CONTEXT_SELECT} WHERE {clauses}",
+            params,
+        ):
+            out[(int(r["client_id"]), int(r["company_id"]))] = r
+    return out
+
+
+def _ccr_keys_matching(
+    conn,
+    client_ids: list[int],
+    *,
+    status_sql: str,
+    status_params: tuple[object, ...] = (),
+) -> set[tuple[int, int]]:
+    """Status-scoped CCR candidate keys — never an unqualified client book scan."""
+    if not client_ids:
+        return set()
+    placeholders = ",".join("?" * len(client_ids))
+    rows = conn.execute(
+        f"""
+        SELECT ccr.client_id, ccr.company_id
+        FROM client_company_relationships ccr
+        WHERE ccr.client_id IN ({placeholders})
+          AND ({status_sql})
+        """,
+        [*client_ids, *status_params],
+    ).fetchall()
+    return {(int(r["client_id"]), int(r["company_id"])) for r in rows}
+
+
 def list_work_queue(
     user_id: int | None = None,
     *,
@@ -840,61 +977,142 @@ def list_work_queue(
     ai_recommendation: str | None = None,
     ai_fit: str | None = None,
     ai_engagement: str | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
+    enrich_contacts: bool = True,
+    apply_insight_overlay: bool = True,
+    page_results: bool = True,
 ) -> WorkQueueListResponse:
-    """Full specialist work queue across authorized clients."""
+    """Full specialist work queue across authorized clients.
+
+    Builds candidates from source queries (due work, appointments, webleads,
+    cross-client, status-scoped Hot/New/Needs Next Action/Appointment), then
+    hydrates CCR context only for those (client_id, company_id) keys. Applies
+    filters before pagination.
+
+    Internal flags (navigation / next-item):
+    - enrich_contacts: load contact + last-activity per row (expensive).
+    - apply_insight_overlay: attach NorthStar insight + AI filters.
+    - page_results: when False, return the full ranked filtered set (no LIMIT);
+      used only by get_work_queue_next — not exposed on the public list API.
+    """
+    if page_results:
+        page_limit, page_offset = _normalize_work_queue_page(limit, offset)
+    else:
+        page_limit, page_offset = 0, 0
     user = get_user_by_id(user_id) if user_id is not None else get_default_user()
     if user is None:
         raise PermissionError("User not found.")
 
+    empty = WorkQueueListResponse(
+        user_id=user.id,
+        mode="selected_client" if client_id is not None else "all_my_clients",
+        client_ids=[],
+        count=0,
+        total=0,
+        offset=page_offset,
+        limit=page_limit if page_results else 0,
+        has_previous=False,
+        has_next=False,
+        summary=WorkQueueSummaryV2(),
+        items=[],
+    )
+
     client_ids = resolve_dashboard_client_ids(user.id, selected_client_id=client_id)
     if not client_ids:
-        return WorkQueueListResponse(
-            user_id=user.id,
-            mode="selected_client" if client_id is not None else "all_my_clients",
-            client_ids=[],
-            count=0,
-            summary=WorkQueueSummaryV2(),
-            items=[],
-        )
+        return empty.model_copy(update={"user_id": user.id})
 
     today = _today()
     rows_out: list[WorkQueueRow] = []
 
     with get_connection() as conn:
         placeholders = ",".join("?" * len(client_ids))
+        candidate_keys: set[tuple[int, int]] = set()
 
-        # Base CCR + company + client context for all relationships in scope
-        base_rows = conn.execute(
-            f"""
-            SELECT
-                ccr.id AS relationship_id,
-                ccr.client_id,
-                cl.code AS client_code,
-                cl.name AS client_name,
-                ccr.company_id,
-                COALESCE(
-                    NULLIF(TRIM(ccr.external_record_no), ''),
-                    co.external_record_no
-                ) AS external_record_no,
-                co.company_name,
-                co.city,
-                co.state,
-                COALESCE(ccr.status, '') AS status,
-                COALESCE(ccr.next_action, '') AS next_action,
-                ccr.follow_up_date,
-                COALESCE(ccr.priority, '') AS ccr_priority,
-                ccr.assigned_user_id,
-                COALESCE(u.full_name, '') AS assignee_name,
-                COALESCE(ccr.is_hot, 0) AS is_hot,
-                COALESCE(ccr.notes, '') AS notes
-            FROM client_company_relationships ccr
-            JOIN clients cl ON cl.id = ccr.client_id
-            JOIN companies co ON co.id = ccr.company_id
-            LEFT JOIN users u ON u.id = ccr.assigned_user_id
-            WHERE ccr.client_id IN ({placeholders})
-            """,
+        # --- Source payloads (keys first; CCR hydrate later) ---
+        due_calls: list = []
+        due_follow_ups: list = []
+        for cid in client_ids:
+            for item in list_due_work_items(kind="call", client_id=cid):
+                due_calls.append(item)
+                candidate_keys.add((item.client_id, item.company_id))
+            for item in list_open_follow_up_tasks(client_id=cid):
+                due_follow_ups.append(item)
+                candidate_keys.add((item.client_id, item.company_id))
+
+        appointment_rows: list = []
+        scheduled_companies: set[tuple[int, int]] = set()
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='appointments'"
+        ).fetchone():
+            appointment_rows = list(
+                conn.execute(
+                    f"""
+                    SELECT *
+                    FROM appointments
+                    WHERE client_id IN ({placeholders})
+                      AND lower(status) = 'scheduled'
+                    """,
+                    client_ids,
+                )
+            )
+            for r in appointment_rows:
+                key = (int(r["client_id"]), int(r["company_id"]))
+                scheduled_companies.add(key)
+                candidate_keys.add(key)
+
+        activity_appointment_rows = list(
+            conn.execute(
+                f"""
+                SELECT a.*, co.company_name, co.external_record_no
+                FROM activities a
+                JOIN companies co ON co.id = a.company_id
+                WHERE a.client_id IN ({placeholders})
+                  AND lower(TRIM(a.activity_type)) = 'appointment'
+                  AND substr(a.activity_at, 1, 10) <= ?
+                  AND lower(COALESCE(a.completion_status, 'open')) IN
+                      ('open', 'due', 'incomplete', 'pending', '')
+                """,
+                [*client_ids, today],
+            )
+        )
+        for r in activity_appointment_rows:
+            candidate_keys.add((int(r["client_id"]), int(r["company_id"])))
+
+        # Status-scoped CCR candidates (not the full client book)
+        appt_status_keys = _ccr_keys_matching(
+            conn,
             client_ids,
-        ).fetchall()
+            status_sql=(
+                "lower(ccr.status) LIKE '%appointment%' "
+                "OR lower(trim(ccr.status)) LIKE 'appt set%'"
+            ),
+        )
+        candidate_keys |= appt_status_keys
+
+        hot_keys = _ccr_keys_matching(
+            conn,
+            client_ids,
+            status_sql="lower(trim(ccr.status)) = 'hot prospect'",
+        )
+        candidate_keys |= hot_keys
+
+        new_keys = _ccr_keys_matching(
+            conn,
+            client_ids,
+            status_sql="lower(trim(ccr.status)) = 'new'",
+        )
+        candidate_keys |= new_keys
+
+        needs_keys = _ccr_keys_matching(
+            conn,
+            client_ids,
+            status_sql=(
+                "lower(trim(ccr.status)) IN "
+                "('left message', 'contacted', 'send information')"
+            ),
+        )
+        candidate_keys |= needs_keys
 
         # Milestone flags
         weblead_dates: dict[tuple[int, int], str] = {}
@@ -911,7 +1129,9 @@ def list_work_queue(
                 """,
                 client_ids,
             ):
-                weblead_dates[(int(r["client_id"]), int(r["company_id"]))] = _blank(r["first_date"])
+                key = (int(r["client_id"]), int(r["company_id"]))
+                weblead_dates[key] = _blank(r["first_date"])
+                candidate_keys.add(key)
 
         # Cross-client assignments
         cross_meta: dict[tuple[int, int], tuple[int, str]] = {}
@@ -942,14 +1162,14 @@ def list_work_queue(
                 """,
                 client_ids,
             ):
-                cross_meta[(int(r["target_client_id"]), int(r["company_id"]))] = (
+                key = (int(r["target_client_id"]), int(r["company_id"]))
+                cross_meta[key] = (
                     int(r["opportunity_score"] or 0),
                     _blank(r["source_summary"]),
                 )
+                candidate_keys.add(key)
 
-        ccr_by_key = {
-            (int(r["client_id"]), int(r["company_id"])): r for r in base_rows
-        }
+        ccr_by_key = _load_ccr_context_for_keys(conn, candidate_keys)
 
         def add_row(
             *,
@@ -969,8 +1189,13 @@ def list_work_queue(
         ) -> None:
             cid = int(ccr["client_id"])
             company_id = int(ccr["company_id"])
-            ct_id, ct_name = _contact_name(conn, company_id, contact_id)
-            last_at, last_summary = _last_activity(conn, cid, company_id)
+            if enrich_contacts:
+                ct_id, ct_name = _contact_name(conn, company_id, contact_id)
+                last_at, last_summary = _last_activity(conn, cid, company_id)
+            else:
+                ct_id = contact_id
+                ct_name = ""
+                last_at, last_summary = None, ""
             is_hot = is_hot_prospect_status(_blank(ccr["status"]))
             wl_date = weblead_dates.get((cid, company_id))
             is_weblead = force_weblead or wl_date is not None
@@ -988,7 +1213,10 @@ def list_work_queue(
             )
             age = _age_label(wl_date) if is_weblead else None
             is_new_weblead = bool(is_weblead and work_type_name == "WebLead")
-            queue_item_id = f"{work_type_name.lower().replace(' ', '-')}:{source}:{source_id or company_id}:{cid}"
+            queue_item_id = (
+                f"{work_type_name.lower().replace(' ', '-')}:{source}:"
+                f"{source_id or company_id}:{cid}"
+            )
             source_summary = source_client_summary
             if not source_summary and is_cross:
                 source_summary = cross_meta.get((cid, company_id), (0, ""))[1]
@@ -1026,7 +1254,9 @@ def list_work_queue(
                     source_client_summary=source_summary,
                     assigned_user=_blank(ccr["assignee_name"]),
                     assigned_user_id=(
-                        int(ccr["assigned_user_id"]) if ccr["assigned_user_id"] is not None else None
+                        int(ccr["assigned_user_id"])
+                        if ccr["assigned_user_id"] is not None
+                        else None
                     ),
                     source=source,
                     source_id=source_id,
@@ -1034,119 +1264,97 @@ def list_work_queue(
                 )
             )
 
-        # Scheduled calls (due today/overdue) and open follow-up tasks (including upcoming).
-        for cid in client_ids:
-            for item in list_due_work_items(kind="call", client_id=cid):
-                ccr = ccr_by_key.get((item.client_id, item.company_id))
-                if ccr is None:
-                    continue
+        for item in due_calls:
+            ccr = ccr_by_key.get((item.client_id, item.company_id))
+            if ccr is None:
+                continue
+            why = (
+                f"Call due {item.due_date}"
+                + (f" at {item.due_time}" if item.due_time else "")
+            )
+            if item.due_date < today:
+                why = f"Overdue call ({item.due_date})"
+            add_row(
+                work_type_name="Call",
+                source=item.source,
+                source_id=item.source_id,
+                ccr=ccr,
+                due_date=item.due_date,
+                due_time=item.due_time,
+                next_action=item.action_type or "Call",
+                why=why,
+                contact_id=item.contact_id,
+            )
+
+        for item in due_follow_ups:
+            ccr = ccr_by_key.get((item.client_id, item.company_id))
+            if ccr is None:
+                continue
+            why = (
+                f"Follow-Up due {item.due_date}"
+                + (f" at {item.due_time}" if item.due_time else "")
+            )
+            if item.due_date < today:
+                why = f"Overdue follow-up ({item.due_date})"
+            elif item.due_date > today:
                 why = (
-                    f"Call due {item.due_date}"
+                    f"Upcoming follow-up {item.due_date}"
                     + (f" at {item.due_time}" if item.due_time else "")
                 )
-                if item.due_date < today:
-                    why = f"Overdue call ({item.due_date})"
-                add_row(
-                    work_type_name="Call",
-                    source=item.source,
-                    source_id=item.source_id,
-                    ccr=ccr,
-                    due_date=item.due_date,
-                    due_time=item.due_time,
-                    next_action=item.action_type or "Call",
-                    why=why,
-                    contact_id=item.contact_id,
-                )
-            for item in list_open_follow_up_tasks(client_id=cid):
-                ccr = ccr_by_key.get((item.client_id, item.company_id))
-                if ccr is None:
-                    continue
-                why = (
-                    f"Follow-Up due {item.due_date}"
-                    + (f" at {item.due_time}" if item.due_time else "")
-                )
-                if item.due_date < today:
-                    why = f"Overdue follow-up ({item.due_date})"
-                elif item.due_date > today:
-                    why = (
-                        f"Upcoming follow-up {item.due_date}"
-                        + (f" at {item.due_time}" if item.due_time else "")
-                    )
-                add_row(
-                    work_type_name="Follow-Up",
-                    source=item.source,
-                    source_id=item.source_id,
-                    ccr=ccr,
-                    due_date=item.due_date,
-                    due_time=item.due_time,
-                    next_action=item.action_type or "Follow-Up",
-                    why=why,
-                    contact_id=item.contact_id,
-                )
+            add_row(
+                work_type_name="Follow-Up",
+                source=item.source,
+                source_id=item.source_id,
+                ccr=ccr,
+                due_date=item.due_date,
+                due_time=item.due_time,
+                next_action=item.action_type or "Follow-Up",
+                why=why,
+                contact_id=item.contact_id,
+            )
 
-        # Appointments: live scheduled records first, then status fallback
-        scheduled_companies: set[tuple[int, int]] = set()
-        if conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='appointments'"
-        ).fetchone():
-            for r in conn.execute(
-                f"""
-                SELECT *
-                FROM appointments
-                WHERE client_id IN ({placeholders})
-                  AND lower(status) = 'scheduled'
-                """,
-                client_ids,
-            ):
-                ccr = ccr_by_key.get((int(r["client_id"]), int(r["company_id"])))
-                if ccr is None:
-                    continue
-                scheduled_companies.add((int(r["client_id"]), int(r["company_id"])))
-                due = _blank(r["appointment_date"])[:10] or today
-                add_row(
-                    work_type_name="Appointment",
-                    source="appointment",
-                    source_id=int(r["id"]),
-                    ccr=ccr,
-                    due_date=due,
-                    due_time=_blank(r["start_time"])[:5],
-                    next_action="Appointment",
-                    why=(
-                        "Appointment date/time TBD"
-                        if int(r["datetime_tbd"] or 0)
-                        else f"Scheduled appointment on {due}"
-                    ),
-                    contact_id=int(r["contact_id"]) if r["contact_id"] is not None else None,
-                )
+        for r in appointment_rows:
+            ccr = ccr_by_key.get((int(r["client_id"]), int(r["company_id"])))
+            if ccr is None:
+                continue
+            due = _blank(r["appointment_date"])[:10] or today
+            add_row(
+                work_type_name="Appointment",
+                source="appointment",
+                source_id=int(r["id"]),
+                ccr=ccr,
+                due_date=due,
+                due_time=_blank(r["start_time"])[:5],
+                next_action="Appointment",
+                why=(
+                    "Appointment date/time TBD"
+                    if int(r["datetime_tbd"] or 0)
+                    else f"Scheduled appointment on {due}"
+                ),
+                contact_id=int(r["contact_id"]) if r["contact_id"] is not None else None,
+            )
 
-        for ccr in base_rows:
+        for key in appt_status_keys:
+            if key in scheduled_companies:
+                continue
+            ccr = ccr_by_key.get(key)
+            if ccr is None:
+                continue
             status_l = _blank(ccr["status"]).lower()
-            if "appointment" in status_l or status_l.startswith("appt set"):
-                if (int(ccr["client_id"]), int(ccr["company_id"])) in scheduled_companies:
-                    continue
-                add_row(
-                    work_type_name="Appointment",
-                    source="status",
-                    source_id=int(ccr["relationship_id"]),
-                    ccr=ccr,
-                    due_date=today,
-                    due_time="",
-                    next_action="Confirm appointment",
-                    why="Appointment Set status requires attention",
-                )
+            if "appointment" not in status_l and not status_l.startswith("appt set"):
+                continue
+            add_row(
+                work_type_name="Appointment",
+                source="status",
+                source_id=int(ccr["relationship_id"]),
+                ccr=ccr,
+                due_date=today,
+                due_time="",
+                next_action="Confirm appointment",
+                why="Appointment Set status requires attention",
+            )
 
-        for r in conn.execute(
-            f"""
-            SELECT a.*, co.company_name, co.external_record_no
-            FROM activities a
-            JOIN companies co ON co.id = a.company_id
-            WHERE a.client_id IN ({placeholders})
-              AND lower(TRIM(a.activity_type)) = 'appointment'
-              AND substr(a.activity_at, 1, 10) <= ?
-              AND lower(COALESCE(a.completion_status, 'open')) IN ('open', 'due', 'incomplete', 'pending', '')
-            """,
-            [*client_ids, today],
-        ):
+        for r in activity_appointment_rows:
             ccr = ccr_by_key.get((int(r["client_id"]), int(r["company_id"])))
             if ccr is None:
                 continue
@@ -1163,10 +1371,9 @@ def list_work_queue(
                 contact_id=int(r["contact_id"]) if r["contact_id"] is not None else None,
             )
 
-        # Hot prospects — current Hot Prospect status only. Never the sticky
-        # is_hot flag, AI overlay, or a leftover milestone.
-        for ccr in base_rows:
-            if not is_hot_prospect_status(_blank(ccr["status"])):
+        for key in hot_keys:
+            ccr = ccr_by_key.get(key)
+            if ccr is None or not is_hot_prospect_status(_blank(ccr["status"])):
                 continue
             add_row(
                 work_type_name="Hot",
@@ -1179,7 +1386,6 @@ def list_work_queue(
                 why="Current status is Hot Prospect",
             )
 
-        # WebLeads
         for (cid, company_id), first_date in weblead_dates.items():
             ccr = ccr_by_key.get((cid, company_id))
             if ccr is None:
@@ -1196,9 +1402,9 @@ def list_work_queue(
                 force_weblead=True,
             )
 
-        # New Assignments — own work type, never Call Due
-        for ccr in base_rows:
-            if _blank(ccr["status"]).lower() != "new":
+        for key in new_keys:
+            ccr = ccr_by_key.get(key)
+            if ccr is None or _blank(ccr["status"]).lower() != "new":
                 continue
             add_row(
                 work_type_name="New Assignment",
@@ -1211,7 +1417,6 @@ def list_work_queue(
                 why="Newly assigned prospect (Status = New)",
             )
 
-        # Cross-client opportunities added to target client
         for (cid, company_id), (score, source_summary) in cross_meta.items():
             ccr = ccr_by_key.get((cid, company_id))
             if ccr is None:
@@ -1233,24 +1438,22 @@ def list_work_queue(
                 source_client_summary=source_summary,
             )
 
-        # Needs Next Action — working status without an open scheduled call/follow-up.
-        # Does NOT invent Calls Due from Left Message / Contacted / Send Information.
         scheduled_keys = {
             (r.client_id, r.company_id)
             for r in rows_out
             if r.work_type in {"Call", "Follow-Up"}
         }
-        for ccr in base_rows:
+        for key in needs_keys:
+            ccr = ccr_by_key.get(key)
+            if ccr is None:
+                continue
             rel_status = _blank(ccr["status"])
             if _is_terminal_relationship_status(rel_status):
                 continue
             if not _needs_next_action_status(rel_status):
                 continue
-            key = (int(ccr["client_id"]), int(ccr["company_id"]))
             if key in scheduled_keys:
                 continue
-            # Any explicit scheduled follow-up date (including future) means they
-            # already have a next action — keep them out of this bucket.
             if _date_only(ccr["follow_up_date"]):
                 continue
             add_row(
@@ -1264,7 +1467,7 @@ def list_work_queue(
                 why=f"Status = {rel_status} with no open scheduled next action",
             )
 
-    # Filters
+    # Filters (applied before pagination)
     filtered = rows_out
     if work_type:
         wt = work_type.strip().lower().replace("_", "-")
@@ -1287,13 +1490,7 @@ def list_work_queue(
         }
         target = aliases.get(wt, wt)
         if target == "__work_next__":
-            # Prioritized actionable work: exclude bulk New Assignments when any
-            # higher-value work exists so Work Next is not dominated by Status=New.
-            actionable = [
-                r
-                for r in filtered
-                if r.work_type != "New Assignment"
-            ]
+            actionable = [r for r in filtered if r.work_type != "New Assignment"]
             filtered = actionable if actionable else filtered
         else:
             filtered = [
@@ -1310,11 +1507,8 @@ def list_work_queue(
 
     if due:
         due_key = due.strip().lower()
-        # "today" = actionable now: due today or already overdue (not future-only)
         if due_key == "today":
-            filtered = [
-                r for r in filtered if r.due_date and r.due_date <= today
-            ]
+            filtered = [r for r in filtered if r.due_date and r.due_date <= today]
         elif due_key == "overdue":
             filtered = [r for r in filtered if r.is_overdue]
         elif due_key == "upcoming":
@@ -1357,7 +1551,6 @@ def list_work_queue(
                 or needle in r.external_record_no.lower()
             ]
 
-    # Deduplicate identical queue_item_id
     seen_ids: set[str] = set()
     unique_rows: list[WorkQueueRow] = []
     for r in filtered:
@@ -1366,31 +1559,45 @@ def list_work_queue(
         seen_ids.add(r.queue_item_id)
         unique_rows.append(r)
 
-    unique_rows.sort(
-        key=lambda r: (
-            -r.work_priority,
-            r.due_date or "9999-99-99",
-            r.due_time or "99:99",
-            r.company_name.lower(),
-        )
-    )
+    unique_rows.sort(key=_work_queue_sort_key)
 
-    # Observation-only NorthStar Insight overlay (does not change ranking/scores)
     from work_queue_intel_overlay import (
         attach_northstar_insight_overlay,
         filter_rows_by_insight,
     )
 
-    unique_rows, insight_summary = attach_northstar_insight_overlay(unique_rows)
-    unique_rows = filter_rows_by_insight(
-        unique_rows,
-        ai_alignment=ai_alignment,
-        ai_recommendation=ai_recommendation,
-        ai_fit=ai_fit,
-        ai_engagement=ai_engagement,
-    )
+    insight_summary = WorkQueueInsightSummary()
+    if apply_insight_overlay:
+        unique_rows, insight_summary = attach_northstar_insight_overlay(unique_rows)
+        unique_rows = filter_rows_by_insight(
+            unique_rows,
+            ai_alignment=ai_alignment,
+            ai_recommendation=ai_recommendation,
+            ai_fit=ai_fit,
+            ai_engagement=ai_engagement,
+        )
+    elif any(
+        _blank(x)
+        for x in (ai_alignment, ai_recommendation, ai_fit, ai_engagement)
+    ):
+        # AI filters require overlay; apply when requested even if overlay flag was off.
+        unique_rows, insight_summary = attach_northstar_insight_overlay(unique_rows)
+        unique_rows = filter_rows_by_insight(
+            unique_rows,
+            ai_alignment=ai_alignment,
+            ai_recommendation=ai_recommendation,
+            ai_fit=ai_fit,
+            ai_engagement=ai_engagement,
+        )
 
-    # Summary from unfiltered authorized universe (same query family)
+    total = len(unique_rows)
+    if page_results:
+        page_items = unique_rows[page_offset : page_offset + page_limit]
+    else:
+        page_items = unique_rows
+        page_limit = total
+        page_offset = 0
+
     all_for_summary = rows_out
     summary = WorkQueueSummaryV2(
         calls_due=len({(r.client_id, r.company_id) for r in all_for_summary if r.work_type == "Call"}),
@@ -1428,10 +1635,172 @@ def list_work_queue(
         user_id=user.id,
         mode="selected_client" if client_id is not None else "all_my_clients",
         client_ids=client_ids,
-        count=len(unique_rows),
+        count=total,
+        total=total,
+        offset=page_offset,
+        limit=page_limit if page_results else total,
+        has_previous=page_results and page_offset > 0,
+        has_next=page_results and (page_offset + page_limit) < total,
         summary=summary,
-        items=unique_rows,
+        items=page_items,
         northstar_insight_summary=insight_summary,
+    )
+
+
+def _enrich_work_queue_row(row: WorkQueueRow) -> WorkQueueRow:
+    """Fill contact + last-activity for a single navigation target row."""
+    with get_connection() as conn:
+        ct_id, ct_name = _contact_name(conn, row.company_id, row.contact_id)
+        last_at, last_summary = _last_activity(conn, row.client_id, row.company_id)
+    return row.model_copy(
+        update={
+            "contact_id": ct_id,
+            "contact_name": ct_name,
+            "last_activity_at": last_at,
+            "last_activity_summary": last_summary,
+        }
+    )
+
+
+def get_work_queue_next(
+    user_id: int | None = None,
+    *,
+    after_queue_item_id: str,
+    after_work_priority: int | None = None,
+    after_due_date: str | None = None,
+    after_due_time: str | None = None,
+    after_company_name: str | None = None,
+    after_company_id: int | None = None,
+    client_id: int | None = None,
+    work_type: str | None = None,
+    status: str | None = None,
+    due: str | None = None,
+    priority: str | None = None,
+    hot: bool = False,
+    weblead: bool = False,
+    cross_client: bool = False,
+    overdue_only: bool = False,
+    assigned_user_id: int | None = None,
+    q: str | None = None,
+    ai_alignment: str | None = None,
+    ai_recommendation: str | None = None,
+    ai_fit: str | None = None,
+    ai_engagement: str | None = None,
+) -> WorkQueueNextResponse:
+    """Return the next eligible Work Queue item after ``after_queue_item_id``.
+
+    Uses the same filters and deterministic order as ``list_work_queue``. Ranking
+    skips per-row contact/activity hydration unless search ``q`` is set (search
+    can match those fields). Only the chosen next row is enriched + insight-
+    overlaid for the response payload.
+    """
+    after_id = _blank(after_queue_item_id)
+    if not after_id:
+        raise ValueError("after_queue_item_id is required")
+
+    needs_search_enrich = bool(_blank(q))
+    needs_ai = any(
+        _blank(x)
+        for x in (ai_alignment, ai_recommendation, ai_fit, ai_engagement)
+    )
+
+    ranked = list_work_queue(
+        user_id,
+        client_id=client_id,
+        work_type=work_type,
+        status=status,
+        due=due,
+        priority=priority,
+        hot=hot,
+        weblead=weblead,
+        cross_client=cross_client,
+        overdue_only=overdue_only,
+        assigned_user_id=assigned_user_id,
+        q=q,
+        ai_alignment=ai_alignment,
+        ai_recommendation=ai_recommendation,
+        ai_fit=ai_fit,
+        ai_engagement=ai_engagement,
+        enrich_contacts=needs_search_enrich,
+        apply_insight_overlay=needs_ai,
+        page_results=False,
+    )
+
+    items = list(ranked.items)
+    total = len(items)
+    next_index: int | None = None
+
+    for i, row in enumerate(items):
+        if row.queue_item_id == after_id:
+            next_index = i + 1
+            break
+
+    if next_index is None:
+        # Current item already left the queue (e.g. completed). Use cursor.
+        if after_work_priority is not None and after_company_id is not None:
+            cursor = _cursor_sort_key(
+                work_priority=int(after_work_priority),
+                due_date=after_due_date,
+                due_time=_blank(after_due_time),
+                company_name=_blank(after_company_name),
+                company_id=int(after_company_id),
+                queue_item_id=after_id,
+            )
+            for i, row in enumerate(items):
+                if _work_queue_sort_key(row) > cursor:
+                    next_index = i
+                    break
+        else:
+            next_index = 0 if items else None
+
+    if next_index is None or next_index >= total:
+        return WorkQueueNextResponse(
+            user_id=ranked.user_id,
+            mode=ranked.mode,
+            client_ids=ranked.client_ids,
+            after_queue_item_id=after_id,
+            has_next=False,
+            end_of_results=True,
+            total=total,
+            position=None,
+            item=None,
+            message="No further matching Work Queue items.",
+        )
+
+    next_row = items[next_index]
+    # Never return the same queue_item_id the caller just finished.
+    if next_row.queue_item_id == after_id:
+        return WorkQueueNextResponse(
+            user_id=ranked.user_id,
+            mode=ranked.mode,
+            client_ids=ranked.client_ids,
+            after_queue_item_id=after_id,
+            has_next=False,
+            end_of_results=True,
+            total=total,
+            position=None,
+            item=None,
+            message="No further matching Work Queue items.",
+        )
+    if not needs_search_enrich:
+        next_row = _enrich_work_queue_row(next_row)
+    if not needs_ai:
+        from work_queue_intel_overlay import attach_northstar_insight_overlay
+
+        enriched_list, _ = attach_northstar_insight_overlay([next_row])
+        next_row = enriched_list[0] if enriched_list else next_row
+
+    return WorkQueueNextResponse(
+        user_id=ranked.user_id,
+        mode=ranked.mode,
+        client_ids=ranked.client_ids,
+        after_queue_item_id=after_id,
+        has_next=True,
+        end_of_results=False,
+        total=total,
+        position=next_index + 1,
+        item=next_row,
+        message="",
     )
 
 
@@ -1440,7 +1809,7 @@ def work_queue_summary_v2(
     *,
     client_id: int | None = None,
 ) -> WorkQueueSummaryV2:
-    return list_work_queue(user_id, client_id=client_id).summary
+    return list_work_queue(user_id, client_id=client_id, limit=1, offset=0).summary
 
 
 def _mark_follow_up_activity_completed(conn, *, client_id: int, activity_id: int) -> None:

@@ -363,14 +363,14 @@ def main() -> int:
         due_items = list_due_work_items(kind="follow_up", client_id=carmeco_id)
         if any(item.company_id == company_id and item.contact_id == contact_id for item in due_items):
             _fail("Completed follow-up still appears in due follow-up work items.")
-        prospects = list_prospects(client_id=carmeco_id)
+        prospects = list_prospects(client_id=carmeco_id, q=MARKER)
         match = next((p for p in prospects if p.id == company_id), None)
         if match is None:
             _fail("Dashboard prospects did not include the test company after Log Call.")
         assert match.status == call_status
         if match.follow_up_due:
             _fail("Dashboard still counted a follow-up after saving a call without scheduling one.")
-        queue = list_work_queue(client_id=carmeco_id)
+        queue = list_work_queue(client_id=carmeco_id, work_type="follow-up", q=MARKER, limit=100)
         if any(
             item.company_id == company_id and item.work_type == "Follow-Up"
             for item in queue.items
@@ -449,7 +449,7 @@ def main() -> int:
         if not any(item.company_id == company_id and item.contact_id == contact_id for item in due_items):
             _fail("Scheduled follow-up did not appear in due follow-up work items.")
 
-        prospects = list_prospects(client_id=carmeco_id)
+        prospects = list_prospects(client_id=carmeco_id, q=MARKER)
         match = next((p for p in prospects if p.id == company_id), None)
         if match is None:
             _fail("Dashboard prospects did not include the test company after Log Call.")
@@ -459,7 +459,7 @@ def main() -> int:
         if not match.follow_up_due:
             _fail("Dashboard follow-up count did not include the new follow-up.")
 
-        queue = list_work_queue(client_id=carmeco_id)
+        queue = list_work_queue(client_id=carmeco_id, work_type="follow-up", q=MARKER, limit=100)
         queue_hit = [
             item
             for item in queue.items
@@ -590,14 +590,14 @@ def main() -> int:
         times = [item.at for item in ws.timeline]
         assert times == sorted(times, reverse=True), "Timeline must be newest-first"
 
-        brown_prospects = list_prospects(client_id=brown_id)
+        brown_prospects = list_prospects(client_id=brown_id, q=MARKER)
         brown_match = next((p for p in brown_prospects if p.id == company_id), None)
         if brown_match is None:
             _fail("Brown dashboard missing the shared test company.")
         assert brown_match.status == "Existing Brown Status"
         assert (brown_match.next_action or "") == ""
 
-        queue2 = list_work_queue(client_id=carmeco_id)
+        queue2 = list_work_queue(client_id=carmeco_id, work_type="follow-up", q=MARKER, limit=100)
         if not any(item.company_id == company_id for item in queue2.items):
             _fail("Work Queue lost the follow-up after activity save.")
 

@@ -180,4 +180,27 @@ describe('Companies page prospects visibility API', () => {
       },
     ])
   })
+
+  it('always sends a bounded limit even when callers omit limit', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          client: { name: 'Brown', client_id: 2, code: 'brown', mode: 'selected_client' },
+          prospects: [],
+          total: 0,
+          client_total: 0,
+          offset: 0,
+          limit: 50,
+          has_previous: false,
+          has_next: false,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    await fetchProspects({ client_id: 2 })
+    const url = String(fetchMock.mock.calls[0]?.[0] ?? '')
+    expect(url).toContain('limit=50')
+    expect(url).not.toMatch(/limit=500|limit=1000/)
+  })
 })

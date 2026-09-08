@@ -1,5 +1,5 @@
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   completeContactFollowUp,
   completeWorkQueueItem,
@@ -24,6 +24,8 @@ import {
 import type { WorkQueueInsightSummary, WorkQueueRow, WorkQueueSummaryV2 } from './types/carmeco'
 
 type ClientOption = { client_id: number; client_name: string; client_code: string }
+
+const PAGE_SIZE = 50
 
 const EMPTY_SUMMARY: WorkQueueSummaryV2 = {
   calls_due: 0,
@@ -97,6 +99,10 @@ export default function WorkQueue({
   const [searchParams, setSearchParams] = useSearchParams()
   const [clients, setClients] = useState<ClientOption[]>(assignedClients ?? [])
   const [items, setItems] = useState<WorkQueueRow[]>([])
+  const [total, setTotal] = useState(0)
+  const [hasPrevious, setHasPrevious] = useState(false)
+  const [hasNext, setHasNext] = useState(false)
+  const [page, setPage] = useState(0)
   const [summary, setSummary] = useState<WorkQueueSummaryV2>(EMPTY_SUMMARY)
   const [insightSummary, setInsightSummary] =
     useState<WorkQueueInsightSummary>(EMPTY_INSIGHT_SUMMARY)
@@ -106,6 +112,8 @@ export default function WorkQueue({
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [searchDraft, setSearchDraft] = useState(searchParams.get('q') || '')
+  const [debouncedQ, setDebouncedQ] = useState(searchParams.get('q') || '')
+  const requestSeq = useRef(0)
   const [nextActionCatalog, setNextActionCatalog] = useState<NextActionCatalog>(emptyNextActionCatalog())
   const [schedulingKey, setSchedulingKey] = useState<string | null>(null)
   const [scheduleDate, setScheduleDate] = useState('')
@@ -129,7 +137,7 @@ export default function WorkQueue({
     searchParams.get('overdue') === '1' ||
     searchParams.get('overdue') === 'true' ||
     due === 'overdue'
-  const q = searchParams.get('q') || ''
+  const q = debouncedQ
   const aiAlignment = searchParams.get('ai_alignment') || ''
   const aiRecommendation = searchParams.get('ai_recommendation') || ''
   const aiFit = searchParams.get('ai_fit') || ''
@@ -142,6 +150,44 @@ export default function WorkQueue({
     : activeClientId != null && activeClientId > 0
       ? activeClientId
       : null
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const next = searchDraft.trim()
+      setDebouncedQ(next)
+      setSearchParams(
+        (prev) => {
+          const current = prev.get('q') || ''
+          if (next === current) return prev
+          const params = new URLSearchParams(prev)
+          if (!next) params.delete('q')
+          else params.set('q', next)
+          return params
+        },
+        { replace: true },
+      )
+    }, 250)
+    return () => window.clearTimeout(timer)
+  }, [searchDraft, setSearchParams])
+
+  useEffect(() => {
+    setPage(0)
+  }, [
+    selectedClientId,
+    workType,
+    status,
+    due,
+    priority,
+    hot,
+    weblead,
+    crossClient,
+    overdue,
+    q,
+    aiAlignment,
+    aiRecommendation,
+    aiFit,
+    aiEngagement,
+  ])
 
   useEffect(() => {
     if (assignedClients && assignedClients.length > 0) {
@@ -195,6 +241,7 @@ export default function WorkQueue({
   }, [activeClientId, searchParams, setSearchParams])
 
   const loadQueue = useCallback(async () => {
+    const seq = ++requestSeq.current
     setLoading(true)
     setError(null)
     try {
@@ -215,21 +262,31 @@ export default function WorkQueue({
           ai_recommendation: aiRecommendation || undefined,
           ai_fit: aiFit || undefined,
           ai_engagement: aiEngagement || undefined,
+          limit: PAGE_SIZE,
+          offset: page * PAGE_SIZE,
         }),
         fetchOpportunityCount(scoped),
       ])
+      if (seq !== requestSeq.current) return
       setItems(result.items)
+      setTotal(result.total)
+      setHasPrevious(result.has_previous)
+      setHasNext(result.has_next)
       setSummary(result.summary)
       setInsightSummary(result.northstar_insight_summary || EMPTY_INSIGHT_SUMMARY)
       setOpportunityCount(oppCount)
     } catch (err) {
+      if (seq !== requestSeq.current) return
       setError(err instanceof Error ? err.message : 'Failed to load Work Queue.')
       setItems([])
+      setTotal(0)
+      setHasPrevious(false)
+      setHasNext(false)
       setSummary(EMPTY_SUMMARY)
       setInsightSummary(EMPTY_INSIGHT_SUMMARY)
       setOpportunityCount(0)
     } finally {
-      setLoading(false)
+      if (seq === requestSeq.current) setLoading(false)
     }
   }, [
     selectedClientId,
@@ -246,6 +303,7 @@ export default function WorkQueue({
     aiRecommendation,
     aiFit,
     aiEngagement,
+    page,
   ])
 
   useEffect(() => {
@@ -296,11 +354,13 @@ export default function WorkQueue({
 
   function applySummaryFilter(filterId: string) {
     setMessage(null)
+    setPage(0)
     // Rebuild params from scratch so card filters never stack/overwrite oddly.
     const next = new URLSearchParams()
     if (clientId) next.set('client_id', clientId)
     clearQueueFilters(next)
     setSearchDraft('')
+    setDebouncedQ('')
 
     switch (filterId) {
       case 'all':
@@ -365,7 +425,7 @@ export default function WorkQueue({
   })()
 
   function openItem(item: WorkQueueRow, index = 0) {
-    navigate(workspaceHref(item, queueQuery, index + 1, items.length || 1))
+    navigate(workspaceHref(item, queueQuery, page * PAGE_SIZE + index + 1, total || 1))
   }
 
   async function workNext() {
@@ -375,13 +435,15 @@ export default function WorkQueue({
       const result = await fetchWorkQueue({
         client_id: clientId ? Number(clientId) : null,
         type: 'work-next',
+        limit: PAGE_SIZE,
+        offset: 0,
       })
       if (result.items.length === 0) {
         setMessage("You're caught up.")
         return
       }
       const item = result.items[0]
-      navigate(workspaceHref(item, 'type=work-next', 1, result.items.length))
+      navigate(workspaceHref(item, 'type=work-next', 1, result.total || result.items.length))
     } catch {
       if (items.length === 0) {
         setMessage("You're caught up.")
@@ -392,7 +454,9 @@ export default function WorkQueue({
   }
 
   async function quickLogCall(item: WorkQueueRow, index: number) {
-    navigate(`${workspaceHref(item, queueQuery, index + 1, items.length || 1)}&focus=log-call`)
+    navigate(
+      `${workspaceHref(item, queueQuery, page * PAGE_SIZE + index + 1, total || 1)}&focus=log-call`,
+    )
   }
 
   async function quickAddNote(item: WorkQueueRow) {
@@ -705,7 +769,11 @@ export default function WorkQueue({
               value={searchDraft}
               onChange={(event) => setSearchDraft(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === 'Enter') setFilter('q', searchDraft.trim())
+                if (event.key === 'Enter') {
+                  const next = searchDraft.trim()
+                  setDebouncedQ(next)
+                  setFilter('q', next)
+                }
               }}
               placeholder="Company, contact, notes…"
             />
@@ -788,7 +856,11 @@ export default function WorkQueue({
           <button type="button" className={`quick-filter-chip ${hot ? 'quick-filter-chip--active' : ''}`} onClick={() => toggleBoolFilter('hot', !hot)}>Hot</button>
           <button type="button" className={`quick-filter-chip ${weblead ? 'quick-filter-chip--active' : ''}`} onClick={() => toggleBoolFilter('weblead', !weblead)}>WebLead</button>
           <button type="button" className={`quick-filter-chip ${crossClient ? 'quick-filter-chip--active' : ''}`} onClick={() => toggleBoolFilter('cross_client', !crossClient)}>Cross-Client Opportunity</button>
-          <button type="button" className="link-btn" onClick={() => setFilter('q', searchDraft.trim())}>Search</button>
+          <button type="button" className="link-btn" onClick={() => {
+            const next = searchDraft.trim()
+            setDebouncedQ(next)
+            setFilter('q', next)
+          }}>Search</button>
           <button type="button" className="clear-filter-btn" onClick={clearFilters}>Clear Filters</button>
         </div>
       </section>
@@ -798,7 +870,15 @@ export default function WorkQueue({
 
       <section className="panel panel--queue" aria-label="Work Queue table">
         <div className="panel-header">
-          <h2>{loading ? 'Loading work…' : `${items.length} item${items.length === 1 ? '' : 's'}`}</h2>
+          <h2>
+            {loading
+              ? 'Loading work…'
+              : `${total} item${total === 1 ? '' : 's'}${
+                  total > PAGE_SIZE
+                    ? ` · showing ${page * PAGE_SIZE + 1}–${page * PAGE_SIZE + items.length}`
+                    : ''
+                }`}
+          </h2>
           <div className="queue-header-meta">
             {activeSummaryId && activeSummaryId !== 'all' && (
               <button type="button" className="clear-filter-btn" onClick={clearFilters}>
@@ -854,6 +934,7 @@ export default function WorkQueue({
             )}
           </div>
         ) : (
+          <>
           <div className="queue-table-wrap">
             <table className="queue-table work-queue-table">
               <thead>
@@ -891,7 +972,15 @@ export default function WorkQueue({
                       <span className="queue-sub">{item.priority_label}</span>
                     </td>
                     <td>
-                      <Link className="company-link" to={workspaceHref(item, queueQuery, index + 1, items.length)}>
+                      <Link
+                        className="company-link"
+                        to={workspaceHref(
+                          item,
+                          queueQuery,
+                          page * PAGE_SIZE + index + 1,
+                          total || 1,
+                        )}
+                      >
                         {display(item.company_name)}
                       </Link>
                       <span className="queue-sub">Record No. {item.external_record_no}</span>
@@ -913,7 +1002,15 @@ export default function WorkQueue({
                     </td>
                     <td>
                       {item.contact_id != null && item.contact_name ? (
-                        <Link className="company-link" to={workspaceHref(item, queueQuery, index + 1, items.length)}>
+                        <Link
+                          className="company-link"
+                          to={workspaceHref(
+                            item,
+                            queueQuery,
+                            page * PAGE_SIZE + index + 1,
+                            total || 1,
+                          )}
+                        >
                           {item.contact_name}
                         </Link>
                       ) : (
@@ -1082,6 +1179,30 @@ export default function WorkQueue({
               </tbody>
             </table>
           </div>
+          {total > PAGE_SIZE ? (
+            <div className="queue-pagination" style={{ display: 'flex', gap: '1rem', alignItems: 'center', marginTop: '0.75rem' }}>
+              <button
+                type="button"
+                className="link-btn"
+                disabled={!hasPrevious || loading || page <= 0}
+                onClick={() => setPage((p) => Math.max(0, p - 1))}
+              >
+                Previous
+              </button>
+              <span className="queue-source">
+                Page {page + 1} of {Math.max(1, Math.ceil(total / PAGE_SIZE))}
+              </span>
+              <button
+                type="button"
+                className="link-btn"
+                disabled={!hasNext || loading}
+                onClick={() => setPage((p) => p + 1)}
+              >
+                Next
+              </button>
+            </div>
+          ) : null}
+          </>
         )}
       </section>
     </>

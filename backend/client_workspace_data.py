@@ -418,12 +418,51 @@ def resolve_relationship(
     return None
 
 
+PROSPECTS_DEFAULT_LIMIT = 50
+PROSPECTS_MAX_LIMIT = 100
+
+
+def clamp_prospects_page(
+    limit: int | None = None,
+    offset: int | None = 0,
+) -> tuple[int, int]:
+    """Bound Companies/prospects paging. Rejects invalid/negative values."""
+    if limit is None:
+        page_size = PROSPECTS_DEFAULT_LIMIT
+    else:
+        try:
+            page_size = int(limit)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("limit must be an integer") from exc
+        if page_size < 1:
+            raise ValueError("limit must be >= 1")
+        if page_size > PROSPECTS_MAX_LIMIT:
+            raise ValueError(f"limit must be <= {PROSPECTS_MAX_LIMIT}")
+    try:
+        page_offset = int(offset if offset is not None else 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("offset must be an integer") from exc
+    if page_offset < 0:
+        raise ValueError("offset must be >= 0")
+    return page_size, page_offset
+
+
+def _prospects_page_meta(*, total: int, offset: int, limit: int) -> dict:
+    return {
+        "offset": offset,
+        "limit": limit,
+        "has_previous": offset > 0,
+        "has_next": offset + limit < total,
+    }
+
+
 def list_prospects(
     *,
     client_id: int | None = None,
     all_clients: bool = False,
     user_id: int | None = None,
     q: str | None = None,
+    status: str | None = None,
     limit: int | None = None,
     offset: int = 0,
 ) -> list[ProspectListItem]:
@@ -433,6 +472,7 @@ def list_prospects(
         all_clients=all_clients,
         user_id=user_id,
         q=q,
+        status=status,
         limit=limit,
         offset=offset,
     )["prospects"]
@@ -444,16 +484,19 @@ def list_prospects_page(
     all_clients: bool = False,
     user_id: int | None = None,
     q: str | None = None,
+    status: str | None = None,
     limit: int | None = None,
     offset: int = 0,
 ) -> dict:
-    """Paginated/searchable prospects. limit=None returns the full matching set."""
+    """Paginated/searchable prospects. Always bounded (default 50, max 100)."""
     empty = {
         "prospects": [],
         "total": 0,
         "client_total": 0,
         "offset": 0,
-        "limit": None,
+        "limit": PROSPECTS_DEFAULT_LIMIT,
+        "has_previous": False,
+        "has_next": False,
     }
     if not db_exists():
         return empty
@@ -486,20 +529,16 @@ def list_prospects_page(
     if not client_ids:
         return empty
 
+    page_size, page_offset = clamp_prospects_page(limit, offset)
+
     if all_clients_mode:
         return _list_prospects_page_all_clients(
             client_ids=client_ids,
             q=q,
-            limit=limit,
-            offset=offset,
+            status=status,
+            limit=page_size,
+            offset=page_offset,
         )
-
-    page_offset = max(0, int(offset or 0))
-    page_size: int | None
-    if limit is None:
-        page_size = None
-    else:
-        page_size = max(1, min(int(limit), 500))
 
     placeholders = ",".join("?" * len(client_ids))
     tokens = [t for t in _blank(q).split() if t]
@@ -540,12 +579,22 @@ def list_prospects_page(
     if search_clauses:
         search_sql = " AND " + " AND ".join(search_clauses)
 
+    status_wanted = _blank(status)
+    status_sql = ""
+    status_params: list[object] = []
+    if status_wanted:
+        status_sql = (
+            " AND LOWER(TRIM(COALESCE(ccr.status, ''))) = LOWER(?) "
+        )
+        status_params.append(status_wanted)
+
     from_sql = f"""
         FROM client_company_relationships ccr
         JOIN clients cl ON cl.id = ccr.client_id
         JOIN companies co ON co.id = ccr.company_id
         WHERE ccr.client_id IN ({placeholders})
         {search_sql}
+        {status_sql}
     """
     select_sql = f"""
         SELECT
@@ -594,7 +643,10 @@ def list_prospects_page(
                 LIMIT 1
             ) AS contact_phone
         {from_sql}
-        ORDER BY cl.name COLLATE NOCASE ASC, co.company_name COLLATE NOCASE ASC
+        ORDER BY
+            cl.name COLLATE NOCASE ASC,
+            co.company_name COLLATE NOCASE ASC,
+            co.id ASC
     """
 
     prospects: list[ProspectListItem] = []
@@ -612,7 +664,7 @@ def list_prospects_page(
                 client_ids,
             ).fetchone()["n"]
         )
-        match_params = [*client_ids, *search_params]
+        match_params = [*client_ids, *search_params, *status_params]
         total = int(
             conn.execute(
                 f"SELECT COUNT(*) AS n {from_sql}",
@@ -628,13 +680,10 @@ def list_prospects_page(
             call_due[cid] = due_record_nos(kind="call", client_id=cid)
             follow_due[cid] = due_record_nos(kind="follow_up", client_id=cid)
 
-        if page_size is None:
-            rows = conn.execute(select_sql, match_params)
-        else:
-            rows = conn.execute(
-                select_sql + " LIMIT ? OFFSET ?",
-                [*match_params, page_size, page_offset],
-            )
+        rows = conn.execute(
+            select_sql + " LIMIT ? OFFSET ?",
+            [*match_params, page_size, page_offset],
+        )
 
         for row in rows:
             primary = _contact_display_name(
@@ -648,7 +697,7 @@ def list_prospects_page(
             company_id = int(row["id"])
             cid = int(row["client_id"])
             flags = flags_by_client.get(cid, {}).get(company_id, {})
-            status = _blank(row["status"])
+            status_value = _blank(row["status"])
             record_no = _blank(row["external_record_no"])
             prospects.append(
                 ProspectListItem(
@@ -657,8 +706,8 @@ def list_prospects_page(
                     company=_blank(row["company_name"]),
                     city=_blank(row["city"]),
                     state=_blank(row["state"]),
-                    status=status,
-                    relationship_status=status,
+                    status=status_value,
+                    relationship_status=status_value,
                     client_statuses=[],
                     primary_contact=primary,
                     phone=phone,
@@ -668,7 +717,7 @@ def list_prospects_page(
                     zip=_blank(row["zip"]),
                     customer_campaign=_blank(row["customer_campaign"]),
                     contact_count=int(row["contact_count"] or 0),
-                    is_hot=is_hot_prospect_status(status),
+                    is_hot=is_hot_prospect_status(status_value),
                     has_appointment_set=bool(flags.get("has_appointment_set")),
                     has_quote=bool(flags.get("has_quote")),
                     has_purchase_order=bool(flags.get("has_purchase_order")),
@@ -687,8 +736,7 @@ def list_prospects_page(
         "prospects": prospects,
         "total": total,
         "client_total": client_total,
-        "offset": page_offset,
-        "limit": page_size,
+        **_prospects_page_meta(total=total, offset=page_offset, limit=page_size),
     }
 
 
@@ -696,16 +744,12 @@ def _list_prospects_page_all_clients(
     *,
     client_ids: list[int],
     q: str | None = None,
-    limit: int | None = None,
+    status: str | None = None,
+    limit: int = PROSPECTS_DEFAULT_LIMIT,
     offset: int = 0,
 ) -> dict:
     """All My Clients: one row per shared company with labeled client status chips."""
-    page_offset = max(0, int(offset or 0))
-    page_size: int | None
-    if limit is None:
-        page_size = None
-    else:
-        page_size = max(1, min(int(limit), 500))
+    page_size, page_offset = clamp_prospects_page(limit, offset)
 
     placeholders = ",".join("?" * len(client_ids))
     tokens = [t for t in _blank(q).split() if t]
@@ -758,6 +802,21 @@ def _list_prospects_page_all_clients(
     if search_clauses:
         search_sql = " AND " + " AND ".join(search_clauses)
 
+    status_wanted = _blank(status)
+    status_sql = ""
+    status_params: list[object] = []
+    if status_wanted:
+        status_sql = f"""
+            AND EXISTS (
+                SELECT 1 FROM client_company_relationships ccr_status
+                WHERE ccr_status.company_id = co.id
+                  AND ccr_status.client_id IN ({placeholders})
+                  AND LOWER(TRIM(COALESCE(ccr_status.status, ''))) = LOWER(?)
+            )
+        """
+        status_params.extend(list(client_ids))
+        status_params.append(status_wanted)
+
     from_sql = f"""
         FROM companies co
         WHERE EXISTS (
@@ -766,6 +825,7 @@ def _list_prospects_page_all_clients(
               AND ccr.client_id IN ({placeholders})
         )
         {search_sql}
+        {status_sql}
     """
     select_sql = f"""
         SELECT
@@ -813,7 +873,7 @@ def _list_prospects_page_all_clients(
         from milestones_data import companies_with_milestone_flags
         from work_queue_data import due_record_nos
 
-        match_params = [*client_ids, *search_params]
+        match_params = [*client_ids, *search_params, *status_params]
         client_total = int(
             conn.execute(
                 f"""
@@ -839,15 +899,12 @@ def _list_prospects_page_all_clients(
             call_due[cid] = due_record_nos(kind="call", client_id=cid)
             follow_due[cid] = due_record_nos(kind="follow_up", client_id=cid)
 
-        if page_size is None:
-            company_rows = list(conn.execute(select_sql, match_params))
-        else:
-            company_rows = list(
-                conn.execute(
-                    select_sql + " LIMIT ? OFFSET ?",
-                    [*match_params, page_size, page_offset],
-                )
+        company_rows = list(
+            conn.execute(
+                select_sql + " LIMIT ? OFFSET ?",
+                [*match_params, page_size, page_offset],
             )
+        )
 
         company_ids = [int(r["id"]) for r in company_rows]
         chips_by_company: dict[int, list[ClientRelationshipStatusChip]] = {
@@ -972,8 +1029,7 @@ def _list_prospects_page_all_clients(
         "prospects": prospects,
         "total": total,
         "client_total": client_total,
-        "offset": page_offset,
-        "limit": page_size,
+        **_prospects_page_meta(total=total, offset=page_offset, limit=page_size),
     }
 
 

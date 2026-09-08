@@ -21,7 +21,7 @@ from appointments_data import (
     list_appointments,
     count_hot_prospects,
 )
-from client_workspace_data import get_contact_workspace, list_prospects
+from client_workspace_data import get_contact_workspace, list_prospects_page
 from db import get_connection
 from work_queue_data import list_work_queue
 
@@ -133,14 +133,18 @@ def main() -> int:
         _fail(
             f"Carmeco Work Queue Hot {carmeco_hot.summary.hot} != status count {carmeco_hot_sql}."
         )
-    carmeco_prospect_hot = sum(1 for p in list_prospects(client_id=carmeco_id) if p.is_hot)
+    carmeco_prospect_hot = list_prospects_page(
+        client_id=carmeco_id, status="Hot Prospect", limit=1, offset=0
+    )["total"]
     if carmeco_prospect_hot != carmeco_hot_sql:
         _fail("Carmeco prospect Hot flag count diverges from Hot Prospect status.")
     brown_hot = list_work_queue(user.id, client_id=brown_id, work_type="hot")
     brown_hot_sql = count_hot_prospects([brown_id])
     if brown_hot.summary.hot != brown_hot_sql:
         _fail(f"Brown Work Queue Hot {brown_hot.summary.hot} != status count {brown_hot_sql}.")
-    brown_prospect_hot = sum(1 for p in list_prospects(client_id=brown_id) if p.is_hot)
+    brown_prospect_hot = list_prospects_page(
+        client_id=brown_id, status="Hot Prospect", limit=1, offset=0
+    )["total"]
     if brown_prospect_hot != brown_hot_sql:
         _fail("Brown prospect Hot flag count diverges from Hot Prospect status.")
     if carmeco_hot.summary.hot != 0:
