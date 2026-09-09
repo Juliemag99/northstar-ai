@@ -407,6 +407,7 @@ def apply_crm_import_plan_on_connection(
         # Relationship resolve/apply
         # -----------------
         relationship_id: int
+        previous_status: str | None = None
         if row.relationship_action == "create_client_relationship":
             proposed_key = _assert_proposed_key_present(
                 row.relationship_proposed_key, "proposed:relationship:"
@@ -460,6 +461,10 @@ def apply_crm_import_plan_on_connection(
                     raise BatchNotReusable("Plan references missing relationship.")
                 if int(rel["client_id"]) != int(client_id) or int(rel["company_id"]) != int(company_id):
                     raise BatchNotReusable("Plan references relationship in a different client/company.")
+                # Exact CCR status before any update (may be empty string).
+                previous_status = (
+                    None if rel["status"] is None else str(rel["status"])
+                )
 
                 if row.status_action == STATUS_USE_IMPORTED:
                     resolved_status = _blank(row.resolved_status)
@@ -526,6 +531,18 @@ def apply_crm_import_plan_on_connection(
                 relationship_id = relationship_key_to_id[proposed_key]
                 if relationship_key_to_company_id.get(proposed_key) != int(company_id):
                     raise BatchNotReusable("Proposed relationship resolved to wrong company.")
+                prior_rel = conn.execute(
+                    """
+                    SELECT status FROM client_company_relationships
+                    WHERE id = ? AND client_id = ? AND company_id = ?
+                    """,
+                    (relationship_id, int(client_id), int(company_id)),
+                ).fetchone()
+                if prior_rel is None:
+                    raise BatchNotReusable("Proposed relationship row missing before status apply.")
+                previous_status = (
+                    None if prior_rel["status"] is None else str(prior_rel["status"])
+                )
                 if row.status_action == STATUS_USE_IMPORTED:
                     resolved_status = _blank(row.resolved_status)
                     if not resolved_status:
@@ -586,8 +603,9 @@ def apply_crm_import_plan_on_connection(
                 contact_action, contact_id,
                 relationship_action, relationship_id,
                 status_action, notes_action,
-                original_status_action, status_resolution_action, final_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                original_status_action, status_resolution_action,
+                previous_status, final_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 int(batch_id),
@@ -603,6 +621,7 @@ def apply_crm_import_plan_on_connection(
                 row.notes_action,
                 _blank(getattr(row, "original_status_action", "") or row.status_action),
                 _blank(getattr(row, "status_resolution_type", "")),
+                previous_status,
                 _blank(row.resolved_status),
             ),
         )
@@ -808,6 +827,7 @@ def confirm_admin_crm_import_batch(
     fail_after: str | None = None,
     identity_mode: str = IDENTITY_CRM,
     exclude_closed: bool = False,
+    use_imported_status_for_existing: bool = False,
 ) -> dict[str, Any]:
     if not actor or not bool(actor.active):
         raise PermissionError("User not found.")
@@ -837,6 +857,7 @@ def confirm_admin_crm_import_batch(
                     conn,
                     client_id=client_id,
                     batch_id=batch_id,
+                    use_imported_status_for_existing=use_imported_status_for_existing,
                 )
             else:
                 plan = plan_crm_import_batch(
@@ -845,6 +866,7 @@ def confirm_admin_crm_import_batch(
                     batch_id=batch_id,
                     identity_mode=identity_mode,
                     exclude_closed=exclude_closed,
+                    use_imported_status_for_existing=use_imported_status_for_existing,
                 )
 
             if _blank(plan.plan_fingerprint) != plan_fingerprint:

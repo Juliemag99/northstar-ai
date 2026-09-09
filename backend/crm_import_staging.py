@@ -305,6 +305,7 @@ def ensure_crm_import_schema(conn=None) -> None:
                 relationship_id INTEGER NOT NULL,
                 status_action TEXT NOT NULL DEFAULT '',
                 notes_action TEXT NOT NULL DEFAULT '',
+                previous_status TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 FOREIGN KEY (batch_id) REFERENCES crm_import_batches(id) ON DELETE CASCADE,
                 UNIQUE (batch_id, staged_row_id)
@@ -357,6 +358,7 @@ def ensure_crm_import_schema(conn=None) -> None:
         for name, declaration in (
             ("status_action", "TEXT NOT NULL DEFAULT ''"),
             ("notes_action", "TEXT NOT NULL DEFAULT ''"),
+            ("previous_status", "TEXT"),
         ):
             if name not in results_existing:
                 conn.execute(

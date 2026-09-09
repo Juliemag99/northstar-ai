@@ -3195,6 +3195,7 @@ class CrmImportRowsPage(BaseModel):
 class CrmImportDryRunRequest(BaseModel):
     offset: int = 0
     limit: int = 100
+    use_imported_status_for_existing: bool = False
 
 
 class CrmImportDryRunCompanyPossible(BaseModel):
@@ -3277,6 +3278,7 @@ class CrmImportDryRunCounts(BaseModel):
     use_imported_status: int = 0
     status_conflict: int = 0
     invalid_status: int = 0
+    update_existing_status: int = 0
     no_notes_change: int = 0
     set_imported_notes: int = 0
     append_imported_notes: int = 0
@@ -3294,6 +3296,7 @@ class CrmImportDryRunResponse(BaseModel):
     total_rows: int
     offset: int
     limit: int
+    use_imported_status_for_existing: bool = False
     counts: CrmImportDryRunCounts = Field(default_factory=CrmImportDryRunCounts)
     rows: list[CrmImportDryRunRow] = Field(default_factory=list)
     status_catalog: list[str] = Field(default_factory=list)
@@ -3316,6 +3319,7 @@ class CrmImportStatusResolutionResponse(BaseModel):
 class CrmImportConfirmRequest(BaseModel):
     confirm: bool = False
     plan_fingerprint: str = ""
+    use_imported_status_for_existing: bool = False
 
 
 class CrmImportConfirmResponse(BaseModel):

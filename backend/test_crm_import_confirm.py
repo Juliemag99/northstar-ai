@@ -1073,8 +1073,8 @@ def test_confirm_needs_review_refusals() -> None:
 def _confirm_with_plan_mutator(session: _AdminSession, batch_id: int, fp: str, mutator):
     real = plan_crm_import_batch
 
-    def wrapped(conn, *, client_id, batch_id):
-        plan = real(conn, client_id=client_id, batch_id=batch_id)
+    def wrapped(conn, *, client_id, batch_id, **kwargs):
+        plan = real(conn, client_id=client_id, batch_id=batch_id, **kwargs)
         mutator(plan)
         return plan
 

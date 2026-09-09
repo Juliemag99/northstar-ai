@@ -159,7 +159,7 @@ class StatusResolutionTests(unittest.TestCase):
         )
         with get_connection() as conn:
             plan = plan_crm_import_batch(conn, client_id=self.client_id, batch_id=batch_id)
-            self.assertEqual(PLANNER_VERSION, "crm-import-plan-v5")
+            self.assertEqual(PLANNER_VERSION, "crm-import-plan-v7")
             self.assertTrue(set(BROWN_STATUSES).issubset(set(plan.status_catalog)))
             for label in BROWN_STATUSES:
                 self.assertIn(label, plan.status_catalog)

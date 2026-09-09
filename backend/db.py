@@ -147,6 +147,10 @@ _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "crm_import_results": [
         ("status_action", "TEXT NOT NULL DEFAULT ''"),
         ("notes_action", "TEXT NOT NULL DEFAULT ''"),
+        ("original_status_action", "TEXT NOT NULL DEFAULT ''"),
+        ("status_resolution_action", "TEXT NOT NULL DEFAULT ''"),
+        ("final_status", "TEXT NOT NULL DEFAULT ''"),
+        ("previous_status", "TEXT"),
     ],
     "company_research_runs": [
         ("campaign_id", "INTEGER"),

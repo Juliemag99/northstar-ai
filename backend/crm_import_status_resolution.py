@@ -78,6 +78,7 @@ def ensure_crm_import_status_resolution_schema(conn) -> None:
         ("original_status_action", "TEXT NOT NULL DEFAULT ''"),
         ("status_resolution_action", "TEXT NOT NULL DEFAULT ''"),
         ("final_status", "TEXT NOT NULL DEFAULT ''"),
+        ("previous_status", "TEXT"),
     ):
         if name not in results_existing:
             conn.execute(f"ALTER TABLE crm_import_results ADD COLUMN {name} {declaration}")

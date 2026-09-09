@@ -68,6 +68,7 @@ export type CrmImportMappingRequest = {
 export type CrmImportDryRunRequest = {
   offset?: number
   limit?: number
+  use_imported_status_for_existing?: boolean
 }
 
 export type CrmImportValidity =
@@ -189,6 +190,7 @@ export type CrmImportDryRunCounts = {
   use_imported_status: number
   status_conflict: number
   invalid_status: number
+  update_existing_status: number
   no_notes_change: number
   set_imported_notes: number
   append_imported_notes: number
@@ -206,6 +208,7 @@ export type CrmImportDryRunResponse = {
   total_rows: number
   offset: number
   limit: number
+  use_imported_status_for_existing: boolean
   counts: CrmImportDryRunCounts
   rows: CrmImportDryRunRow[]
   status_catalog: string[]
@@ -233,6 +236,7 @@ export type CrmImportStatusResolutionResponse = {
 export type CrmImportConfirmRequest = {
   confirm: true
   plan_fingerprint: string
+  use_imported_status_for_existing?: boolean
 }
 
 export type CrmImportConfirmResponse = {
@@ -372,6 +376,7 @@ export async function dryRunCrmImport(
   batchId: number,
   offset = 0,
   limit = CRM_IMPORT_DRY_RUN_MAX_PAGE,
+  useImportedStatusForExisting = false,
 ): Promise<CrmImportDryRunResponse> {
   requirePositiveIds(clientId, batchId)
   if (!Number.isFinite(offset) || offset < 0) {
@@ -380,7 +385,11 @@ export async function dryRunCrmImport(
   if (!Number.isFinite(limit) || limit < 1 || limit > CRM_IMPORT_DRY_RUN_MAX_PAGE) {
     throw new Error('Invalid paging.')
   }
-  const body: CrmImportDryRunRequest = { offset, limit }
+  const body: CrmImportDryRunRequest = {
+    offset,
+    limit,
+    use_imported_status_for_existing: Boolean(useImportedStatusForExisting),
+  }
   const response = await apiFetch(
     `/api/clients/${encodeURIComponent(String(clientId))}/admin/imports/${encodeURIComponent(String(batchId))}/dry-run`,
     {
@@ -396,6 +405,7 @@ export async function confirmCrmImport(
   clientId: number,
   batchId: number,
   planFingerprint: string,
+  useImportedStatusForExisting = false,
 ): Promise<CrmImportConfirmResponse> {
   requirePositiveIds(clientId, batchId)
   if (!isValidCrmImportPlanFingerprint(planFingerprint)) {
@@ -404,6 +414,7 @@ export async function confirmCrmImport(
   const body: CrmImportConfirmRequest = {
     confirm: true,
     plan_fingerprint: planFingerprint,
+    use_imported_status_for_existing: Boolean(useImportedStatusForExisting),
   }
   const response = await apiFetch(
     `/api/clients/${encodeURIComponent(String(clientId))}/admin/imports/${encodeURIComponent(String(batchId))}/confirm`,

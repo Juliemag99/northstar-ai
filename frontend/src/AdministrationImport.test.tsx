@@ -75,6 +75,7 @@ function emptyCounts(
     use_imported_status: 0,
     status_conflict: 0,
     invalid_status: 0,
+    update_existing_status: 0,
     no_notes_change: 1,
     set_imported_notes: 0,
     append_imported_notes: 0,
@@ -97,6 +98,7 @@ function dryRunResponse(
     total_rows: 1,
     offset: 0,
     limit: 100,
+    use_imported_status_for_existing: false,
     counts: emptyCounts(),
     rows: [
       {
@@ -500,7 +502,7 @@ describe('Administration import tab', () => {
     expect(
       await screen.findByText('Dry run complete. All rows are ready for the confirmation step.'),
     ).toBeTruthy()
-    expect(crmImport.dryRunCrmImport).toHaveBeenCalledWith(7, 11, 0, 100)
+    expect(crmImport.dryRunCrmImport).toHaveBeenCalledWith(7, 11, 0, 100, false)
     expect(screen.getByRole('button', { name: 'Confirm Import' })).toBeTruthy()
     expect(screen.queryByText(/raw_json/i)).toBeNull()
 
@@ -1222,7 +1224,7 @@ describe('Administration import tab', () => {
       clear: false,
     })
     expect(crmImport.dryRunCrmImport).toHaveBeenCalledTimes(2)
-    expect(crmImport.dryRunCrmImport).toHaveBeenLastCalledWith(7, 11, 0, 100)
+    expect(crmImport.dryRunCrmImport).toHaveBeenLastCalledWith(7, 11, 0, 100, false)
     expect(screen.getByRole('button', { name: 'Confirm Import' })).toBeTruthy()
   })
 
@@ -1314,7 +1316,7 @@ describe('Administration import tab', () => {
       notes_unchanged_count: 1,
     })
     expect(await screen.findByText('Import completed')).toBeTruthy()
-    expect(crmImport.confirmCrmImport).toHaveBeenCalledWith(7, 11, 'ab'.repeat(32))
+    expect(crmImport.confirmCrmImport).toHaveBeenCalledWith(7, 11, 'ab'.repeat(32), false)
     expect(screen.getByLabelText('Import completion summary').textContent).toMatch(/Imported rows\s*1/)
     expect(screen.getByLabelText('Import completion summary').textContent).toMatch(/Default statuses\s*1/)
     expect(screen.queryByText('Column mapping')).toBeNull()
@@ -1373,5 +1375,70 @@ describe('Administration import tab', () => {
     expect(await screen.findByText('This import batch was already imported.')).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Save Mapping' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Confirm Import' })).toBeNull()
+  })
+
+  it('defaults status overwrite off and forwards the option on dry-run and confirm', async () => {
+    const plan = dryRunResponse({
+      use_imported_status_for_existing: true,
+      counts: emptyCounts({
+        create_company: 0,
+        use_existing_company: 1,
+        create_client_relationship: 0,
+        relationship_already_exists: 1,
+        use_default_status: 0,
+        use_imported_status: 1,
+        update_existing_status: 1,
+      }),
+    })
+    await renderReadyToConfirm(plan)
+    const checkbox = screen.getByRole('checkbox', {
+      name: /Use imported nonblank statuses for existing relationships/i,
+    }) as HTMLInputElement
+    expect(checkbox.checked).toBe(false)
+    const updatesRow = screen.getByText('Existing relationship status updates').closest('div')
+    expect(updatesRow).toBeTruthy()
+    expect(within(updatesRow as HTMLElement).getByText('1')).toBeTruthy()
+
+    fireEvent.click(checkbox)
+    expect(checkbox.checked).toBe(true)
+    expect(screen.queryByRole('button', { name: 'Confirm Import' })).toBeNull()
+
+    vi.mocked(crmImport.dryRunCrmImport).mockResolvedValue(plan)
+    fireEvent.click(screen.getByRole('button', { name: 'Run Dry Run' }))
+    await screen.findByRole('button', { name: 'Confirm Import' })
+    expect(crmImport.dryRunCrmImport).toHaveBeenLastCalledWith(7, 11, 0, 100, true)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm Import' }))
+    await screen.findByRole('dialog')
+    expect(
+      screen.getByText(/Imported nonblank statuses will replace existing relationship statuses/i),
+    ).toBeTruthy()
+    vi.mocked(crmImport.confirmCrmImport).mockResolvedValue({
+      batch_id: 11,
+      client_id: 7,
+      status: 'imported',
+      imported_at: 't',
+      imported_by_user_id: 1,
+      confirmed_plan_fingerprint: 'ab'.repeat(32),
+      created_company_count: 0,
+      reused_company_count: 1,
+      created_contact_count: 0,
+      reused_contact_count: 0,
+      created_relationship_count: 0,
+      existing_relationship_count: 1,
+      no_contact_row_count: 1,
+      total_imported_row_count: 1,
+      imported_status_count: 1,
+      default_status_count: 0,
+      preserved_status_count: 0,
+      notes_set_count: 0,
+      notes_appended_count: 0,
+      notes_duplicate_count: 0,
+      notes_unchanged_count: 1,
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    await waitFor(() => {
+      expect(crmImport.confirmCrmImport).toHaveBeenCalledWith(7, 11, 'a'.repeat(64), true)
+    })
   })
 })

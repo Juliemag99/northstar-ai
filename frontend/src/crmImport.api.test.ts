@@ -85,6 +85,7 @@ describe('crmImport mapping and dry-run helpers', () => {
       total_rows: 1,
       offset: 0,
       limit: 100,
+      use_imported_status_for_existing: false,
       counts: {
         blocking_error: 0,
         invalid_mapping_data: 0,
@@ -106,6 +107,7 @@ describe('crmImport mapping and dry-run helpers', () => {
         use_imported_status: 0,
         status_conflict: 0,
         invalid_status: 0,
+        update_existing_status: 0,
         no_notes_change: 1,
         set_imported_notes: 0,
         append_imported_notes: 0,
@@ -129,7 +131,11 @@ describe('crmImport mapping and dry-run helpers', () => {
       '/api/clients/7/admin/imports/11/dry-run',
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ offset: 0, limit: 100 }),
+        body: JSON.stringify({
+          offset: 0,
+          limit: 100,
+          use_imported_status_for_existing: false,
+        }),
       }),
     )
     await expect(dryRunCrmImport(7, 11, -1, 100)).rejects.toThrow(/Invalid paging/)
@@ -174,7 +180,11 @@ describe('crmImport mapping and dry-run helpers', () => {
       '/api/clients/7/admin/imports/11/confirm',
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ confirm: true, plan_fingerprint: fingerprint }),
+        body: JSON.stringify({
+          confirm: true,
+          plan_fingerprint: fingerprint,
+          use_imported_status_for_existing: false,
+        }),
       }),
     )
 
@@ -184,5 +194,49 @@ describe('crmImport mapping and dry-run helpers', () => {
     await expect(confirmCrmImport(7, 11, 'AB'.repeat(32))).rejects.toThrow(/fingerprint/i)
     await expect(confirmCrmImport(7, 11, 'short')).rejects.toThrow(/fingerprint/i)
     expect(vi.mocked(http.apiFetch).mock.calls.length).toBe(beforeBad)
+  })
+
+  it('forwards use_imported_status_for_existing on dry-run and confirm', async () => {
+    vi.mocked(http.apiFetch)
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ plan_fingerprint: 'ab'.repeat(32) }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            status: 'imported',
+            confirmed_plan_fingerprint: 'ab'.repeat(32),
+          }),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          },
+        ),
+      )
+    await dryRunCrmImport(7, 11, 0, 100, true)
+    expect(http.apiFetch).toHaveBeenCalledWith(
+      '/api/clients/7/admin/imports/11/dry-run',
+      expect.objectContaining({
+        body: JSON.stringify({
+          offset: 0,
+          limit: 100,
+          use_imported_status_for_existing: true,
+        }),
+      }),
+    )
+    await confirmCrmImport(7, 11, 'ab'.repeat(32), true)
+    expect(http.apiFetch).toHaveBeenCalledWith(
+      '/api/clients/7/admin/imports/11/confirm',
+      expect.objectContaining({
+        body: JSON.stringify({
+          confirm: true,
+          plan_fingerprint: 'ab'.repeat(32),
+          use_imported_status_for_existing: true,
+        }),
+      }),
+    )
   })
 })

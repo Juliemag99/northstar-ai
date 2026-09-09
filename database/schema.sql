@@ -1091,6 +1091,7 @@ CREATE TABLE IF NOT EXISTS crm_import_results (
     relationship_id INTEGER NOT NULL,
     status_action TEXT NOT NULL DEFAULT '',
     notes_action TEXT NOT NULL DEFAULT '',
+    previous_status TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (batch_id) REFERENCES crm_import_batches(id) ON DELETE CASCADE,
     UNIQUE (batch_id, staged_row_id)

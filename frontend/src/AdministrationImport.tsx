@@ -236,6 +236,7 @@ export default function AdministrationImport({
   const [dryRunOffset, setDryRunOffset] = useState(0)
   const [dryRunLoading, setDryRunLoading] = useState(false)
   const [dryRunError, setDryRunError] = useState<string | null>(null)
+  const [useImportedStatusForExisting, setUseImportedStatusForExisting] = useState(false)
   const [statusDrafts, setStatusDrafts] = useState<
     Record<number, { mode: string; status: string }>
   >({})
@@ -338,6 +339,7 @@ export default function AdministrationImport({
     setDryRun(null)
     setDryRunOffset(0)
     setDryRunError(null)
+    setUseImportedStatusForExisting(false)
     setStatusDrafts({})
     setResolvingRowId(null)
     setResolveError(null)
@@ -393,6 +395,7 @@ export default function AdministrationImport({
     setDryRun(null)
     setDryRunOffset(0)
     setDryRunError(null)
+    setUseImportedStatusForExisting(false)
     setConfirmResult(null)
     setConfirmOpen(false)
     setConfirmError(null)
@@ -572,6 +575,7 @@ export default function AdministrationImport({
         batch.batch_id,
         offset,
         CRM_IMPORT_DRY_RUN_MAX_PAGE,
+        useImportedStatusForExisting,
       )
       if (
         previousFingerprint &&
@@ -731,6 +735,7 @@ export default function AdministrationImport({
         connectClientId,
         batch.batch_id,
         dryRun.plan_fingerprint,
+        useImportedStatusForExisting,
       )
       setConfirmResult(result)
       setBatch((prev) =>
@@ -952,6 +957,20 @@ export default function AdministrationImport({
               </>
             ) : null}
           </div>
+          {reusable ? (
+            <label className="administration-import-option">
+              <input
+                type="checkbox"
+                checked={useImportedStatusForExisting}
+                disabled={requestActive}
+                onChange={(e) => {
+                  setUseImportedStatusForExisting(e.target.checked)
+                  clearDryRunOnly()
+                }}
+              />
+              Use imported nonblank statuses for existing relationships
+            </label>
+          ) : null}
         </div>
       ) : null}
 
@@ -1382,6 +1401,10 @@ export default function AdministrationImport({
                   </dd>
                 </div>
                 <div>
+                  <dt>Existing relationship status updates</dt>
+                  <dd>{dryRun.counts.update_existing_status}</dd>
+                </div>
+                <div>
                   <dt>Status conflicts / invalid</dt>
                   <dd>
                     {dryRun.counts.status_conflict} / {dryRun.counts.invalid_status}
@@ -1680,10 +1703,20 @@ export default function AdministrationImport({
                 <dd>{dryRun.counts.relationship_already_exists}</dd>
               </div>
               <div>
+                <dt>Existing relationship status updates</dt>
+                <dd>{dryRun.counts.update_existing_status}</dd>
+              </div>
+              <div>
                 <dt>Rows with no contact</dt>
                 <dd>{dryRun.counts.no_contact_data}</dd>
               </div>
             </dl>
+            {useImportedStatusForExisting ? (
+              <p className="queue-sub">
+                Imported nonblank statuses will replace existing relationship statuses for this
+                client.
+              </p>
+            ) : null}
             {confirmError ? (
               <p className="data-status data-status--error" role="alert">
                 {confirmError}

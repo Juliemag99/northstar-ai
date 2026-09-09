@@ -2914,6 +2914,9 @@ def dry_run_admin_crm_import_api(
             batch_id,
             offset=req.offset,
             limit=req.limit,
+            use_imported_status_for_existing=bool(
+                req.use_imported_status_for_existing
+            ),
         )
     except BatchNotReusable as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -2946,6 +2949,9 @@ def confirm_admin_crm_import_api(
             batch_id=batch_id,
             plan_fingerprint=body.plan_fingerprint,
             actor=actor,
+            use_imported_status_for_existing=bool(
+                body.use_imported_status_for_existing
+            ),
         )
     except BatchNotReusable as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

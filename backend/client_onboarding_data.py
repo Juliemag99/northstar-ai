@@ -1190,6 +1190,11 @@ def finish_draft(draft_id: int, *, user: NorthStarUser) -> dict[str, Any]:
                     )
 
             # Status catalog (labels only — never CCR rows)
+            from crm_import_status_notes import (
+                STANDARD_CRM_RELATIONSHIP_STATUSES,
+                normalize_status_key,
+            )
+
             statuses = [
                 str(s).strip()
                 for s in (crm.get("statuses") or [])
@@ -1198,6 +1203,13 @@ def finish_draft(draft_id: int, *, user: NorthStarUser) -> dict[str, Any]:
             default_status = _blank(crm.get("default_status"))
             if default_status and default_status not in statuses:
                 statuses.append(default_status)
+            # Merge shared CRM standards without casefold duplicates.
+            seen_status_keys = {normalize_status_key(s) for s in statuses}
+            for std in STANDARD_CRM_RELATIONSHIP_STATUSES:
+                key = normalize_status_key(std)
+                if key and key not in seen_status_keys:
+                    statuses.append(std)
+                    seen_status_keys.add(key)
             for idx, label in enumerate(statuses):
                 conn.execute(
                     """

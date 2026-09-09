@@ -139,6 +139,34 @@ class StatusNotesHelperTests(unittest.TestCase):
         self.assertEqual(conflict.status_action, STATUS_CONFLICT)
         self.assertTrue(conflict.needs_review)
         self.assertEqual(conflict.notes_action, NOTES_NO_CHANGE)
+        self.assertFalse(conflict.authoritative_existing_update)
+
+        authoritative = plan_status_and_notes(
+            relationship_is_new=False,
+            existing_status="Active",
+            existing_notes="Keep",
+            imported_status="New",
+            imported_notes="",
+            catalog=catalog,
+            use_imported_for_existing=True,
+        )
+        self.assertEqual(authoritative.status_action, STATUS_USE_IMPORTED)
+        self.assertEqual(authoritative.resolved_status, "New")
+        self.assertTrue(authoritative.authoritative_existing_update)
+        self.assertFalse(authoritative.needs_review)
+
+        blank_preserve = plan_status_and_notes(
+            relationship_is_new=False,
+            existing_status="Active",
+            existing_notes="",
+            imported_status="",
+            imported_notes="",
+            catalog=catalog,
+            use_imported_for_existing=True,
+        )
+        self.assertEqual(blank_preserve.status_action, STATUS_PRESERVE)
+        self.assertEqual(blank_preserve.resolved_status, "Active")
+        self.assertFalse(blank_preserve.authoritative_existing_update)
 
     def test_same_status_preserved(self):
         catalog = StatusCatalog.from_labels(["Active"])
@@ -234,7 +262,7 @@ class StatusNotesPlanConfirmTests(unittest.TestCase):
         )
         with get_connection() as conn:
             plan = plan_crm_import_batch(conn, client_id=self.client_id, batch_id=batch_id)
-            self.assertEqual(PLANNER_VERSION, "crm-import-plan-v5")
+            self.assertEqual(PLANNER_VERSION, "crm-import-plan-v7")
             row = plan.rows[0]
             self.assertEqual(row.status_action, STATUS_USE_IMPORTED)
             self.assertEqual(row.resolved_status, "Active")

@@ -40,7 +40,9 @@ from crm_import_status_notes import (
     STATUS_PRESERVE,
     STATUS_USE_DEFAULT,
     STATUS_USE_IMPORTED,
+    BATCH_RESOLUTION_USE_IMPORTED,
     load_client_status_catalog,
+    normalize_status_key,
     plan_status_and_notes,
 )
 from crm_import_status_resolution import (
@@ -62,7 +64,7 @@ from models import (
     CrmImportDryRunRow,
 )
 
-PLANNER_VERSION = "crm-import-plan-v5"
+PLANNER_VERSION = "crm-import-plan-v7"
 IDENTITY_CRM = "crm"
 IDENTITY_CLIENT_DATA = "client_data"
 EXCLUDED_CLOSED = "excluded_closed"
@@ -285,6 +287,7 @@ class ImportPlan:
     rows: list[RowDecision]
     stats: dict[str, int] = field(default_factory=dict)
     status_catalog: list[str] = field(default_factory=list)
+    use_imported_status_for_existing: bool = False
 
 
 def _company_score(reasons: list[str]) -> int:
@@ -620,6 +623,7 @@ def _counts_from_rows(rows: list[RowDecision]) -> dict[str, int]:
         "use_imported_status": 0,
         "status_conflict": 0,
         "invalid_status": 0,
+        "update_existing_status": 0,
         "no_notes_change": 0,
         "set_imported_notes": 0,
         "append_imported_notes": 0,
@@ -650,6 +654,14 @@ def _counts_from_rows(rows: list[RowDecision]) -> dict[str, int]:
             counts[row.relationship_action] += 1
         if row.status_action in counts:
             counts[row.status_action] += 1
+        if (
+            row.relationship_action == "relationship_already_exists"
+            and row.status_action == STATUS_USE_IMPORTED
+            and normalize_status_key(row.existing_status)
+            != normalize_status_key(row.resolved_status)
+            and _blank(row.resolved_status)
+        ):
+            counts["update_existing_status"] += 1
         if row.notes_action in counts:
             counts[row.notes_action] += 1
         importable = (
@@ -683,6 +695,7 @@ def _fingerprint_payload(
     expires_at: str,
     staged: list[StagedPlanRow],
     decisions: list[RowDecision],
+    use_imported_status_for_existing: bool = False,
 ) -> dict[str, Any]:
     return {
         "schema": PLANNER_VERSION,
@@ -694,6 +707,7 @@ def _fingerprint_payload(
         "mapping_updated_by_user_id": mapping_updated_by_user_id,
         "status": status,
         "expires_at": expires_at,
+        "use_imported_status_for_existing": bool(use_imported_status_for_existing),
         "total_rows": len(staged),
         "staged_rows": [
             {
@@ -730,6 +744,7 @@ def _fingerprint_payload(
                 "status_action": d.status_action,
                 "notes_action": d.notes_action,
                 "resolved_status": d.resolved_status,
+                "existing_status": d.existing_status,
                 "original_status_action": d.original_status_action,
                 "status_resolution_type": d.status_resolution_type,
                 "status_resolution_updated_at": d.status_resolution_updated_at,
@@ -1042,6 +1057,7 @@ def plan_crm_import_batch(
     batch_id: int,
     identity_mode: str = IDENTITY_CRM,
     exclude_closed: bool = False,
+    use_imported_status_for_existing: bool = False,
 ) -> ImportPlan:
     """Read-only full-batch plan. Caller supplies the connection.
 
@@ -1054,10 +1070,13 @@ def plan_crm_import_batch(
         when Record No. present and unmatched → create (no fuzzy fallback)
     exclude_closed: Closed status rows are excluded for the selected client
       (not deleted from the shared master).
+    use_imported_status_for_existing: when True, valid nonblank imported
+      statuses update existing relationships for this client (default False).
     """
     client_data_mode = identity_mode == IDENTITY_CLIENT_DATA
     allow_name_only = not client_data_mode
     record_no_exclusive = client_data_mode
+    use_imported_for_existing = bool(use_imported_status_for_existing)
     if not conn.in_transaction:
         conn.execute("BEGIN")
     now = _now_iso()
@@ -1228,6 +1247,7 @@ def plan_crm_import_batch(
             proposed_relationships=proposed_relationships,
             status_catalog=status_catalog,
             resolutions=resolutions,
+            use_imported_for_existing=use_imported_for_existing,
         )
 
     fingerprint = hashlib.sha256(
@@ -1243,6 +1263,7 @@ def plan_crm_import_batch(
                 expires_at=expires_at,
                 staged=staged,
                 decisions=decisions,
+                use_imported_status_for_existing=use_imported_for_existing,
             )
         ).encode("utf-8")
     ).hexdigest()
@@ -1263,6 +1284,7 @@ def plan_crm_import_batch(
             "proposed_contacts": len(proposed_contacts),
         },
         status_catalog=catalog_labels(status_catalog),
+        use_imported_status_for_existing=use_imported_for_existing,
     )
 
 
@@ -1405,6 +1427,7 @@ def _plan_relationship(
     proposed_relationships: dict[str, ProposedRelationshipState],
     status_catalog,
     resolutions: dict[int, StatusResolution] | None = None,
+    use_imported_for_existing: bool = False,
 ) -> None:
     if decision.validity != "ok":
         return
@@ -1443,6 +1466,7 @@ def _plan_relationship(
         imported_status=staged.relationship_status,
         imported_notes=staged.relationship_notes,
         catalog=status_catalog,
+        use_imported_for_existing=use_imported_for_existing,
     )
     resolution = (resolutions or {}).get(int(staged.row_id))
     status_action, resolved_status, original_action, resolution_type = apply_status_resolution(
@@ -1452,6 +1476,9 @@ def _plan_relationship(
         resolution=resolution,
         catalog=status_catalog,
     )
+    if sn_plan.authoritative_existing_update and not resolution_type:
+        original_action = STATUS_CONFLICT
+        resolution_type = BATCH_RESOLUTION_USE_IMPORTED
     decision.status_action = status_action
     decision.notes_action = sn_plan.notes_action
     decision.resolved_status = resolved_status
@@ -1556,6 +1583,7 @@ def _paginate(plan: ImportPlan, offset: int, limit: int) -> CrmImportDryRunRespo
         total_rows=plan.total_rows,
         offset=offset,
         limit=limit,
+        use_imported_status_for_existing=bool(plan.use_imported_status_for_existing),
         counts=CrmImportDryRunCounts(**plan.counts),
         rows=[_row_to_api(row) for row in sliced],
         status_catalog=list(plan.status_catalog or []),
@@ -1568,6 +1596,7 @@ def dry_run_crm_import(
     *,
     offset: int = 0,
     limit: int = MAX_DRY_RUN_PAGE,
+    use_imported_status_for_existing: bool = False,
 ) -> CrmImportDryRunResponse:
     if offset < 0 or limit < 1 or limit > MAX_DRY_RUN_PAGE:
         raise ValueError(INVALID_PAGING)
@@ -1575,5 +1604,10 @@ def dry_run_crm_import(
 
     with get_connection() as conn:
         conn.execute("PRAGMA query_only = ON")
-        plan = plan_crm_import_batch(conn, client_id=client_id, batch_id=batch_id)
+        plan = plan_crm_import_batch(
+            conn,
+            client_id=client_id,
+            batch_id=batch_id,
+            use_imported_status_for_existing=use_imported_status_for_existing,
+        )
     return _paginate(plan, offset, limit)
