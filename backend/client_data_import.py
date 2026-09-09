@@ -34,6 +34,12 @@ from crm_import_staging import (
     upload_crm_import,
     _safe_filename,
 )
+from client_data_history_notes import (
+    compute_history_event_hash,
+    history_event_already_present,
+    is_routine_marketing_send_note,
+    load_existing_history_dedupe_index,
+)
 from db import DATABASE_DIR, DB_PATH, get_connection
 from models import (
     ClientDataImportBatchView,
@@ -91,6 +97,8 @@ HISTORY_CANONICAL_FIELDS = frozenset(
         "history_attribution_evidence",
         "history_note_text",
         "history_event_hash",
+        "history_source_note_id",
+        "history_contact_no",
         "history_company_name",
         "history_status",
         "history_event_sequence",
@@ -290,6 +298,7 @@ def parse_history_with_mapping(
     content: bytes | str,
     mapping: dict[str, str],
     *,
+    client_id: int,
     closed_record_nos: set[str] | None = None,
 ) -> ParsedHistory:
     """Parse history CSV using Client Data Import destination→header mapping."""
@@ -327,26 +336,30 @@ def parse_history_with_mapping(
         if not note.strip():
             out.errors.append(f"History row {idx} is missing note text.")
             continue
-        event_hash = _row_get_mapped(raw, mapping, "history_event_hash")
-        if not event_hash:
-            event_hash = hashlib.sha256(
-                "|".join(
-                    [
-                        rn,
-                        _row_get_mapped(raw, mapping, "history_event_at"),
-                        _row_get_mapped(raw, mapping, "history_author"),
-                        _row_get_mapped(raw, mapping, "history_event_type"),
-                        _row_get_mapped(raw, mapping, "history_attribution"),
-                        note,
-                    ]
-                ).encode("utf-8")
-            ).hexdigest()
+        if is_routine_marketing_send_note(note):
+            out.excluded_marketing_events += 1
+            continue
+        contact_no = normalize_record_no(
+            _row_get_mapped(raw, mapping, "history_contact_no")
+        )
+        event_at = _row_get_mapped(raw, mapping, "history_event_at")
+        source_note_id = _row_get_mapped(raw, mapping, "history_source_note_id")
+        provided_hash = _row_get_mapped(raw, mapping, "history_event_hash")
+        event_hash = compute_history_event_hash(
+            client_id=int(client_id),
+            company_record_no=rn,
+            contact_key=contact_no,
+            note_text=note,
+            event_at=event_at,
+            source_note_id=source_note_id,
+            event_hash=provided_hash,
+        )
         attribution = (
             _row_get_mapped(raw, mapping, "history_attribution") or UNATTRIBUTED_LABEL
         )
         event = HistoryEventRow(
             record_no=rn,
-            event_at=_row_get_mapped(raw, mapping, "history_event_at"),
+            event_at=event_at,
             author=_row_get_mapped(raw, mapping, "history_author"),
             event_type=_row_get_mapped(raw, mapping, "history_event_type"),
             attribution=attribution,
@@ -359,6 +372,7 @@ def parse_history_with_mapping(
             company_name=_row_get_mapped(raw, mapping, "history_company_name"),
             event_sequence=_row_get_mapped(raw, mapping, "history_event_sequence"),
             source_row=idx,
+            contact_no=contact_no,
         )
         out.events.append(event)
         if len(note) > 2000:
@@ -429,6 +443,7 @@ def _planned_company_record_nos(plan) -> tuple[set[str], set[str]]:
 def _history_plan_counts(
     conn,
     *,
+    client_id: int,
     history: ParsedHistory | None,
     importable_record_nos: set[str],
     will_create_record_nos: set[str],
@@ -445,6 +460,7 @@ def _history_plan_counts(
         if existing is not None:
             company_ids[rn] = int(existing["id"])
 
+    dedupe_cache: dict[int, object] = {}
     for event in history.events:
         rn = event.record_no
         if rn not in importable_record_nos and rn not in will_create_record_nos:
@@ -460,18 +476,25 @@ def _history_plan_counts(
                 continue
         company_id = company_ids.get(rn)
         if company_id is None:
-            # Planned create — event will insert after confirm.
+            # Planned create — event will insert after confirm unless content
+            # matches something already present under another RN (rare).
             insert += 1
             continue
-        found = conn.execute(
-            """
-            SELECT 1 FROM company_shared_history_events
-            WHERE company_id = ? AND event_hash = ?
-            LIMIT 1
-            """,
-            (company_id, event.event_hash),
-        ).fetchone()
-        if found:
+        index = dedupe_cache.get(company_id)
+        if index is None:
+            index = load_existing_history_dedupe_index(
+                conn, client_id=int(client_id), company_id=int(company_id)
+            )
+            dedupe_cache[company_id] = index
+        if history_event_already_present(
+            index,  # type: ignore[arg-type]
+            client_id=int(client_id),
+            company_id=int(company_id),
+            contact_key=getattr(event, "contact_no", "") or "",
+            note_text=event.note_text,
+            event_at=event.event_at,
+            event_hash=event.event_hash,
+        ):
             already += 1
         else:
             insert += 1
@@ -480,6 +503,7 @@ def _history_plan_counts(
         already_present=already,
         invalid=invalid,
         unresolved=unresolved,
+        excluded_marketing=int(getattr(history, "excluded_marketing_events", 0) or 0),
     )
 
 
@@ -783,10 +807,14 @@ def _compute_dry_run(
             raise BatchNotReusable("Staged history file is missing.")
         content = Path(staging).read_bytes()
         history_parsed = parse_history_with_mapping(
-            content, history_mapping, closed_record_nos=closed_rns
+            content,
+            history_mapping,
+            client_id=int(client_id),
+            closed_record_nos=closed_rns,
         )
         history_counts = _history_plan_counts(
             conn,
+            client_id=int(client_id),
             history=history_parsed,
             importable_record_nos=importable_rns,
             will_create_record_nos=will_create,
@@ -808,6 +836,9 @@ def _compute_dry_run(
     history_excluded = int(getattr(history_parsed, "excluded_closed_events", 0) or 0) if history_parsed else 0
     if history_parsed is not None:
         history_counts.excluded_closed = history_excluded
+        history_counts.excluded_marketing = int(
+            getattr(history_parsed, "excluded_marketing_events", 0) or 0
+        )
 
     combined_fp = _combined_fingerprint(
         crm_fingerprint=plan.plan_fingerprint,
@@ -912,10 +943,12 @@ def _apply_history_events(
     """Insert company-scoped shared history. Returns (inserted, already_present).
 
     Resolves companies by Record No. on the same connection (sees in-txn creates).
-    Does not run DDL.
+    Skips exact duplicates (LeadMaster source id or content fingerprint).
+    Never overwrites existing notes. Does not run DDL.
     """
     now = _now()
     inserted = already = 0
+    dedupe_cache: dict[int, object] = {}
     for event in events:
         if event.record_no in closed_record_nos:
             continue
@@ -923,6 +956,23 @@ def _apply_history_events(
         if company is None:
             continue
         company_id = int(company["id"])
+        index = dedupe_cache.get(company_id)
+        if index is None:
+            index = load_existing_history_dedupe_index(
+                conn, client_id=int(client_id), company_id=company_id
+            )
+            dedupe_cache[company_id] = index
+        if history_event_already_present(
+            index,  # type: ignore[arg-type]
+            client_id=int(client_id),
+            company_id=company_id,
+            contact_key=getattr(event, "contact_no", "") or "",
+            note_text=event.note_text,
+            event_at=event.event_at,
+            event_hash=event.event_hash,
+        ):
+            already += 1
+            continue
         try:
             conn.execute(
                 """
@@ -952,10 +1002,13 @@ def _apply_history_events(
                 ),
             )
             inserted += 1
+            # Refresh dedupe view so later rows in this transaction see the insert.
+            dedupe_cache.pop(company_id, None)
             if fail_after == "after_history_insert" and inserted == 1:
                 raise RuntimeError("Injected failure after history insert.")
         except sqlite3.IntegrityError:
             already += 1
+            dedupe_cache.pop(company_id, None)
     return inserted, already
 
 
@@ -1122,7 +1175,10 @@ def confirm_client_data_import(
                     raise BatchNotReusable("History staging path is outside the controlled directory.")
                 content = path.read_bytes()
                 parsed = parse_history_with_mapping(
-                    content, history_mapping, closed_record_nos=closed_rns
+                    content,
+                    history_mapping,
+                    client_id=int(client_id),
+                    closed_record_nos=closed_rns,
                 )
                 if parsed.errors:
                     raise BatchNotReusable("History file has validation errors.")

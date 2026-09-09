@@ -3461,6 +3461,7 @@ class ClientDataImportHistoryCounts(BaseModel):
     invalid: int = 0
     unresolved: int = 0
     excluded_closed: int = 0
+    excluded_marketing: int = 0
 
 
 class ClientDataImportBatchView(BaseModel):

@@ -215,6 +215,7 @@ class HistoryEventRow:
     company_name: str = ""
     event_sequence: str = ""
     source_row: int = 0
+    contact_no: str = ""
 
 
 @dataclass
@@ -230,6 +231,7 @@ class ParsedProspects:
 class ParsedHistory:
     events: list[HistoryEventRow] = field(default_factory=list)
     excluded_closed_events: int = 0
+    excluded_marketing_events: int = 0
     long_note_count: int = 0
     unattributed_count: int = 0
     errors: list[str] = field(default_factory=list)
