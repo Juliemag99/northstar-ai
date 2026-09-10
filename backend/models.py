@@ -3458,6 +3458,7 @@ class ClientDataImportProspectsCounts(BaseModel):
 class ClientDataImportHistoryCounts(BaseModel):
     insert: int = 0
     already_present: int = 0
+    duplicate_within_batch: int = 0
     invalid: int = 0
     unresolved: int = 0
     excluded_closed: int = 0
@@ -3591,6 +3592,7 @@ class ClientDataImportConfirmResponse(BaseModel):
     notes_duplicate: int = 0
     history_inserted: int = 0
     history_already_present: int = 0
+    history_duplicate_within_batch: int = 0
     closed_excluded_count: int = 0
     created_company_count: int = 0
     reused_company_count: int = 0

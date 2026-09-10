@@ -547,6 +547,249 @@ def test_multi_event_csv_roundtrip_counts() -> None:
     print("PASS multi_event_csv_roundtrip_counts")
 
 
+def test_within_batch_dedupe_parity_and_rollback() -> None:
+    """Preview and confirm share within-batch company-scoped dedupe counts."""
+    from unittest.mock import patch
+
+    from client_data_import import _apply_history_events as real_apply
+
+    client_a, _client_b = _two_clients()
+    user_id, email, password = _create_admin()
+    _assign(user_id, client_a)
+    company_a = _seed_company(client_id=client_a, record_no="WB-100", name="Within Batch Co")
+    company_b = _seed_company(client_id=client_a, record_no="WB-200", name="Other Batch Co")
+    before = _freeze()
+
+    # Same company + text + blank timestamp on two contact rows → 1 insert, 1 within-batch.
+    # Different companies with same text → separate inserts.
+    # Same text with distinct nonblank timestamps → separate inserts.
+    content = _history_csv(
+        [
+            {
+                "Record No.": "WB-100",
+                "Contact No.": "C1",
+                "Company": "Within Batch Co",
+                "Notes": "Tasks added to contact - Pat Lee",
+                "Updated": "",
+                "Edited By": "Julie",
+            },
+            {
+                "Record No.": "WB-100",
+                "Contact No.": "C2",
+                "Company": "Within Batch Co",
+                "Notes": "Tasks added to contact - Pat Lee",
+                "Updated": "",
+                "Edited By": "Julie",
+            },
+            {
+                "Record No.": "WB-200",
+                "Contact No.": "C9",
+                "Company": "Other Batch Co",
+                "Notes": "Tasks added to contact - Pat Lee",
+                "Updated": "",
+                "Edited By": "Julie",
+            },
+            {
+                "Record No.": "WB-100",
+                "Contact No.": "C3",
+                "Company": "Within Batch Co",
+                "Notes": "Follow-up about conveyor quote",
+                "Updated": "1-Jan-2026 9:00 AM",
+                "Edited By": "Julie",
+            },
+            {
+                "Record No.": "WB-100",
+                "Contact No.": "C4",
+                "Company": "Within Batch Co",
+                "Notes": "Follow-up about conveyor quote",
+                "Updated": "2-Jan-2026 9:00 AM",
+                "Edited By": "Julie",
+            },
+        ]
+    )
+
+    with _client() as client:
+        csrf = _login(client, email, password)
+        up = client.post(
+            UPLOAD.format(client_id=client_a),
+            headers={CSRF_HEADER: csrf},
+            files={"history_file": ("history.csv", content, "text/csv")},
+        )
+        if up.status_code != 200:
+            _fail(f"upload {up.status_code} {up.text}")
+        batch_id = int(up.json()["batch"]["batch_id"])
+        mp = client.put(
+            MAPPING.format(client_id=client_a, batch_id=batch_id),
+            headers={CSRF_HEADER: csrf},
+            json={"history_mapping": _hist_map(), "prospects_mapping": {}},
+        )
+        if mp.status_code != 200:
+            _fail(f"map {mp.status_code} {mp.text}")
+        dry = client.post(
+            DRY_RUN.format(client_id=client_a, batch_id=batch_id),
+            headers={CSRF_HEADER: csrf},
+            json={},
+        )
+        if dry.status_code != 200:
+            _fail(f"dry {dry.status_code} {dry.text}")
+        preview = dry.json()
+        hist = preview["history"]
+        if int(hist.get("insert") or 0) != 4:
+            _fail(f"expected 4 inserts (1+1+1+1), got {hist}")
+        if int(hist.get("duplicate_within_batch") or 0) != 1:
+            _fail(f"expected 1 within-batch duplicate, got {hist}")
+        if int(hist.get("already_present") or 0) != 0:
+            _fail(f"expected 0 DB duplicates, got {hist}")
+        if not preview.get("confirm_allowed"):
+            _fail(f"confirm should be allowed: {hist}")
+
+        conf = client.post(
+            CONFIRM.format(client_id=client_a, batch_id=batch_id),
+            headers={CSRF_HEADER: csrf},
+            json={"confirm": True, "plan_fingerprint": preview["plan_fingerprint"]},
+        )
+        if conf.status_code != 200:
+            _fail(f"confirm {conf.status_code} {conf.text}")
+        result = conf.json()
+        if int(result.get("history_inserted") or 0) != 4:
+            _fail(f"confirm insert mismatch: {result}")
+        if int(result.get("history_already_present") or 0) != 0:
+            _fail(f"confirm already_present mismatch: {result}")
+        if int(result.get("history_duplicate_within_batch") or 0) != 1:
+            _fail(f"confirm within-batch mismatch: {result}")
+
+    with get_connection() as conn:
+        n_a = int(
+            conn.execute(
+                "SELECT COUNT(*) AS n FROM company_shared_history_events WHERE company_id=?",
+                (company_a,),
+            ).fetchone()["n"]
+        )
+        n_b = int(
+            conn.execute(
+                "SELECT COUNT(*) AS n FROM company_shared_history_events WHERE company_id=?",
+                (company_b,),
+            ).fetchone()["n"]
+        )
+    if n_a != 3:
+        _fail(f"company A should have 3 shared events, got {n_a}")
+    if n_b != 1:
+        _fail(f"company B should have 1 shared event, got {n_b}")
+
+    # Reimport: all prior inserts are already_present in DB.
+    with _client() as client:
+        csrf = _login(client, email, password)
+        up = client.post(
+            UPLOAD.format(client_id=client_a),
+            headers={CSRF_HEADER: csrf},
+            files={"history_file": ("history.csv", content, "text/csv")},
+        )
+        batch_id = int(up.json()["batch"]["batch_id"])
+        client.put(
+            MAPPING.format(client_id=client_a, batch_id=batch_id),
+            headers={CSRF_HEADER: csrf},
+            json={"history_mapping": _hist_map(), "prospects_mapping": {}},
+        )
+        dry = client.post(
+            DRY_RUN.format(client_id=client_a, batch_id=batch_id),
+            headers={CSRF_HEADER: csrf},
+            json={},
+        ).json()
+        hist = dry["history"]
+        # DB check runs before within-batch: every row matches stored content.
+        if int(hist.get("already_present") or 0) != 5:
+            _fail(f"reimport should mark all rows already_present via DB: {hist}")
+        if int(hist.get("duplicate_within_batch") or 0) != 0:
+            _fail(f"reimport within-batch should be 0 when DB already has content: {hist}")
+        if int(hist.get("insert") or 0) != 0:
+            _fail(f"reimport insert should be 0: {hist}")
+        conf = client.post(
+            CONFIRM.format(client_id=client_a, batch_id=batch_id),
+            headers={CSRF_HEADER: csrf},
+            json={"confirm": True, "plan_fingerprint": dry["plan_fingerprint"]},
+        )
+        if conf.status_code != 200:
+            _fail(f"reimport confirm {conf.status_code} {conf.text}")
+        body = conf.json()
+        if int(body.get("history_inserted") or 0) != 0:
+            _fail("reimport must not insert again")
+        if int(body.get("history_already_present") or 0) != 5:
+            _fail(f"reimport confirm already_present: {body}")
+        if int(body.get("history_duplicate_within_batch") or 0) != 0:
+            _fail(f"reimport confirm within-batch: {body}")
+
+    # Counter-parity failure rolls back atomically (no partial history write).
+    content2 = _history_csv(
+        [
+            {
+                "Record No.": "WB-100",
+                "Company": "Within Batch Co",
+                "Notes": "Unique note for rollback parity test.",
+                "Updated": "10-Jan-2026 8:00 AM",
+                "Edited By": "Julie",
+            }
+        ]
+    )
+    with get_connection() as conn:
+        before_hist = int(
+            conn.execute("SELECT COUNT(*) AS n FROM company_shared_history_events").fetchone()["n"]
+        )
+    with _client() as client:
+        csrf = _login(client, email, password)
+        up = client.post(
+            UPLOAD.format(client_id=client_a),
+            headers={CSRF_HEADER: csrf},
+            files={"history_file": ("rollback.csv", content2, "text/csv")},
+        )
+        batch_id = int(up.json()["batch"]["batch_id"])
+        client.put(
+            MAPPING.format(client_id=client_a, batch_id=batch_id),
+            headers={CSRF_HEADER: csrf},
+            json={"history_mapping": _hist_map(), "prospects_mapping": {}},
+        )
+        dry = client.post(
+            DRY_RUN.format(client_id=client_a, batch_id=batch_id),
+            headers={CSRF_HEADER: csrf},
+            json={},
+        ).json()
+        fp = dry["plan_fingerprint"]
+
+        def drift_apply(*args, **kwargs):
+            inserted, already, within = real_apply(*args, **kwargs)
+            return inserted + 1, already, within
+
+        with patch("client_data_import._apply_history_events", side_effect=drift_apply):
+            conf = client.post(
+                CONFIRM.format(client_id=client_a, batch_id=batch_id),
+                headers={CSRF_HEADER: csrf},
+                json={"confirm": True, "plan_fingerprint": fp},
+            )
+        if conf.status_code == 200:
+            _fail("drifted confirm must fail")
+        detail = (conf.json() or {}).get("detail") or conf.text
+        if "drift" not in str(detail).casefold():
+            _fail(f"expected drift error, got {detail}")
+
+    with get_connection() as conn:
+        after_hist = int(
+            conn.execute("SELECT COUNT(*) AS n FROM company_shared_history_events").fetchone()["n"]
+        )
+        status = conn.execute(
+            "SELECT status FROM client_data_import_batches WHERE id=?",
+            (batch_id,),
+        ).fetchone()["status"]
+    if after_hist != before_hist:
+        _fail("counter-parity failure must roll back history inserts")
+    if str(status) != "previewed":
+        _fail(f"failed confirm must leave batch previewed, got {status}")
+
+    after_masters = _freeze(FREEZE_CRM)
+    for t in FREEZE_CRM:
+        if after_masters[t] != before[t]:
+            _fail(f"within-batch tests mutated {t}")
+    print("PASS within_batch_dedupe_parity_and_rollback")
+
+
 def main() -> None:
     _prove_isolated()
     with get_connection() as conn:
@@ -561,6 +804,7 @@ def main() -> None:
     test_multi_event_csv_roundtrip_counts()
     test_history_only_upload_no_crm_batch_and_no_master_changes()
     test_idempotent_reimport_and_cross_client_isolation()
+    test_within_batch_dedupe_parity_and_rollback()
     print("ALL HISTORY-ONLY TESTS PASSED")
 
 

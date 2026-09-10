@@ -40,6 +40,7 @@ from crm_import_staging import (
 )
 from client_data_history_match import resolve_history_company
 from client_data_history_notes import (
+    MutableHistoryDedupeIndex,
     compute_history_event_hash,
     history_event_already_present,
     is_routine_marketing_send_note,
@@ -606,7 +607,7 @@ def _history_plan_counts(
     if history is None:
         return ClientDataImportHistoryCounts()
 
-    insert = already = invalid = unresolved = 0
+    insert = already = within_batch = invalid = unresolved = 0
     unmatched = ambiguous = matched_rn = matched_name = 0
     invalid = len(history.errors or [])
 
@@ -617,7 +618,10 @@ def _history_plan_counts(
             if existing is not None:
                 company_ids[rn] = int(existing["id"])
 
-    dedupe_cache: dict[int, object] = {}
+    # Company-scoped shared history: ignore source contact_no so the same
+    # company note is one event regardless of which contact row carried it.
+    db_cache: dict[int, object] = {}
+    batch_seen: dict[int, MutableHistoryDedupeIndex] = {}
     for event in history.events:
         if history_only:
             match = resolve_history_company(
@@ -664,29 +668,44 @@ def _history_plan_counts(
                 continue
             matched_rn += 1
 
-        index = dedupe_cache.get(company_id)
-        if index is None:
-            index = load_existing_history_dedupe_index(
+        db_index = db_cache.get(company_id)
+        if db_index is None:
+            db_index = load_existing_history_dedupe_index(
                 conn, client_id=int(client_id), company_id=int(company_id)
             )
-            dedupe_cache[company_id] = index
-        if history_event_already_present(
-            index,  # type: ignore[arg-type]
+            db_cache[company_id] = db_index
+        present_kwargs = dict(
             client_id=int(client_id),
             company_id=int(company_id),
-            contact_key=getattr(event, "contact_no", "") or "",
+            contact_key="",
             note_text=event.note_text,
             event_at=event.event_at,
             event_hash=event.event_hash,
-        ):
+        )
+        if history_event_already_present(db_index, **present_kwargs):  # type: ignore[arg-type]
             already += 1
-        else:
-            insert += 1
+            continue
+        seen = batch_seen.get(company_id)
+        if seen is None:
+            seen = MutableHistoryDedupeIndex.empty()
+            batch_seen[company_id] = seen
+        if history_event_already_present(seen.as_existing(), **present_kwargs):
+            within_batch += 1
+            continue
+        insert += 1
+        seen.register_shared_event(
+            client_id=int(client_id),
+            company_id=int(company_id),
+            note_text=event.note_text,
+            event_at=event.event_at,
+            event_hash=event.event_hash,
+        )
 
     needs_review = ambiguous + unmatched
     return ClientDataImportHistoryCounts(
         insert=insert,
         already_present=already,
+        duplicate_within_batch=within_batch,
         invalid=invalid,
         unresolved=unresolved,
         excluded_marketing=int(getattr(history, "excluded_marketing_events", 0) or 0),
@@ -1278,16 +1297,20 @@ def _apply_history_events(
     batch_id: int,
     fail_after: str | None = None,
     history_only: bool = False,
-) -> tuple[int, int]:
-    """Insert company-scoped shared history. Returns (inserted, already_present).
+) -> tuple[int, int, int]:
+    """Insert company-scoped shared history.
 
-    Resolves companies by Record No. (and history-only name fallback).
-    Skips exact duplicates. Never overwrites existing notes or rewrites
-    company.external_record_no. Does not create companies.
+    Returns (inserted, already_present_in_db, duplicate_within_batch).
+
+    Uses the same company-scoped identity and first-occurrence order as
+    ``_history_plan_counts`` (CSV/event list order; contact_no ignored).
+    Never overwrites existing notes or rewrites company.external_record_no.
+    Does not create companies.
     """
     now = _now()
-    inserted = already = 0
-    dedupe_cache: dict[int, object] = {}
+    inserted = already = within_batch = 0
+    db_cache: dict[int, object] = {}
+    batch_seen: dict[int, MutableHistoryDedupeIndex] = {}
     for event in events:
         if event.record_no and event.record_no in closed_record_nos:
             continue
@@ -1307,22 +1330,29 @@ def _apply_history_events(
             if company is None:
                 continue
             company_id = int(company["id"])
-        index = dedupe_cache.get(company_id)
-        if index is None:
-            index = load_existing_history_dedupe_index(
+        db_index = db_cache.get(company_id)
+        if db_index is None:
+            db_index = load_existing_history_dedupe_index(
                 conn, client_id=int(client_id), company_id=int(company_id)
             )
-            dedupe_cache[company_id] = index
-        if history_event_already_present(
-            index,  # type: ignore[arg-type]
+            db_cache[company_id] = db_index
+        present_kwargs = dict(
             client_id=int(client_id),
             company_id=int(company_id),
-            contact_key=getattr(event, "contact_no", "") or "",
+            contact_key="",
             note_text=event.note_text,
             event_at=event.event_at,
             event_hash=event.event_hash,
-        ):
+        )
+        if history_event_already_present(db_index, **present_kwargs):  # type: ignore[arg-type]
             already += 1
+            continue
+        seen = batch_seen.get(company_id)
+        if seen is None:
+            seen = MutableHistoryDedupeIndex.empty()
+            batch_seen[company_id] = seen
+        if history_event_already_present(seen.as_existing(), **present_kwargs):
+            within_batch += 1
             continue
         stored_rn = event.record_no or ""
         try:
@@ -1354,13 +1384,18 @@ def _apply_history_events(
                 ),
             )
             inserted += 1
-            dedupe_cache.pop(company_id, None)
+            seen.register_shared_event(
+                client_id=int(client_id),
+                company_id=int(company_id),
+                note_text=event.note_text,
+                event_at=event.event_at,
+                event_hash=event.event_hash,
+            )
             if fail_after == "after_history_insert" and inserted == 1:
                 raise RuntimeError("Injected failure after history insert.")
         except sqlite3.IntegrityError:
             already += 1
-            dedupe_cache.pop(company_id, None)
-    return inserted, already
+    return inserted, already, within_batch
 
 
 
@@ -1570,8 +1605,9 @@ def confirm_client_data_import(
 
             history_inserted = 0
             history_already = 0
+            history_within = 0
             if history_events:
-                history_inserted, history_already = _apply_history_events(
+                history_inserted, history_already, history_within = _apply_history_events(
                     conn,
                     client_id=client_id,
                     actor=actor,
@@ -1589,6 +1625,10 @@ def confirm_client_data_import(
             if int(history_counts.already_present or 0) != history_already:
                 raise BatchNotReusable(
                     "History already-present counter drifted between preview and confirm."
+                )
+            if int(history_counts.duplicate_within_batch or 0) != history_within:
+                raise BatchNotReusable(
+                    "History within-batch duplicate counter drifted between preview and confirm."
                 )
 
             now = _now()
@@ -1618,6 +1658,7 @@ def confirm_client_data_import(
                 notes_duplicate=int(crm_result.get("notes_duplicate_count") or 0),
                 history_inserted=history_inserted,
                 history_already_present=history_already,
+                history_duplicate_within_batch=history_within,
                 closed_excluded_count=int(dry.closed_excluded_count or 0),
                 created_company_count=int(crm_result.get("created_company_count") or 0),
                 reused_company_count=int(crm_result.get("reused_company_count") or 0),
@@ -1636,6 +1677,7 @@ def confirm_client_data_import(
                     "history": {
                         "insert": history_inserted,
                         "already_present": history_already,
+                        "duplicate_within_batch": history_within,
                         "dry_run": history_counts.model_dump(),
                     },
                     "prospects_preview": dry.prospects.model_dump() if dry.prospects else {},

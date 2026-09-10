@@ -175,6 +175,60 @@ class ExistingHistoryDedupeIndex:
     undated_note_norms: frozenset[str]
 
 
+@dataclass(slots=True)
+class MutableHistoryDedupeIndex:
+    """In-memory dedupe keys for within-batch first-occurrence tracking.
+
+    Key rules mirror shared-history rows loaded by
+    ``load_existing_history_dedupe_index`` (company-scoped; contact ignored).
+    """
+
+    source_ids: set[str]
+    content_fingerprints: set[str]
+    undated_note_norms: set[str]
+
+    @classmethod
+    def empty(cls) -> "MutableHistoryDedupeIndex":
+        return cls(source_ids=set(), content_fingerprints=set(), undated_note_norms=set())
+
+    def as_existing(self) -> ExistingHistoryDedupeIndex:
+        return ExistingHistoryDedupeIndex(
+            source_ids=frozenset(self.source_ids),
+            content_fingerprints=frozenset(self.content_fingerprints),
+            undated_note_norms=frozenset(self.undated_note_norms),
+        )
+
+    def register_shared_event(
+        self,
+        *,
+        client_id: int,
+        company_id: int,
+        note_text: object | None,
+        event_at: object | None,
+        event_hash: str,
+    ) -> None:
+        """Record keys as if this shared-history row were already stored."""
+        eh = blank(event_hash)
+        if eh:
+            self.source_ids.add(eh)
+        note_norm = normalize_history_note_text(note_text)
+        at_norm = normalize_history_event_at(event_at)
+        if not note_norm:
+            return
+        self.content_fingerprints.add(
+            history_content_fingerprint(
+                client_id=int(client_id),
+                company_id=int(company_id),
+                company_record_no="",
+                contact_key="",
+                note_text=note_text,
+                event_at=event_at,
+            )
+        )
+        if not at_norm:
+            self.undated_note_norms.add(note_norm)
+
+
 def load_existing_history_dedupe_index(
     conn,
     *,

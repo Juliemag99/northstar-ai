@@ -1042,13 +1042,18 @@ export default function AdministrationClientDataImport({
               </dd>
             </div>
             <div>
-              <dt>History inserted / already present</dt>
+              <dt>History inserted / already present / within-batch dup</dt>
               <dd>
                 {countValue(confirmResult as Record<string, number | undefined>, 'history_inserted')}{' '}
                 /{' '}
                 {countValue(
                   confirmResult as Record<string, number | undefined>,
                   'history_already_present',
+                )}{' '}
+                /{' '}
+                {countValue(
+                  confirmResult as Record<string, number | undefined>,
+                  'history_duplicate_within_batch',
                 )}
               </dd>
             </div>
@@ -1315,10 +1320,11 @@ export default function AdministrationClientDataImport({
                   </dd>
                 </div>
                 <div>
-                  <dt>History insert / already present / invalid / unresolved</dt>
+                  <dt>History insert / already present / within-batch dup / invalid / unresolved</dt>
                   <dd>
                     {countValue(historyCounts, 'insert')} /{' '}
                     {countValue(historyCounts, 'already_present')} /{' '}
+                    {countValue(historyCounts, 'duplicate_within_batch')} /{' '}
                     {countValue(historyCounts, 'invalid')} /{' '}
                     {countValue(historyCounts, 'unresolved')}
                   </dd>

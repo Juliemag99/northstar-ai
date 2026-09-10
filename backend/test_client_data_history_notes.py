@@ -132,7 +132,7 @@ class FingerprintAndDedupeTests(unittest.TestCase):
                 event_hash=source_id,
                 contact_no="C1",
             )
-            inserted, already = _apply_history_events(
+            inserted, already, within = _apply_history_events(
                 conn,
                 client_id=self.client_id,
                 actor=self.actor,
@@ -141,8 +141,8 @@ class FingerprintAndDedupeTests(unittest.TestCase):
                 batch_id=1,
             )
             conn.commit()
-            self.assertEqual((inserted, already), (1, 0))
-            inserted2, already2 = _apply_history_events(
+            self.assertEqual((inserted, already, within), (1, 0, 0))
+            inserted2, already2, within2 = _apply_history_events(
                 conn,
                 client_id=self.client_id,
                 actor=self.actor,
@@ -151,7 +151,7 @@ class FingerprintAndDedupeTests(unittest.TestCase):
                 batch_id=1,
             )
             conn.commit()
-            self.assertEqual((inserted2, already2), (0, 1))
+            self.assertEqual((inserted2, already2, within2), (0, 1, 0))
             n = conn.execute(
                 "SELECT COUNT(*) AS n FROM company_shared_history_events WHERE company_id=?",
                 (self.company_id,),
@@ -208,7 +208,7 @@ class FingerprintAndDedupeTests(unittest.TestCase):
                 contact_no="C1",
             )
             self.assertEqual(h1, h2)
-            inserted, already = _apply_history_events(
+            inserted, already, within = _apply_history_events(
                 conn,
                 client_id=self.client_id,
                 actor=self.actor,
@@ -217,7 +217,7 @@ class FingerprintAndDedupeTests(unittest.TestCase):
                 batch_id=1,
             )
             conn.commit()
-            self.assertEqual((inserted, already), (0, 1))
+            self.assertEqual((inserted, already, within), (0, 1, 0))
 
     def test_same_text_different_dates_both_insert(self):
         with get_connection() as conn:
@@ -243,7 +243,7 @@ class FingerprintAndDedupeTests(unittest.TestCase):
                         ),
                     )
                 )
-            inserted, already = _apply_history_events(
+            inserted, already, within = _apply_history_events(
                 conn,
                 client_id=self.client_id,
                 actor=self.actor,
@@ -252,9 +252,10 @@ class FingerprintAndDedupeTests(unittest.TestCase):
                 batch_id=1,
             )
             conn.commit()
-            self.assertEqual((inserted, already), (2, 0))
+            self.assertEqual((inserted, already, within), (2, 0, 0))
 
-    def test_same_text_different_contacts_both_insert(self):
+    def test_same_text_different_contacts_company_scoped_dedupe(self):
+        """Shared company history ignores source contact_no for identity."""
         with get_connection() as conn:
             note = "Sent brochure PDF"
             at = "2024-05-01T10:00:00Z"
@@ -281,7 +282,7 @@ class FingerprintAndDedupeTests(unittest.TestCase):
                     )
                 )
             self.assertNotEqual(events[0].event_hash, events[1].event_hash)
-            inserted, already = _apply_history_events(
+            inserted, already, within = _apply_history_events(
                 conn,
                 client_id=self.client_id,
                 actor=self.actor,
@@ -290,7 +291,12 @@ class FingerprintAndDedupeTests(unittest.TestCase):
                 batch_id=1,
             )
             conn.commit()
-            self.assertEqual((inserted, already), (2, 0))
+            self.assertEqual((inserted, already, within), (1, 0, 1))
+            n = conn.execute(
+                "SELECT COUNT(*) AS n FROM company_shared_history_events WHERE company_id=?",
+                (self.company_id,),
+            ).fetchone()["n"]
+            self.assertEqual(int(n), 1)
 
     def test_matches_legacy_note_without_source_id(self):
         with get_connection() as conn:
@@ -357,7 +363,7 @@ class FingerprintAndDedupeTests(unittest.TestCase):
                 csv_text, mapping, client_id=self.client_id
             )
             self.assertEqual(len(parsed.events), 2)
-            i1, a1 = _apply_history_events(
+            i1, a1, w1 = _apply_history_events(
                 conn,
                 client_id=self.client_id,
                 actor=self.actor,
@@ -366,11 +372,11 @@ class FingerprintAndDedupeTests(unittest.TestCase):
                 batch_id=1,
             )
             conn.commit()
-            self.assertEqual((i1, a1), (2, 0))
+            self.assertEqual((i1, a1, w1), (2, 0, 0))
             parsed2 = parse_history_with_mapping(
                 csv_text, mapping, client_id=self.client_id
             )
-            i2, a2 = _apply_history_events(
+            i2, a2, w2 = _apply_history_events(
                 conn,
                 client_id=self.client_id,
                 actor=self.actor,
@@ -379,7 +385,7 @@ class FingerprintAndDedupeTests(unittest.TestCase):
                 batch_id=2,
             )
             conn.commit()
-            self.assertEqual((i2, a2), (0, 2))
+            self.assertEqual((i2, a2, w2), (0, 2, 0))
             n = conn.execute(
                 "SELECT COUNT(*) AS n FROM company_shared_history_events WHERE company_id=?",
                 (self.company_id,),

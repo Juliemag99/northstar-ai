@@ -100,6 +100,7 @@ export type ClientDataImportProspectsCounts = {
 export type ClientDataImportHistoryCounts = {
   insert?: number
   already_present?: number
+  duplicate_within_batch?: number
   invalid?: number
   unresolved?: number
   [key: string]: number | undefined
@@ -146,6 +147,7 @@ export type ClientDataImportConfirmResponse = {
   notes_duplicate?: number
   history_inserted?: number
   history_already_present?: number
+  history_duplicate_within_batch?: number
   closed_excluded_count?: number
   created_company_count?: number
   reused_company_count?: number
@@ -340,6 +342,7 @@ export function historyCountsOf(
   return {
     insert: flat.insert,
     already_present: flat.already_present,
+    duplicate_within_batch: flat.duplicate_within_batch,
     invalid: flat.invalid,
     unresolved: flat.unresolved,
     ...(plan.history || {}),
