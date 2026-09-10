@@ -529,6 +529,12 @@ export async function fetchSharedHistory(
   const distinctLegacyItems = Array.isArray(raw.distinct_legacy_items)
     ? raw.distinct_legacy_items.map(mapItem)
     : items.filter((i) => i.section === 'distinct_legacy' || i.item_type === 'legacy_note')
+  const sharedCompanyHistoryItems = Array.isArray(raw.shared_company_history_items)
+    ? raw.shared_company_history_items.map(mapItem)
+    : items.filter(
+        (i) =>
+          i.section === 'shared_company_history' || i.item_type === 'shared_history_event',
+      )
   return {
     company_id: asNumber(raw.company_id),
     company_name: pick(raw, 'company_name'),
@@ -542,6 +548,7 @@ export async function fetchSharedHistory(
     northstar_items: northstarItems,
     shared_legacy_items: sharedLegacyItems,
     distinct_legacy_items: distinctLegacyItems,
+    shared_company_history_items: sharedCompanyHistoryItems,
     count: asNumber(raw.count, items.length),
   }
 }
