@@ -108,4 +108,48 @@ describe('fetchSharedHistory', () => {
     expect(result.shared_company_history_items).toHaveLength(1)
     expect(result.shared_company_history_items?.[0]?.body).toBe('Fallback body')
   })
+
+  it('preserves a full 198-item shared_company_history payload', async () => {
+    const items = Array.from({ length: 198 }, (_, i) => ({
+      item_key: `shared-history-${i + 1}`,
+      item_type: 'shared_history_event',
+      section: 'shared_company_history',
+      legacy_scope: 'shared',
+      client_id: 0,
+      client_code: '',
+      client_name: 'Shared',
+      external_record_no: '1325886',
+      title: 'Shared history',
+      body: `Note ${i + 1}`,
+      event_at: '',
+      created_by: '',
+      activity_type: 'Shared history',
+      milestone_type: '',
+      source_table: 'company_shared_history_events',
+      source_id: i + 1,
+      shared_client_names: [],
+    }))
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({
+          company_id: 751,
+          company_name: 'Altec Industries Inc',
+          can_view_cross_client: true,
+          filter_client_id: null,
+          clients: [],
+          items,
+          northstar_items: [],
+          shared_legacy_items: [],
+          distinct_legacy_items: [],
+          shared_company_history_items: items,
+          count: 198,
+        }),
+      ),
+    )
+
+    const result = await fetchSharedHistory('1325886', { client_id: 2 })
+    expect(result.shared_company_history_items).toHaveLength(198)
+    expect(result.count).toBe(198)
+  })
 })
