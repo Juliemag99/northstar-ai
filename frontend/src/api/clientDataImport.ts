@@ -212,13 +212,16 @@ function basePath(clientId: number, batchId?: number): string {
 
 export async function uploadClientDataImport(
   clientId: number,
-  prospectsFile: File,
+  prospectsFile?: File | null,
   historyFile?: File | null,
   worksheet = '',
 ): Promise<ClientDataImportUploadResult> {
   requirePositiveIds(clientId)
+  if (!prospectsFile && !historyFile) {
+    throw new Error('Upload a prospects spreadsheet and/or a history CSV.')
+  }
   const form = new FormData()
-  form.append('prospects_file', prospectsFile)
+  if (prospectsFile) form.append('prospects_file', prospectsFile)
   if (historyFile) form.append('history_file', historyFile)
   if (worksheet.trim()) form.append('worksheet', worksheet.trim())
   const response = await apiFetch(basePath(clientId), { method: 'POST', body: form })

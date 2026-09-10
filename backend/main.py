@@ -3048,14 +3048,18 @@ def confirm_shared_note_history_import_api(
 async def upload_admin_client_data_import_api(
     client_id: int,
     request: Request,
-    prospects_file: UploadFile = File(...),
+    prospects_file: UploadFile | None = File(default=None),
     history_file: UploadFile | None = File(default=None),
     worksheet: str = Form(default=""),
 ):
     actor = _require_admin_client(request, client_id)
-    prospects_content = await prospects_file.read(MAX_FILE_BYTES + 1)
-    if len(prospects_content) > MAX_FILE_BYTES:
-        raise HTTPException(status_code=400, detail="This file is too large to upload.")
+    prospects_content = None
+    prospects_name = None
+    if prospects_file is not None and _blank_filename(prospects_file.filename):
+        prospects_content = await prospects_file.read(MAX_FILE_BYTES + 1)
+        if len(prospects_content) > MAX_FILE_BYTES:
+            raise HTTPException(status_code=400, detail="This file is too large to upload.")
+        prospects_name = prospects_file.filename or "prospects.csv"
     history_content = None
     history_name = None
     if history_file is not None and _blank_filename(history_file.filename):
@@ -3067,7 +3071,7 @@ async def upload_admin_client_data_import_api(
         return upload_client_data_import(
             client_id=client_id,
             actor=actor,
-            prospects_filename=prospects_file.filename or "prospects.csv",
+            prospects_filename=prospects_name,
             prospects_content=prospects_content,
             history_filename=history_name,
             history_content=history_content,

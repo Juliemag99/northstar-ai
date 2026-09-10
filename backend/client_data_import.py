@@ -1,8 +1,11 @@
 """Client Data Import orchestrator.
 
 Composes Company & contact CRM import staging/plan/confirm with optional
-shared note-history CSV staging. Preview/mapping/dry-run write only staging
-and audit tables — never companies, contacts, or relationships.
+shared note-history CSV staging, or history-only mode that never creates a
+CRM prospects batch and never mutates master CRM rows.
+
+Preview/mapping/dry-run write only staging and audit tables — never
+companies, contacts, or relationships.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from crm_import_confirm import apply_crm_import_plan_on_connection
@@ -34,6 +38,7 @@ from crm_import_staging import (
     upload_crm_import,
     _safe_filename,
 )
+from client_data_history_match import resolve_history_company
 from client_data_history_notes import (
     compute_history_event_hash,
     history_event_already_present,
@@ -70,6 +75,9 @@ STATUS_CONFIRMED = "confirmed"
 STATUS_CANCELLED = "cancelled"
 STATUS_FAILED = "failed"
 
+IMPORT_MODE_FULL = "full"
+IMPORT_MODE_HISTORY_ONLY = "history_only"
+
 IMPORT_ROOT = DATABASE_DIR / "client_data_imports"
 
 
@@ -79,6 +87,8 @@ def _import_root() -> Path:
         return Path(DB_PATH).resolve().parent / "client_data_imports"
     except Exception:
         return IMPORT_ROOT
+
+
 HISTORY_SAMPLE_ROWS = 10
 
 CLOSED_POLICY_TEXT = (
@@ -96,6 +106,7 @@ HISTORY_CANONICAL_FIELDS = frozenset(
         "history_attribution",
         "history_attribution_evidence",
         "history_note_text",
+        "history_contact_note",
         "history_event_hash",
         "history_source_note_id",
         "history_contact_no",
@@ -106,7 +117,10 @@ HISTORY_CANONICAL_FIELDS = frozenset(
     }
 )
 
-HISTORY_REQUIRED_FIELDS = frozenset({"history_record_no", "history_note_text"})
+HISTORY_REQUIRED_FIELDS = frozenset({"history_note_text"})
+HISTORY_REQUIRED_FIELDS_WITH_RECORD = frozenset(
+    {"history_record_no", "history_note_text"}
+)
 
 _FP_RE = re.compile(r"^[a-f0-9]{64}$")
 
@@ -115,11 +129,16 @@ MAPPING_UNKNOWN_HISTORY = "That history destination field is not supported."
 MAPPING_HISTORY_HEADER_MISSING = "That history source column is not in this spreadsheet."
 MAPPING_HISTORY_EMPTY = "Each mapped history column must have a name."
 MAPPING_HISTORY_DUPLICATE = "Each history source column can map to only one field."
-MAPPING_HISTORY_REQUIRED = "Map History record No. and History note text before continuing."
+MAPPING_HISTORY_REQUIRED = (
+    "Map History note text (and History record No. or History company name) before continuing."
+)
 HISTORY_FILE_REQUIRED_FOR_MAPPING = "This import has no history file to map."
+HISTORY_FILE_REQUIRED = "Upload a history CSV for history-only Client Data Import."
 HISTORY_TOO_LARGE = "This history file is too large to upload."
 HISTORY_NOT_CSV = "Upload a CSV history file."
 BATCH_NOT_REUSABLE = "This import batch can no longer be previewed."
+PROSPECTS_OR_HISTORY_REQUIRED = "Upload a prospects spreadsheet and/or a history CSV."
+
 
 
 def _blank(value: object | None) -> str:
@@ -160,7 +179,8 @@ def ensure_client_data_import_schema(conn=None) -> None:
             CREATE TABLE IF NOT EXISTS client_data_import_batches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 client_id INTEGER NOT NULL,
-                crm_batch_id INTEGER NOT NULL,
+                crm_batch_id INTEGER,
+                import_mode TEXT NOT NULL DEFAULT 'full',
                 status TEXT NOT NULL DEFAULT 'previewed',
                 history_original_filename TEXT NOT NULL DEFAULT '',
                 history_sha256 TEXT NOT NULL DEFAULT '',
@@ -194,11 +214,102 @@ def ensure_client_data_import_schema(conn=None) -> None:
                 ON client_data_import_batches(crm_batch_id);
             """
         )
+        _migrate_client_data_import_history_only(conn)
         if owns:
             conn.commit()
     finally:
         if owns:
             conn.close()
+
+
+def _cdi_columns(conn) -> dict[str, bool]:
+    rows = conn.execute("PRAGMA table_info(client_data_import_batches)").fetchall()
+    return {str(r[1]): (int(r[3]) == 1) for r in rows}
+
+
+def _migrate_client_data_import_history_only(conn) -> None:
+    """Add import_mode and allow nullable crm_batch_id on existing DBs."""
+    exists = conn.execute(
+        """
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = 'client_data_import_batches'
+        """
+    ).fetchone()
+    if exists is None:
+        return
+    cols = _cdi_columns(conn)
+    if "import_mode" not in cols:
+        conn.execute(
+            """
+            ALTER TABLE client_data_import_batches
+            ADD COLUMN import_mode TEXT NOT NULL DEFAULT 'full'
+            """
+        )
+        cols = _cdi_columns(conn)
+    # Rebuild when crm_batch_id is still NOT NULL so history-only rows can omit it.
+    if cols.get("crm_batch_id") is True:
+        conn.executescript(
+            """
+            CREATE TABLE client_data_import_batches__hist_only (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_id INTEGER NOT NULL,
+                crm_batch_id INTEGER,
+                import_mode TEXT NOT NULL DEFAULT 'full',
+                status TEXT NOT NULL DEFAULT 'previewed',
+                history_original_filename TEXT NOT NULL DEFAULT '',
+                history_sha256 TEXT NOT NULL DEFAULT '',
+                history_file_size_bytes INTEGER NOT NULL DEFAULT 0,
+                history_staging_path TEXT NOT NULL DEFAULT '',
+                history_headers_json TEXT NOT NULL DEFAULT '[]',
+                history_mapping_json TEXT NOT NULL DEFAULT '{}',
+                history_row_count INTEGER NOT NULL DEFAULT 0,
+                plan_fingerprint TEXT NOT NULL DEFAULT '',
+                preview_json TEXT NOT NULL DEFAULT '',
+                result_json TEXT NOT NULL DEFAULT '',
+                staging_cleanup_status TEXT NOT NULL DEFAULT '',
+                staging_cleanup_error TEXT NOT NULL DEFAULT '',
+                staging_cleanup_at TEXT NOT NULL DEFAULT '',
+                uploaded_by_user_id INTEGER,
+                uploaded_by_name TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '',
+                confirmed_at TEXT NOT NULL DEFAULT '',
+                confirmed_by_user_id INTEGER,
+                closed_excluded_count INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE,
+                FOREIGN KEY (crm_batch_id) REFERENCES crm_import_batches(id) ON DELETE CASCADE,
+                FOREIGN KEY (uploaded_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+                FOREIGN KEY (confirmed_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+            );
+            INSERT INTO client_data_import_batches__hist_only (
+                id, client_id, crm_batch_id, import_mode, status,
+                history_original_filename, history_sha256, history_file_size_bytes,
+                history_staging_path, history_headers_json, history_mapping_json,
+                history_row_count, plan_fingerprint, preview_json, result_json,
+                staging_cleanup_status, staging_cleanup_error, staging_cleanup_at,
+                uploaded_by_user_id, uploaded_by_name, created_at, updated_at,
+                confirmed_at, confirmed_by_user_id, closed_excluded_count
+            )
+            SELECT
+                id, client_id, crm_batch_id,
+                COALESCE(NULLIF(import_mode, ''), 'full'),
+                status,
+                history_original_filename, history_sha256, history_file_size_bytes,
+                history_staging_path, history_headers_json, history_mapping_json,
+                history_row_count, plan_fingerprint, preview_json, result_json,
+                staging_cleanup_status, staging_cleanup_error, staging_cleanup_at,
+                uploaded_by_user_id, uploaded_by_name, created_at, updated_at,
+                confirmed_at, confirmed_by_user_id, closed_excluded_count
+            FROM client_data_import_batches;
+            DROP TABLE client_data_import_batches;
+            ALTER TABLE client_data_import_batches__hist_only
+                RENAME TO client_data_import_batches;
+            CREATE INDEX IF NOT EXISTS idx_client_data_import_batches_client
+                ON client_data_import_batches(client_id, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_client_data_import_batches_crm
+                ON client_data_import_batches(crm_batch_id);
+            """
+        )
 
 
 def _require_admin(actor: NorthStarUser, client_id: int) -> None:
@@ -281,8 +392,12 @@ def _normalize_history_mapping(
         used[exact] = dest
         normalized[dest] = exact
     if normalized:
-        missing = [f for f in HISTORY_REQUIRED_FIELDS if f not in normalized]
-        if missing:
+        if "history_note_text" not in normalized and "history_contact_note" not in normalized:
+            raise ValueError(MAPPING_HISTORY_REQUIRED)
+        if (
+            "history_record_no" not in normalized
+            and "history_company_name" not in normalized
+        ):
             raise ValueError(MAPPING_HISTORY_REQUIRED)
     return normalized
 
@@ -292,6 +407,34 @@ def _row_get_mapped(row: dict[str, str], mapping: dict[str, str], field: str) ->
     if not header:
         return ""
     return _blank(row.get(header))
+
+
+def _row_get_raw_mapped(row: dict[str, str], mapping: dict[str, str], field: str) -> str:
+    header = mapping.get(field)
+    if not header:
+        return ""
+    value = row.get(header)
+    return "" if value is None else str(value)
+
+
+def _row_is_fully_blank(row: dict[str, str]) -> bool:
+    return not any(_blank(v) for v in row.values())
+
+
+def _resolve_note_text(raw: dict[str, str], mapping: dict[str, str]) -> str:
+    note = _row_get_raw_mapped(raw, mapping, "history_note_text")
+    note = note.replace("\r\n", "\n").replace("\r", "\n")
+    if note.strip():
+        return note
+    contact_note = _row_get_raw_mapped(raw, mapping, "history_contact_note")
+    if not contact_note.strip():
+        # Brown exports often include Contact_Note even when not mapped.
+        for key, value in raw.items():
+            if _blank(key).casefold().replace(" ", "") == "contact_note":
+                contact_note = "" if value is None else str(value)
+                break
+    contact_note = contact_note.replace("\r\n", "\n").replace("\r", "\n")
+    return contact_note
 
 
 def parse_history_with_mapping(
@@ -308,33 +451,44 @@ def parse_history_with_mapping(
     if not mapping:
         out.errors.append(MAPPING_HISTORY_REQUIRED)
         return out
-    missing = [f for f in HISTORY_REQUIRED_FIELDS if f not in mapping]
-    if missing:
+    if "history_note_text" not in mapping and "history_contact_note" not in mapping:
+        out.errors.append(MAPPING_HISTORY_REQUIRED)
+        return out
+    if "history_record_no" not in mapping and "history_company_name" not in mapping:
         out.errors.append(MAPPING_HISTORY_REQUIRED)
         return out
 
     closed = set(closed_record_nos or set())
     rows = 0
-    for idx, raw in enumerate(reader, start=2):
+    for idx, raw_in in enumerate(reader, start=2):
         rows += 1
         if rows > MAX_HISTORY_ROWS:
             out.errors.append(f"History CSV exceeds {MAX_HISTORY_ROWS} rows.")
             break
-        rn = normalize_record_no(_row_get_mapped(raw, mapping, "history_record_no"))
-        if not rn:
-            out.errors.append(f"History row {idx} is missing Record No.")
+        raw = {
+            _blank(k): ("" if v is None else str(v))
+            for k, v in raw_in.items()
+            if _blank(k)
+        }
+        if _row_is_fully_blank(raw):
+            out.blank_rows_skipped += 1
             continue
+        rn = normalize_record_no(_row_get_mapped(raw, mapping, "history_record_no"))
+        company_name = _row_get_mapped(raw, mapping, "history_company_name")
         row_status = _row_get_mapped(raw, mapping, "history_status")
-        if is_closed_status(row_status) or rn in closed:
-            closed.add(rn)
+        if is_closed_status(row_status) or (rn and rn in closed):
+            if rn:
+                closed.add(rn)
             out.excluded_closed_events += 1
             continue
-        note_header = mapping.get("history_note_text")
-        note_raw = raw.get(note_header) if note_header else None
-        note = "" if note_raw is None else str(note_raw)
-        note = note.replace("\r\n", "\n").replace("\r", "\n")
+        note = _resolve_note_text(raw, mapping)
         if not note.strip():
-            out.errors.append(f"History row {idx} is missing note text.")
+            out.blank_history_skipped += 1
+            continue
+        if not rn and not company_name:
+            out.errors.append(
+                f"History row {idx} is missing Record No. and company name."
+            )
             continue
         if is_routine_marketing_send_note(note):
             out.excluded_marketing_events += 1
@@ -369,7 +523,7 @@ def parse_history_with_mapping(
             source_file=_row_get_mapped(raw, mapping, "history_source_file"),
             note_text=note,
             event_hash=event_hash,
-            company_name=_row_get_mapped(raw, mapping, "history_company_name"),
+            company_name=company_name,
             event_sequence=_row_get_mapped(raw, mapping, "history_event_sequence"),
             source_row=idx,
             contact_no=contact_no,
@@ -447,39 +601,69 @@ def _history_plan_counts(
     history: ParsedHistory | None,
     importable_record_nos: set[str],
     will_create_record_nos: set[str],
+    history_only: bool = False,
 ) -> ClientDataImportHistoryCounts:
     if history is None:
         return ClientDataImportHistoryCounts()
-    if history.errors:
-        return ClientDataImportHistoryCounts(invalid=len(history.errors))
 
     insert = already = invalid = unresolved = 0
+    unmatched = ambiguous = matched_rn = matched_name = 0
+    invalid = len(history.errors or [])
+
     company_ids: dict[str, int] = {}
-    for rn in importable_record_nos | will_create_record_nos:
-        existing = _company_by_record_no(conn, rn)
-        if existing is not None:
-            company_ids[rn] = int(existing["id"])
+    if not history_only:
+        for rn in importable_record_nos | will_create_record_nos:
+            existing = _company_by_record_no(conn, rn)
+            if existing is not None:
+                company_ids[rn] = int(existing["id"])
 
     dedupe_cache: dict[int, object] = {}
     for event in history.events:
-        rn = event.record_no
-        if rn not in importable_record_nos and rn not in will_create_record_nos:
-            # May still resolve to an existing master company that is not in this
-            # client's importable set — treat as unresolved for this client import.
-            if rn not in company_ids:
-                existing = _company_by_record_no(conn, rn)
-                if existing is None:
-                    unresolved += 1
-                    continue
-                # Existing company but not part of this import plan → unresolved.
-                unresolved += 1
+        if history_only:
+            match = resolve_history_company(
+                conn,
+                client_id=int(client_id),
+                record_no=event.record_no,
+                company_name=event.company_name,
+            )
+            event.match_status = match.status
+            event.match_method = match.method
+            event.company_id = match.company_id
+            if match.status == "ambiguous":
+                ambiguous += 1
+                event.needs_review = True
+                event.review_reason = "ambiguous_company"
                 continue
-        company_id = company_ids.get(rn)
-        if company_id is None:
-            # Planned create — event will insert after confirm unless content
-            # matches something already present under another RN (rare).
-            insert += 1
-            continue
+            if match.status != "matched" or match.company_id is None:
+                unmatched += 1
+                unresolved += 1
+                event.needs_review = True
+                event.review_reason = "unmatched_company"
+                continue
+            if match.method == "record_no":
+                matched_rn += 1
+            elif match.method == "company_name":
+                matched_name += 1
+            company_id = int(match.company_id)
+        else:
+            rn = event.record_no
+            if rn not in importable_record_nos and rn not in will_create_record_nos:
+                if rn not in company_ids:
+                    existing = _company_by_record_no(conn, rn)
+                    if existing is None:
+                        unresolved += 1
+                        unmatched += 1
+                        continue
+                    unresolved += 1
+                    unmatched += 1
+                    continue
+            company_id = company_ids.get(rn)
+            if company_id is None:
+                # Planned create — event will insert after confirm.
+                insert += 1
+                continue
+            matched_rn += 1
+
         index = dedupe_cache.get(company_id)
         if index is None:
             index = load_existing_history_dedupe_index(
@@ -498,12 +682,21 @@ def _history_plan_counts(
             already += 1
         else:
             insert += 1
+
+    needs_review = ambiguous + unmatched
     return ClientDataImportHistoryCounts(
         insert=insert,
         already_present=already,
         invalid=invalid,
         unresolved=unresolved,
         excluded_marketing=int(getattr(history, "excluded_marketing_events", 0) or 0),
+        blank_rows=int(getattr(history, "blank_rows_skipped", 0) or 0),
+        blank_history=int(getattr(history, "blank_history_skipped", 0) or 0),
+        unmatched_companies=unmatched,
+        ambiguous_companies=ambiguous,
+        matched_by_record_no=matched_rn,
+        matched_by_name=matched_name,
+        needs_review=needs_review,
     )
 
 
@@ -513,8 +706,10 @@ def _combined_fingerprint(
     history_sha256: str,
     history_mapping: dict[str, str],
     closed_excluded_count: int,
+    import_mode: str = IMPORT_MODE_FULL,
 ) -> str:
     payload = {
+        "import_mode": import_mode or IMPORT_MODE_FULL,
         "crm_plan_fingerprint": crm_fingerprint,
         "history_sha256": history_sha256 or "",
         "history_mapping": history_mapping or {},
@@ -522,6 +717,53 @@ def _combined_fingerprint(
         "closed_policy": CLOSED_POLICY_TEXT,
     }
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _empty_crm_batch_stub(*, client_id: int, history_filename: str = "") -> Any:
+    return SimpleNamespace(
+        batch_id=0,
+        client_id=int(client_id),
+        original_filename=history_filename or "",
+        file_type="csv",
+        worksheet_name="",
+        file_size_bytes=0,
+        sha256="",
+        headers=[],
+        warnings=[],
+        error_message="",
+        total_rows=0,
+        source_row_count=0,
+        blank_row_count=0,
+        error_row_count=0,
+        reusable=True,
+        expires_at="",
+        created_at="",
+        updated_at="",
+        cancelled_at="",
+        uploaded_by_user_id=None,
+        uploaded_by_name="",
+        mapping={},
+        mapping_updated_at="",
+        mapping_updated_by_user_id=None,
+        sample_rows=[],
+        status=STATUS_PREVIEWED,
+    )
+
+
+def _cd_import_mode(cd_row: Any) -> str:
+    mode = _blank(cd_row["import_mode"]) if "import_mode" in cd_row.keys() else ""
+    return mode or IMPORT_MODE_FULL
+
+
+def _cd_crm_batch_id(cd_row: Any) -> int | None:
+    raw = cd_row["crm_batch_id"]
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
 
 
 def _batch_view_from_parts(
@@ -537,11 +779,13 @@ def _batch_view_from_parts(
     if not isinstance(history_mapping, dict):
         history_mapping = {}
     prospects_mapping = dict(getattr(crm_batch, "mapping", {}) or {})
+    crm_batch_id = _cd_crm_batch_id(cd_row)
     return ClientDataImportBatchView(
         id=int(cd_row["id"]),
         batch_id=int(cd_row["id"]),
         client_id=int(cd_row["client_id"]),
-        crm_batch_id=int(cd_row["crm_batch_id"]),
+        crm_batch_id=crm_batch_id,
+        import_mode=_cd_import_mode(cd_row),
         status=_blank(cd_row["status"]),
         original_filename=getattr(crm_batch, "original_filename", "") or "",
         history_filename=_blank(cd_row["history_original_filename"]),
@@ -595,8 +839,17 @@ def get_client_data_import_batch(
 ) -> ClientDataImportBatchView:
     with get_connection() as conn:
         cd_row = _load_cd_row(conn, client_id, batch_id)
-        crm_batch_id = int(cd_row["crm_batch_id"])
-    crm_batch = get_crm_import_batch(client_id, crm_batch_id, include_sample=include_sample)
+        crm_batch_id = _cd_crm_batch_id(cd_row)
+        import_mode = _cd_import_mode(cd_row)
+        history_name = _blank(cd_row["history_original_filename"])
+    if import_mode == IMPORT_MODE_HISTORY_ONLY or crm_batch_id is None:
+        crm_batch = _empty_crm_batch_stub(
+            client_id=client_id, history_filename=history_name
+        )
+    else:
+        crm_batch = get_crm_import_batch(
+            client_id, int(crm_batch_id), include_sample=include_sample
+        )
     history_sample: list[dict[str, str]] = []
     staging = _blank(cd_row["history_staging_path"])
     if include_sample and staging:
@@ -611,36 +864,48 @@ def get_client_data_import_batch(
     )
 
 
+def _stage_history_file(
+    *,
+    client_id: int,
+    history_filename: str | None,
+    history_content: bytes,
+) -> tuple[str, str, int, str, list[str], int]:
+    if len(history_content) > HISTORY_MAX_FILE_BYTES:
+        raise ValueError(HISTORY_TOO_LARGE)
+    safe_hist = _safe_filename(history_filename or "history.csv")
+    if not safe_hist.lower().endswith(".csv"):
+        raise ValueError(HISTORY_NOT_CSV)
+    history_headers, history_row_count = _parse_history_headers(history_content)
+    history_sha = _sha256_bytes(history_content)
+    history_size = len(history_content)
+    token = uuid.uuid4().hex
+    dest_dir = _import_root() / str(client_id) / token
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / "history.csv"
+    dest.write_bytes(history_content)
+    return safe_hist, history_sha, history_size, str(dest), history_headers, history_row_count
+
+
 def upload_client_data_import(
     *,
     client_id: int,
     actor: NorthStarUser,
-    prospects_filename: str,
-    prospects_content: bytes,
+    prospects_filename: str | None = None,
+    prospects_content: bytes | None = None,
     history_filename: str | None = None,
     history_content: bytes | None = None,
     worksheet: str = "",
 ) -> ClientDataImportUploadResult:
     _require_admin(actor, client_id)
-    # Schema must already exist from controlled migration (no request-time DDL).
+    has_prospects = bool(prospects_content)
+    has_history = bool(history_content)
+    if not has_prospects and not has_history:
+        raise ValueError(PROSPECTS_OR_HISTORY_REQUIRED)
+    if has_prospects and not _blank(prospects_filename):
+        prospects_filename = prospects_filename or "prospects.csv"
 
-    crm_result = upload_crm_import(
-        client_id=client_id,
-        actor=actor,
-        filename=prospects_filename,
-        content=prospects_content,
-        worksheet=worksheet or "",
-    )
-    if crm_result.needs_worksheet or crm_result.batch is None:
-        return ClientDataImportUploadResult(
-            kind=crm_result.kind,
-            needs_worksheet=crm_result.needs_worksheet,
-            visible_sheets=list(crm_result.visible_sheets or []),
-            filename=crm_result.filename,
-            file_type=crm_result.file_type,
-            message=crm_result.message,
-            batch=None,
-        )
+    history_only = has_history and not has_prospects
+    import_mode = IMPORT_MODE_HISTORY_ONLY if history_only else IMPORT_MODE_FULL
 
     history_name = ""
     history_sha = ""
@@ -648,42 +913,79 @@ def upload_client_data_import(
     history_path = ""
     history_headers: list[str] = []
     history_row_count = 0
-    if history_content:
-        if len(history_content) > HISTORY_MAX_FILE_BYTES:
-            raise ValueError(HISTORY_TOO_LARGE)
-        safe_hist = _safe_filename(history_filename or "history.csv")
-        if not safe_hist.lower().endswith(".csv"):
-            raise ValueError(HISTORY_NOT_CSV)
-        history_headers, history_row_count = _parse_history_headers(history_content)
-        history_sha = _sha256_bytes(history_content)
-        history_size = len(history_content)
-        history_name = safe_hist
-        token = uuid.uuid4().hex
-        dest_dir = _import_root() / str(client_id) / token
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / "history.csv"
-        dest.write_bytes(history_content)
-        history_path = str(dest)
+    if has_history:
+        (
+            history_name,
+            history_sha,
+            history_size,
+            history_path,
+            history_headers,
+            history_row_count,
+        ) = _stage_history_file(
+            client_id=client_id,
+            history_filename=history_filename,
+            history_content=history_content or b"",
+        )
+    elif history_only:
+        raise ValueError(HISTORY_FILE_REQUIRED)
+
+    crm_batch_id: int | None = None
+    crm_kind = "client_data_import"
+    crm_message = "Preview ready. Nothing was written to companies or contacts."
+    crm_filename = history_name if history_only else (prospects_filename or "")
+    crm_file_type = "csv"
+
+    if not history_only:
+        crm_result = upload_crm_import(
+            client_id=client_id,
+            actor=actor,
+            filename=prospects_filename or "prospects.csv",
+            content=prospects_content or b"",
+            worksheet=worksheet or "",
+        )
+        if crm_result.needs_worksheet or crm_result.batch is None:
+            return ClientDataImportUploadResult(
+                kind=crm_result.kind,
+                needs_worksheet=crm_result.needs_worksheet,
+                visible_sheets=list(crm_result.visible_sheets or []),
+                filename=crm_result.filename,
+                file_type=crm_result.file_type,
+                message=crm_result.message,
+                batch=None,
+            )
+        crm_batch_id = int(crm_result.batch.batch_id)
+        crm_kind = crm_result.kind
+        crm_message = crm_result.message or crm_message
+        crm_filename = crm_result.filename
+        crm_file_type = crm_result.file_type
+        batch_status = (
+            STATUS_PREVIEWED
+            if _blank(crm_result.batch.status) == STATUS_PREVIEWED
+            else STATUS_FAILED
+        )
+    else:
+        batch_status = STATUS_PREVIEWED
+        crm_message = (
+            "History-only preview ready. Nothing was written to companies or contacts."
+        )
 
     now = _now()
-    crm_batch_id = int(crm_result.batch.batch_id)
     with get_connection() as conn:
         cur = conn.execute(
             """
             INSERT INTO client_data_import_batches (
-                client_id, crm_batch_id, status,
+                client_id, crm_batch_id, import_mode, status,
                 history_original_filename, history_sha256, history_file_size_bytes,
                 history_staging_path, history_headers_json, history_mapping_json,
                 history_row_count,
                 uploaded_by_user_id, uploaded_by_name, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?)
             """,
             (
                 int(client_id),
                 crm_batch_id,
-                STATUS_PREVIEWED
-                if _blank(crm_result.batch.status) == STATUS_PREVIEWED
-                else STATUS_FAILED,
+                import_mode,
+                batch_status,
                 history_name,
                 history_sha,
                 history_size,
@@ -701,13 +1003,12 @@ def upload_client_data_import(
 
     batch = get_client_data_import_batch(client_id, cd_batch_id, include_sample=True)
     return ClientDataImportUploadResult(
-        kind=crm_result.kind,
+        kind=crm_kind,
         needs_worksheet=False,
         visible_sheets=[],
-        filename=crm_result.filename,
-        file_type=crm_result.file_type,
-        message=crm_result.message
-        or "Preview ready. Nothing was written to companies or contacts.",
+        filename=crm_filename,
+        file_type=crm_file_type,
+        message=crm_message,
         batch=batch,
     )
 
@@ -717,7 +1018,7 @@ def save_client_data_import_mapping(
     batch_id: int,
     *,
     actor: NorthStarUser,
-    prospects_mapping: dict[str, str],
+    prospects_mapping: dict[str, str] | None = None,
     history_mapping: dict[str, str] | None = None,
 ) -> ClientDataImportBatchView:
     _require_admin(actor, client_id)
@@ -725,7 +1026,8 @@ def save_client_data_import_mapping(
         cd_row = _load_cd_row(conn, client_id, batch_id)
         if _blank(cd_row["status"]) != STATUS_PREVIEWED:
             raise BatchNotReusable(BATCH_NOT_REUSABLE)
-        crm_batch_id = int(cd_row["crm_batch_id"])
+        import_mode = _cd_import_mode(cd_row)
+        crm_batch_id = _cd_crm_batch_id(cd_row)
         headers = _json_loads(cd_row["history_headers_json"], [])
         if not isinstance(headers, list):
             headers = []
@@ -744,6 +1046,8 @@ def save_client_data_import_mapping(
             )
         else:
             normalized_history = {}
+        if import_mode == IMPORT_MODE_HISTORY_ONLY and not normalized_history:
+            raise ValueError(MAPPING_HISTORY_REQUIRED)
         now = _now()
         conn.execute(
             """
@@ -763,12 +1067,13 @@ def save_client_data_import_mapping(
         )
         conn.commit()
 
-    save_crm_import_mapping(
-        client_id,
-        crm_batch_id,
-        actor=actor,
-        mapping=prospects_mapping or {},
-    )
+    if import_mode != IMPORT_MODE_HISTORY_ONLY and crm_batch_id is not None:
+        save_crm_import_mapping(
+            client_id,
+            int(crm_batch_id),
+            actor=actor,
+            mapping=prospects_mapping or {},
+        )
     return get_client_data_import_batch(client_id, batch_id, include_sample=True)
 
 
@@ -778,21 +1083,52 @@ def _compute_dry_run(
     client_id: int,
     cd_row: Any,
 ) -> tuple[ClientDataImportDryRunResponse, Any, ClientDataImportHistoryCounts, dict[str, str]]:
-    crm_batch_id = int(cd_row["crm_batch_id"])
-    plan = plan_crm_import_batch(
-        conn,
-        client_id=client_id,
-        batch_id=crm_batch_id,
-        identity_mode=IDENTITY_CLIENT_DATA,
-        exclude_closed=True,
-    )
-    importable_rns, closed_rns = _planned_company_record_nos(plan)
-    will_create = {
-        normalize_record_no((row.mapped or {}).get("external_record_no"))
-        for row in plan.rows
-        if row.company_action == "create_company"
-    }
-    will_create.discard("")
+    import_mode = _cd_import_mode(cd_row)
+    history_only = import_mode == IMPORT_MODE_HISTORY_ONLY
+    crm_batch_id = _cd_crm_batch_id(cd_row)
+
+    plan = None
+    importable_rns: set[str] = set()
+    closed_rns: set[str] = set()
+    will_create: set[str] = set()
+    prospects = ClientDataImportProspectsCounts()
+    closed_excluded = 0
+    companies_excluded_closed = 0
+    contacts_excluded_closed = 0
+    crm_fingerprint = ""
+    status_catalog: list[str] = []
+    total_rows = 0
+
+    if not history_only:
+        if crm_batch_id is None:
+            raise BatchNotReusable("Prospects batch is missing.")
+        plan = plan_crm_import_batch(
+            conn,
+            client_id=client_id,
+            batch_id=int(crm_batch_id),
+            identity_mode=IDENTITY_CLIENT_DATA,
+            exclude_closed=True,
+        )
+        importable_rns, closed_rns = _planned_company_record_nos(plan)
+        will_create = {
+            normalize_record_no((row.mapped or {}).get("external_record_no"))
+            for row in plan.rows
+            if row.company_action == "create_company"
+        }
+        will_create.discard("")
+        closed_excluded = int(plan.counts.get("excluded_closed") or 0)
+        closed_company_rns = {
+            normalize_record_no((row.mapped or {}).get("external_record_no"))
+            for row in plan.rows
+            if row.company_action == EXCLUDED_CLOSED
+        }
+        closed_company_rns.discard("")
+        contacts_excluded_closed = closed_excluded
+        companies_excluded_closed = len(closed_company_rns)
+        prospects = _prospects_counts_from_plan(plan.counts)
+        crm_fingerprint = plan.plan_fingerprint
+        status_catalog = list(plan.status_catalog or [])
+        total_rows = int(plan.total_rows)
 
     history_mapping = _json_loads(cd_row["history_mapping_json"], {})
     if not isinstance(history_mapping, dict):
@@ -802,7 +1138,7 @@ def _compute_dry_run(
     history_counts = ClientDataImportHistoryCounts()
     history_parsed: ParsedHistory | None = None
     staging = _blank(cd_row["history_staging_path"])
-    if staging or history_sha:
+    if staging or history_sha or history_only:
         if not staging or not Path(staging).is_file():
             raise BatchNotReusable("Staged history file is missing.")
         content = Path(staging).read_bytes()
@@ -818,35 +1154,33 @@ def _compute_dry_run(
             history=history_parsed,
             importable_record_nos=importable_rns,
             will_create_record_nos=will_create,
+            history_only=history_only,
         )
-        if history_parsed.errors:
-            history_counts.invalid = max(
-                history_counts.invalid, len(history_parsed.errors)
-            )
 
-    closed_excluded = int(plan.counts.get("excluded_closed") or 0)
-    closed_company_rns = {
-        normalize_record_no((row.mapped or {}).get("external_record_no"))
-        for row in plan.rows
-        if row.company_action == EXCLUDED_CLOSED
-    }
-    closed_company_rns.discard("")
-    contacts_excluded_closed = closed_excluded
-    companies_excluded_closed = len(closed_company_rns)
-    history_excluded = int(getattr(history_parsed, "excluded_closed_events", 0) or 0) if history_parsed else 0
+    history_excluded = (
+        int(getattr(history_parsed, "excluded_closed_events", 0) or 0)
+        if history_parsed
+        else 0
+    )
     if history_parsed is not None:
         history_counts.excluded_closed = history_excluded
         history_counts.excluded_marketing = int(
             getattr(history_parsed, "excluded_marketing_events", 0) or 0
         )
+        history_counts.blank_rows = int(
+            getattr(history_parsed, "blank_rows_skipped", 0) or 0
+        )
+        history_counts.blank_history = int(
+            getattr(history_parsed, "blank_history_skipped", 0) or 0
+        )
 
     combined_fp = _combined_fingerprint(
-        crm_fingerprint=plan.plan_fingerprint,
+        crm_fingerprint=crm_fingerprint,
         history_sha256=history_sha,
         history_mapping=history_mapping,
         closed_excluded_count=closed_excluded,
+        import_mode=import_mode,
     )
-    prospects = _prospects_counts_from_plan(plan.counts)
     confirm_allowed = (
         prospects.needs_review_rows == 0
         and prospects.companies_possible == 0
@@ -855,7 +1189,10 @@ def _compute_dry_run(
         and prospects.invalid_status == 0
         and history_counts.invalid == 0
         and history_counts.unresolved == 0
+        and history_counts.ambiguous_companies == 0
+        and history_counts.unmatched_companies == 0
     )
+
     flat = {
         **prospects.model_dump(),
         **history_counts.model_dump(),
@@ -867,9 +1204,10 @@ def _compute_dry_run(
         id=int(cd_row["id"]),
         batch_id=int(cd_row["id"]),
         client_id=int(client_id),
+        import_mode=import_mode,
         plan_fingerprint=combined_fp,
         status=_blank(cd_row["status"]),
-        status_catalog=list(plan.status_catalog or []),
+        status_catalog=status_catalog,
         closed_excluded_count=closed_excluded,
         closed_policy=CLOSED_POLICY_TEXT,
         closed_policy_note=CLOSED_POLICY_TEXT,
@@ -880,8 +1218,8 @@ def _compute_dry_run(
         counts=flat,
         rows=[],
         sample_rows=[],
-        total_rows=int(plan.total_rows),
-        crm_plan_fingerprint=plan.plan_fingerprint,
+        total_rows=total_rows if not history_only else int(history_counts.insert or 0),
+        crm_plan_fingerprint=crm_fingerprint,
         companies_excluded_closed=companies_excluded_closed,
         contacts_excluded_closed=contacts_excluded_closed,
         history_events_excluded_closed=history_excluded,
@@ -939,33 +1277,46 @@ def _apply_history_events(
     closed_record_nos: set[str],
     batch_id: int,
     fail_after: str | None = None,
+    history_only: bool = False,
 ) -> tuple[int, int]:
     """Insert company-scoped shared history. Returns (inserted, already_present).
 
-    Resolves companies by Record No. on the same connection (sees in-txn creates).
-    Skips exact duplicates (LeadMaster source id or content fingerprint).
-    Never overwrites existing notes. Does not run DDL.
+    Resolves companies by Record No. (and history-only name fallback).
+    Skips exact duplicates. Never overwrites existing notes or rewrites
+    company.external_record_no. Does not create companies.
     """
     now = _now()
     inserted = already = 0
     dedupe_cache: dict[int, object] = {}
     for event in events:
-        if event.record_no in closed_record_nos:
+        if event.record_no and event.record_no in closed_record_nos:
             continue
-        company = _company_by_record_no(conn, event.record_no)
-        if company is None:
-            continue
-        company_id = int(company["id"])
+        company_id: int | None = None
+        if history_only:
+            match = resolve_history_company(
+                conn,
+                client_id=int(client_id),
+                record_no=event.record_no,
+                company_name=event.company_name,
+            )
+            if match.status != "matched" or match.company_id is None:
+                continue
+            company_id = int(match.company_id)
+        else:
+            company = _company_by_record_no(conn, event.record_no)
+            if company is None:
+                continue
+            company_id = int(company["id"])
         index = dedupe_cache.get(company_id)
         if index is None:
             index = load_existing_history_dedupe_index(
-                conn, client_id=int(client_id), company_id=company_id
+                conn, client_id=int(client_id), company_id=int(company_id)
             )
             dedupe_cache[company_id] = index
         if history_event_already_present(
             index,  # type: ignore[arg-type]
             client_id=int(client_id),
-            company_id=company_id,
+            company_id=int(company_id),
             contact_key=getattr(event, "contact_no", "") or "",
             note_text=event.note_text,
             event_at=event.event_at,
@@ -973,6 +1324,7 @@ def _apply_history_events(
         ):
             already += 1
             continue
+        stored_rn = event.record_no or ""
         try:
             conn.execute(
                 """
@@ -985,7 +1337,7 @@ def _apply_history_events(
                 """,
                 (
                     company_id,
-                    event.record_no,
+                    stored_rn,
                     event.company_name,
                     event.event_at,
                     event.event_sequence,
@@ -1002,7 +1354,6 @@ def _apply_history_events(
                 ),
             )
             inserted += 1
-            # Refresh dedupe view so later rows in this transaction see the insert.
             dedupe_cache.pop(company_id, None)
             if fail_after == "after_history_insert" and inserted == 1:
                 raise RuntimeError("Injected failure after history insert.")
@@ -1010,6 +1361,7 @@ def _apply_history_events(
             already += 1
             dedupe_cache.pop(company_id, None)
     return inserted, already
+
 
 
 def _unlink_history(path: Path) -> None:
@@ -1164,8 +1516,12 @@ def confirm_client_data_import(
             if not dry.confirm_allowed:
                 raise BatchNotReusable("Import batch is not fully importable.")
 
-            crm_batch_id = int(cd_row["crm_batch_id"])
-            _importable_rns, closed_rns = _planned_company_record_nos(plan)
+            import_mode = _cd_import_mode(cd_row)
+            history_only = import_mode == IMPORT_MODE_HISTORY_ONLY
+            crm_batch_id = _cd_crm_batch_id(cd_row)
+            closed_rns: set[str] = set()
+            if plan is not None:
+                _importable_rns, closed_rns = _planned_company_record_nos(plan)
             history_events: list[HistoryEventRow] = []
             staging = _blank(cd_row["history_staging_path"])
             if staging:
@@ -1184,16 +1540,33 @@ def confirm_client_data_import(
                     raise BatchNotReusable("History file has validation errors.")
                 history_events = list(parsed.events)
 
-            crm_result = apply_crm_import_plan_on_connection(
-                conn,
-                client_id=client_id,
-                batch_id=crm_batch_id,
-                plan=plan,
-                actor=actor,
-                fail_after=fail_after,
-            )
-            if fail_after == "after_crm_apply":
-                raise RuntimeError("Injected failure after CRM apply.")
+            crm_result: dict[str, object] = {
+                "imported_at": _now(),
+                "imported_by_user_id": int(actor.id),
+                "created_company_count": 0,
+                "reused_company_count": 0,
+                "created_contact_count": 0,
+                "reused_contact_count": 0,
+                "created_relationship_count": 0,
+                "existing_relationship_count": 0,
+                "imported_status_count": 0,
+                "notes_set_count": 0,
+                "notes_appended_count": 0,
+                "notes_duplicate_count": 0,
+            }
+            if not history_only:
+                if crm_batch_id is None or plan is None:
+                    raise BatchNotReusable("Prospects batch is missing.")
+                crm_result = apply_crm_import_plan_on_connection(
+                    conn,
+                    client_id=client_id,
+                    batch_id=int(crm_batch_id),
+                    plan=plan,
+                    actor=actor,
+                    fail_after=fail_after,
+                )
+                if fail_after == "after_crm_apply":
+                    raise RuntimeError("Injected failure after CRM apply.")
 
             history_inserted = 0
             history_already = 0
@@ -1206,6 +1579,7 @@ def confirm_client_data_import(
                     closed_record_nos=closed_rns,
                     batch_id=int(batch_id),
                     fail_after=fail_after,
+                    history_only=history_only,
                 )
             # Preview/confirm equality for history counters.
             if int(history_counts.insert or 0) != history_inserted:
@@ -1267,9 +1641,9 @@ def confirm_client_data_import(
                     "prospects_preview": dry.prospects.model_dump() if dry.prospects else {},
                 },
             )
-            # Preview/confirm equality for prospect counters.
+            # Preview/confirm equality for prospect counters (full mode only).
             preview = dry.prospects
-            if preview is not None:
+            if (not history_only) and preview is not None:
                 if int(preview.companies_create or 0) != int(result.companies_created or 0):
                     raise BatchNotReusable("Company create counter drifted.")
                 if int(preview.companies_reuse or 0) != int(result.companies_reused or 0):
@@ -1365,14 +1739,21 @@ def cancel_client_data_import(
     with get_connection() as conn:
         cd_row = _load_cd_row(conn, client_id, batch_id)
         status = _blank(cd_row["status"])
+        import_mode = _cd_import_mode(cd_row)
+        crm_batch_id = _cd_crm_batch_id(cd_row)
         if status == STATUS_CANCELLED:
-            crm_batch = get_crm_import_batch(
-                client_id, int(cd_row["crm_batch_id"]), include_sample=False
-            )
+            if import_mode == IMPORT_MODE_HISTORY_ONLY or crm_batch_id is None:
+                crm_batch = _empty_crm_batch_stub(
+                    client_id=client_id,
+                    history_filename=_blank(cd_row["history_original_filename"]),
+                )
+            else:
+                crm_batch = get_crm_import_batch(
+                    client_id, int(crm_batch_id), include_sample=False
+                )
             return _batch_view_from_parts(cd_row=cd_row, crm_batch=crm_batch)
         if status not in {STATUS_PREVIEWED, STATUS_FAILED}:
             raise BatchNotReusable(BATCH_NOT_REUSABLE)
-        crm_batch_id = int(cd_row["crm_batch_id"])
         staging = _blank(cd_row["history_staging_path"])
         now = _now()
         conn.execute(
@@ -1394,5 +1775,6 @@ def cancel_client_data_import(
         except Exception:
             log.exception("Failed to delete history staging on cancel path=%s", staging)
 
-    cancel_crm_import(client_id, crm_batch_id, actor=actor)
+    if crm_batch_id is not None and import_mode != IMPORT_MODE_HISTORY_ONLY:
+        cancel_crm_import(client_id, int(crm_batch_id), actor=actor)
     return get_client_data_import_batch(client_id, batch_id, include_sample=False)

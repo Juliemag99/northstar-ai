@@ -216,6 +216,11 @@ class HistoryEventRow:
     event_sequence: str = ""
     source_row: int = 0
     contact_no: str = ""
+    company_id: int | None = None
+    match_method: str = ""
+    match_status: str = ""
+    needs_review: bool = False
+    review_reason: str = ""
 
 
 @dataclass
@@ -232,6 +237,8 @@ class ParsedHistory:
     events: list[HistoryEventRow] = field(default_factory=list)
     excluded_closed_events: int = 0
     excluded_marketing_events: int = 0
+    blank_rows_skipped: int = 0
+    blank_history_skipped: int = 0
     long_note_count: int = 0
     unattributed_count: int = 0
     errors: list[str] = field(default_factory=list)

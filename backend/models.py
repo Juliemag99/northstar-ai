@@ -3462,13 +3462,21 @@ class ClientDataImportHistoryCounts(BaseModel):
     unresolved: int = 0
     excluded_closed: int = 0
     excluded_marketing: int = 0
+    blank_rows: int = 0
+    blank_history: int = 0
+    unmatched_companies: int = 0
+    ambiguous_companies: int = 0
+    matched_by_record_no: int = 0
+    matched_by_name: int = 0
+    needs_review: int = 0
 
 
 class ClientDataImportBatchView(BaseModel):
     id: int = 0
     batch_id: int = 0
     client_id: int
-    crm_batch_id: int = 0
+    crm_batch_id: int | None = 0
+    import_mode: str = "full"
     status: str = ""
     original_filename: str = ""
     history_filename: str = ""
@@ -3533,6 +3541,7 @@ class ClientDataImportDryRunResponse(BaseModel):
     id: int = 0
     batch_id: int = 0
     client_id: int = 0
+    import_mode: str = "full"
     plan_fingerprint: str = ""
     status: str = ""
     status_catalog: list[str] = Field(default_factory=list)

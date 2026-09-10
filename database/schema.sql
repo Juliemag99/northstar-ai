@@ -1106,7 +1106,8 @@ CREATE INDEX IF NOT EXISTS idx_crm_import_results_batch
 CREATE TABLE IF NOT EXISTS client_data_import_batches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     client_id INTEGER NOT NULL,
-    crm_batch_id INTEGER NOT NULL,
+    crm_batch_id INTEGER,
+    import_mode TEXT NOT NULL DEFAULT 'full',
     status TEXT NOT NULL DEFAULT 'previewed',
     history_original_filename TEXT NOT NULL DEFAULT '',
     history_sha256 TEXT NOT NULL DEFAULT '',
