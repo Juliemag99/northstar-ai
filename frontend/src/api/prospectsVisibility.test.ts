@@ -86,6 +86,35 @@ describe('Companies page prospects visibility API', () => {
     expect(page.prospects[0]?.company).toBe('Valmont')
   })
 
+  it('passes milestone_type so Quotes/PO/WebLead filters are server-side', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          client: { name: 'Brown', client_id: 2, code: 'brown', mode: 'selected_client' },
+          prospects: [{ id: 282, company: 'Colamark', client_id: 2, has_quote: true }],
+          total: 26,
+          client_total: 106,
+          offset: 0,
+          limit: 50,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const page = await fetchProspects({
+      client_id: 2,
+      milestone_type: 'Quote',
+      limit: 50,
+      offset: 0,
+    })
+
+    const url = String(fetchMock.mock.calls[0]?.[0] ?? '')
+    expect(url).toContain('milestone_type=Quote')
+    expect(url).toContain('client_id=2')
+    expect(page.total).toBe(26)
+  })
+
   it('passes a non-zero offset so rows past the first page are reachable', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(

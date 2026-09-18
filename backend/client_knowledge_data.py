@@ -6,6 +6,8 @@ All records are strictly scoped by client_id.
 
 from __future__ import annotations
 
+from staff_context import resolve_staff_actor
+
 import csv
 import io
 import json
@@ -417,7 +419,7 @@ def _scan_sensitive_bytes(data: bytes, filename: str) -> tuple[bool, str]:
 
 
 def list_documents(client_id: int, *, user_id: int | None = None, include_archived: bool = False) -> list[ClientDocumentView]:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)
@@ -453,7 +455,7 @@ def upload_document(
     user_id: int | None = None,
     replace_document_id: int | None = None,
 ) -> ClientDocumentView:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -533,7 +535,7 @@ def upload_document(
 def get_document_file(
     client_id: int, document_id: int, *, user_id: int | None = None
 ) -> tuple[Path, str]:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)
@@ -557,7 +559,7 @@ def get_document_file(
 def archive_document(
     client_id: int, document_id: int, *, user_id: int | None = None
 ) -> ClientDocumentView:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -654,7 +656,7 @@ def process_document(
     client_id: int, document_id: int, *, user_id: int | None = None
 ) -> ClientDocumentProcessResult:
     """Parse document, create extraction proposals. Never auto-approves or writes Client Setup."""
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -846,7 +848,7 @@ def list_extraction_proposals(
     status: str | None = None,
     document_id: int | None = None,
 ) -> list[ClientExtractionProposalView]:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)
@@ -1362,7 +1364,7 @@ def review_extraction_proposal(
     user_id: int | None = None,
 ) -> ClientExtractionProposalView:
     """Approve/Reject. On Approve, apply only this field (optional edited_value / remap)."""
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -1557,7 +1559,7 @@ def resolve_extraction_proposal(
     Mark a Pending proposal Resolved / Incorporated.
     Does not write Client Setup or Client Contacts — human confirmation only.
     """
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -1654,7 +1656,7 @@ def get_stored_knowledge_field(
     user_id: int | None = None,
 ) -> str:
     """Return a single stored knowledge field value (no campaign overlay invention)."""
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)
@@ -1689,7 +1691,7 @@ def update_knowledge_field(
     """Merge one catalog field into a knowledge section. Does not write CRM/campaigns."""
     from client_document_extraction import FIELD_CATALOG
 
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -1731,7 +1733,7 @@ def restore_client_operations_from_approved_proposal(
     Restore a Client Operations item from an already-Approved proposal
     without re-approval or changing proposal status.
     """
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -1802,7 +1804,7 @@ def list_approved_client_operations(
     client_id: int, *, user_id: int | None = None
 ) -> list[dict[str, Any]]:
     """Approved Client Operations items only (Pending/Rejected proposals excluded)."""
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)
@@ -1859,7 +1861,7 @@ def bulk_review_extraction_proposals(
     user_id: int | None = None,
 ) -> list[ClientExtractionProposalView]:
     """Approve selected, or Approve All Matches (MATCH only; never conflicts/LOW)."""
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -2000,7 +2002,7 @@ def _overlay_setup_defaults(client_id: int, section_key: str, payload: dict[str,
 def get_knowledge_sections(
     client_id: int, *, user_id: int | None = None
 ) -> list[ClientKnowledgeSectionView]:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)
@@ -2043,7 +2045,7 @@ def upsert_knowledge_section(
     *,
     user_id: int | None = None,
 ) -> ClientKnowledgeSectionView:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -2103,7 +2105,7 @@ def upsert_knowledge_section(
 def list_email_templates(
     client_id: int, *, user_id: int | None = None
 ) -> list[ClientEmailTemplateView]:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)
@@ -2163,7 +2165,7 @@ def upsert_email_template(
     template_id: int | None = None,
     user_id: int | None = None,
 ) -> ClientEmailTemplateView:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -2313,7 +2315,7 @@ def preview_email_template_group(
     """Combine name/type/body proposals into one editable template preview. No writes."""
     from models import EmailTemplateGroupPreview
 
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)
@@ -2445,7 +2447,7 @@ def approve_email_template_group(
     if not isinstance(body, EmailTemplateGroupApproveRequest):
         body = EmailTemplateGroupApproveRequest.model_validate(body)
 
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -2750,7 +2752,7 @@ def start_appointment_import(
     content: bytes,
     user_id: int | None = None,
 ) -> ClientAppointmentImportBatchView:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -2803,7 +2805,7 @@ def start_appointment_import(
 def get_appointment_import_batch(
     client_id: int, batch_id: int, *, user_id: int | None = None
 ) -> ClientAppointmentImportBatchView:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)
@@ -2848,7 +2850,7 @@ def map_appointment_import_columns(
     *,
     user_id: int | None = None,
 ) -> ClientAppointmentImportPreview:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -2954,7 +2956,7 @@ def confirm_appointment_import(
     Does NOT create companies/contacts and does NOT modify CRM records.
     NEW matches are stored as events with null company/contact ids.
     """
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -3046,7 +3048,7 @@ def confirm_appointment_import(
 def list_appointment_events(
     client_id: int, *, user_id: int | None = None, limit: int = 100
 ) -> list[dict[str, Any]]:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)
@@ -3067,7 +3069,7 @@ def list_appointment_events(
 def get_client_knowledge_hub(
     client_id: int, *, user_id: int | None = None
 ) -> ClientKnowledgeHubResponse:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)

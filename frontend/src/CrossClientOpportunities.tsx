@@ -99,18 +99,18 @@ function signalsBySource(opportunity: CrossClientOpportunity): Array<{ client: s
 }
 
 function loadTargetClients(activeClient: ActiveClient | null): Promise<TargetClient[]> {
-  return apiFetch('/api/users/default')
+  return apiFetch('/api/auth/me')
     .then((response) => {
       if (!response.ok) throw new Error('Unable to load users')
       return response.json() as Promise<Record<string, unknown>>
     })
-    .then(async (user) => {
-      const userId = Number(user.id ?? user.user_id)
-      if (!Number.isFinite(userId)) throw new Error('No default user')
-      const response = await apiFetch(`/api/users/${userId}/clients`)
-      if (!response.ok) throw new Error('Unable to load clients')
-      const raw = await response.json() as unknown
-      const items = Array.isArray(raw) ? raw : (raw as { clients?: unknown[] }).clients ?? []
+    .then((payload) => {
+      const user = (payload.user ?? payload) as Record<string, unknown>
+      const items = Array.isArray(user.clients)
+        ? user.clients
+        : Array.isArray(payload.clients)
+          ? payload.clients
+          : []
       return items
         .map((item) => {
           const record = item as Record<string, unknown>
@@ -118,26 +118,7 @@ function loadTargetClients(activeClient: ActiveClient | null): Promise<TargetCli
         })
         .filter((item) => Number.isFinite(item.id) && item.name)
     })
-    .catch(async () => {
-      try {
-        const response = await apiFetch('/api/users/1/clients')
-        if (response.ok) {
-          const raw = await response.json() as unknown
-          const items = Array.isArray(raw) ? raw : (raw as { clients?: unknown[] }).clients ?? []
-          const mapped = items
-            .map((item) => {
-              const record = item as Record<string, unknown>
-              return {
-                id: Number(record.id ?? record.client_id),
-                name: String(record.name ?? record.client_name ?? ''),
-              }
-            })
-            .filter((item) => Number.isFinite(item.id) && item.name)
-          if (mapped.length) return mapped
-        }
-      } catch {
-        // ignore
-      }
+    .catch(() => {
       const id = Number(activeClient?.client_id ?? activeClient?.id)
       return Number.isFinite(id) && id > 0
         ? [{ id, name: activeClient?.name || 'Active client' }]

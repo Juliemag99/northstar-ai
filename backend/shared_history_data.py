@@ -10,6 +10,8 @@ company-level history. Distinct legacy texts remain labeled by originating clien
 
 from __future__ import annotations
 
+from staff_context import resolve_staff_actor
+
 from access import (
     get_default_user,
     get_user_by_id,
@@ -56,7 +58,7 @@ def list_shared_history(
     if not _db_exists() or not record_no.strip():
         return SharedHistoryResponse(company_id=0)
 
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
 

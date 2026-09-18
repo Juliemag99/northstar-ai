@@ -6,6 +6,8 @@ Request handlers must not perform schema DDL; migrate_schema owns table creation
 
 from __future__ import annotations
 
+from staff_context import resolve_staff_actor
+
 import json
 import logging
 import threading
@@ -784,7 +786,7 @@ def process_deep_research_job(job_id: int) -> None:
         uid = int(job["initiated_by_user_id"] or 0) or None
         if uid is None:
             from access import get_default_user
-            uid = get_default_user().id
+            uid = resolve_staff_actor().id
         visible_ids = resolve_visibility_client_ids(uid)
         known = _known_for(
             conn,
@@ -891,7 +893,7 @@ def process_deep_research_job(job_id: int) -> None:
             uid = int(job["initiated_by_user_id"] or 0) or None
             if uid is None:
                 from access import get_default_user
-                uid = get_default_user().id
+                uid = resolve_staff_actor().id
             visible_ids = resolve_visibility_client_ids(uid)
             known = _known_for(
                 conn,
@@ -993,7 +995,7 @@ def start_deep_research_job(
     if not deep_research_is_configured() and _TRANSPORT_OVERRIDE is None:
         raise RuntimeError("Deep Research is not configured.")
 
-    user = get_default_user() if user_id is None else None
+    user = resolve_staff_actor(user_id)
     if user_id is not None:
         from access import get_user_by_id
 
@@ -1235,7 +1237,7 @@ def start_deep_research_job(
 
 
 def get_deep_research_job(job_id: int, *, user_id: int | None = None) -> ResearchCompanyResponse:
-    user = get_default_user() if user_id is None else None
+    user = resolve_staff_actor(user_id)
     if user_id is not None:
         from access import get_user_by_id
 
@@ -1297,7 +1299,7 @@ def get_deep_research_job(job_id: int, *, user_id: int | None = None) -> Researc
 
 
 def cancel_deep_research_job(job_id: int, *, user_id: int | None = None) -> ResearchCompanyResponse:
-    user = get_default_user() if user_id is None else None
+    user = resolve_staff_actor(user_id)
     if user_id is not None:
         from access import get_user_by_id
 

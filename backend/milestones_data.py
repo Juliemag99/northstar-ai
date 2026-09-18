@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from staff_context import resolve_staff_actor
+
 from datetime import datetime
 
 from access import get_default_user, get_user_by_id, resolve_dashboard_client_ids
@@ -41,10 +43,243 @@ def _now_iso() -> str:
 
 def _table_exists(conn, name: str) -> bool:
     row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
         (name,),
     ).fetchone()
     return row is not None
+
+
+def _sales_events_table_ready(conn) -> bool:
+    if not _table_exists(conn, "client_sales_events"):
+        return False
+    cols = {
+        str(r["name"] if hasattr(r, "keys") else r[1])
+        for r in conn.execute("PRAGMA table_info(client_sales_events)").fetchall()
+    }
+    return "event_type" in cols and "client_id" in cols
+
+
+def _is_blankish_quote_value(value: object | None) -> bool:
+    t = _blank(value)
+    return t == "" or t in {"-", "—", "n/a", "N/A", "na", "NA", "."}
+
+
+def _has_structured_quoted_metadata(notes: object | None) -> bool:
+    """True when sales_notes include a non-blankish structured Quoted: line."""
+    text = _blank(notes)
+    if "Quoted:" not in text and "quoted:" not in text.lower():
+        return False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("quoted:"):
+            value = stripped.split(":", 1)[1].strip() if ":" in stripped else ""
+            if not _is_blankish_quote_value(value):
+                return True
+    return False
+
+
+def _appointments_table_ready(conn) -> bool:
+    if not _table_exists(conn, "appointments"):
+        return False
+    cols = {
+        str(r["name"] if hasattr(r, "keys") else r[1])
+        for r in conn.execute("PRAGMA table_info(appointments)").fetchall()
+    }
+    return "client_id" in cols and "status" in cols
+
+
+def _count_appointments_set(conn, client_ids: list[int]) -> int:
+    """Appointment Scheduled sales events + native appointments, deduped by provenance."""
+    if not client_ids:
+        return 0
+    placeholders = ",".join("?" * len(client_ids))
+    sales_ids: set[int] = set()
+    sales_fps: set[str] = set()
+    if _sales_events_table_ready(conn):
+        for r in conn.execute(
+            f"""
+            SELECT id, COALESCE(source_row_fingerprint, '') AS fp
+            FROM client_sales_events
+            WHERE client_id IN ({placeholders})
+              AND event_type = 'Appointment Scheduled'
+            """,
+            client_ids,
+        ).fetchall():
+            sales_ids.add(int(r["id"]))
+            fp = _blank(r["fp"])
+            if fp:
+                sales_fps.add(fp)
+
+    native_extra = 0
+    if _appointments_table_ready(conn):
+        appt_cols = {
+            str(r["name"] if hasattr(r, "keys") else r[1])
+            for r in conn.execute("PRAGMA table_info(appointments)").fetchall()
+        }
+        key_expr = (
+            "COALESCE(idempotency_key, '')"
+            if "idempotency_key" in appt_cols
+            else "''"
+        )
+        for r in conn.execute(
+            f"""
+            SELECT id, {key_expr} AS idempotency_key
+            FROM appointments
+            WHERE client_id IN ({placeholders})
+              AND lower(trim(COALESCE(status, ''))) <> 'cancelled'
+            """,
+            client_ids,
+        ).fetchall():
+            key = _blank(r["idempotency_key"])
+            if key.startswith("sales_event:"):
+                try:
+                    linked = int(key.split(":", 1)[1].strip())
+                except ValueError:
+                    linked = None
+                if linked is not None and linked in sales_ids:
+                    continue
+            if key and key in sales_fps:
+                continue
+            native_extra += 1
+
+    return len(sales_ids) + native_extra
+
+
+def _quote_company_keys_from_sales(conn, client_ids: list[int]) -> set[tuple[int, int]]:
+    if not client_ids or not _sales_events_table_ready(conn):
+        return set()
+    placeholders = ",".join("?" * len(client_ids))
+    rows = conn.execute(
+        f"""
+        SELECT client_id, company_id, event_type, quoted_amount,
+               source_quoted_value, sales_notes
+        FROM client_sales_events
+        WHERE client_id IN ({placeholders})
+          AND company_id IS NOT NULL
+        """,
+        client_ids,
+    ).fetchall()
+    out: set[tuple[int, int]] = set()
+    for r in rows:
+        company_id = r["company_id"]
+        if company_id is None:
+            continue
+        event_type = _blank(r["event_type"])
+        notes = r["sales_notes"] if "sales_notes" in r.keys() else ""
+        amount = r["quoted_amount"]
+        try:
+            has_positive_amount = amount is not None and float(amount) > 0
+        except (TypeError, ValueError):
+            has_positive_amount = False
+        src_q = r["source_quoted_value"]
+        if (
+            event_type == "RFQ"
+            or has_positive_amount
+            or not _is_blankish_quote_value(src_q)
+            or _has_structured_quoted_metadata(notes)
+        ):
+            out.add((int(r["client_id"]), int(company_id)))
+    return out
+
+
+def _structured_sales_company_keys(
+    conn, client_ids: list[int], *, event_types: tuple[str, ...]
+) -> set[tuple[int, int]]:
+    if not client_ids or not _sales_events_table_ready(conn) or not event_types:
+        return set()
+    placeholders = ",".join("?" * len(client_ids))
+    type_ph = ",".join("?" * len(event_types))
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT client_id, company_id
+        FROM client_sales_events
+        WHERE client_id IN ({placeholders})
+          AND company_id IS NOT NULL
+          AND event_type IN ({type_ph})
+        """,
+        [*client_ids, *event_types],
+    ).fetchall()
+    return {(int(r["client_id"]), int(r["company_id"])) for r in rows}
+
+
+def _milestone_company_keys(
+    conn, client_ids: list[int], milestone_type: str
+) -> set[tuple[int, int]]:
+    if not client_ids or not _table_exists(conn, "revenue_milestones"):
+        return set()
+    placeholders = ",".join("?" * len(client_ids))
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT client_id, company_id
+        FROM revenue_milestones
+        WHERE client_id IN ({placeholders}) AND milestone_type = ?
+          AND company_id IS NOT NULL
+        """,
+        [*client_ids, milestone_type],
+    ).fetchall()
+    return {(int(r["client_id"]), int(r["company_id"])) for r in rows}
+
+
+def milestone_summary(
+    user_id: int | None = None,
+    *,
+    client_id: int | None = None,
+    all_clients: bool = False,
+) -> MilestoneSummary:
+    """Full-client Revenue & Opportunities KPI aggregate.
+
+    Appointments Set includes native appointments plus imported
+    "Appointment Scheduled" sales events (deduped). Quotes / POs / WebLeads
+    count distinct companies with structured revenue_milestones (and structured
+    sales-event types for PO/WebLead only). Quote card does not use paginated
+    prospects or raw sales-event-only evidence — Quote milestones are the
+    CRM surface (projected from engagement imports when confirmed).
+    """
+    user = resolve_staff_actor(user_id)
+    if user is None:
+        raise PermissionError("User not found.")
+    client_ids = resolve_dashboard_client_ids(
+        user.id, selected_client_id=client_id, all_clients=all_clients
+    )
+    mode = (
+        "all_clients"
+        if all_clients and user.is_administrator
+        else ("selected_client" if client_id is not None else "all_my_clients")
+    )
+    if not client_ids:
+        return MilestoneSummary(mode=mode, user_id=user.id, client_ids=[])
+
+    placeholders = ",".join("?" * len(client_ids))
+    with get_connection() as conn:
+        appointments_set = _count_appointments_set(conn, client_ids)
+        quote_keys = _milestone_company_keys(conn, client_ids, "Quote")
+        po_keys = _milestone_company_keys(conn, client_ids, "Purchase Order")
+        po_keys |= _structured_sales_company_keys(
+            conn, client_ids, event_types=("Purchase Order",)
+        )
+        weblead_keys = _milestone_company_keys(conn, client_ids, "WebLead")
+        weblead_keys |= _structured_sales_company_keys(
+            conn, client_ids, event_types=("WebLead", "Web Lead")
+        )
+
+        hot_row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS n FROM client_company_relationships
+            WHERE client_id IN ({placeholders}) AND COALESCE(is_hot, 0) = 1
+            """,
+            client_ids,
+        ).fetchone()
+
+    return MilestoneSummary(
+        mode=mode,
+        user_id=user.id,
+        client_ids=client_ids,
+        appointments_set=appointments_set,
+        quotes=len(quote_keys),
+        purchase_orders=len(po_keys),
+        webleads=len(weblead_keys),
+        hot=int(hot_row["n"] if hot_row else 0),
+    )
 
 
 def _resolve_client_for_write(conn, client_id: object):
@@ -652,59 +887,6 @@ def list_northstar_client_history(
                 )
             )
     return histories
-
-
-def milestone_summary(
-    user_id: int | None = None,
-    *,
-    client_id: int | None = None,
-    all_clients: bool = False,
-) -> MilestoneSummary:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
-    if user is None:
-        raise PermissionError("User not found.")
-    client_ids = resolve_dashboard_client_ids(
-        user.id, selected_client_id=client_id, all_clients=all_clients
-    )
-    mode = (
-        "all_clients"
-        if all_clients and user.is_administrator
-        else ("selected_client" if client_id is not None else "all_my_clients")
-    )
-    if not client_ids:
-        return MilestoneSummary(mode=mode, user_id=user.id, client_ids=[])
-
-    placeholders = ",".join("?" * len(client_ids))
-    with get_connection() as conn:
-        def count_type(mtype: str) -> int:
-            row = conn.execute(
-                f"""
-                SELECT COUNT(DISTINCT company_id) AS n
-                FROM revenue_milestones
-                WHERE client_id IN ({placeholders}) AND milestone_type = ?
-                """,
-                [*client_ids, mtype],
-            ).fetchone()
-            return int(row["n"] if row else 0)
-
-        hot_row = conn.execute(
-            f"""
-            SELECT COUNT(*) AS n FROM client_company_relationships
-            WHERE client_id IN ({placeholders}) AND COALESCE(is_hot, 0) = 1
-            """,
-            client_ids,
-        ).fetchone()
-
-    return MilestoneSummary(
-        mode=mode,
-        user_id=user.id,
-        client_ids=client_ids,
-        appointments_set=count_type("Appointment Set"),
-        quotes=count_type("Quote"),
-        purchase_orders=count_type("Purchase Order"),
-        webleads=count_type("WebLead"),
-        hot=int(hot_row["n"] if hot_row else 0),
-    )
 
 
 def companies_with_milestone_flags(

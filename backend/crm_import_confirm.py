@@ -23,8 +23,17 @@ import re
 from datetime import datetime
 from typing import Any
 
-from contact_phone import format_us_phone_display, upsert_contact_phone_keys
+from contact_phone import store_phone_parts, upsert_contact_phone_keys
 from appointments_data import is_hot_prospect_status
+from company_aliases import SOURCE_CRM_IMPORT, capture_import_company_alias
+from company_locations import upsert_company_source_identity
+from crm_import_source import (
+    IDENTITY_BOUND_DETAIL,
+    alias_source_system,
+    is_leadmaster_source,
+    normalize_source_type,
+)
+from data_steward import SOURCE_CRM_IMPORT as PROVENANCE_CRM_IMPORT, SOURCE_LEADMASTER
 from crm_add_data import allocate_ns_record_no
 from crm_import_plan import IDENTITY_CRM, plan_crm_import_batch
 from crm_import_staging import BatchNotReusable
@@ -78,7 +87,7 @@ def _require_allowed_actions(plan) -> tuple[int, int, int, int, int, int, int, i
     notes_set = notes_appended = notes_duplicate = notes_unchanged = 0
 
     for row in plan.rows:
-        if getattr(row, "company_action", "") == "excluded_closed":
+        if getattr(row, "company_action", "") in {"excluded_closed", "excluded_skip"}:
             continue
         # Company
         if row.company_action == "create_company":
@@ -128,7 +137,9 @@ def _require_allowed_actions(plan) -> tuple[int, int, int, int, int, int, int, i
         else:
             raise BatchNotReusable("Import batch contains a non-actionable notes plan.")
 
-    excluded = int(plan.counts.get("excluded_closed") or 0)
+    excluded = int(plan.counts.get("excluded_closed") or 0) + int(
+        plan.counts.get("excluded_skip") or 0
+    )
     actionable = created_company + reused_company
     total = int(plan.total_rows)
     if actionable + excluded != total:
@@ -177,6 +188,8 @@ def apply_crm_import_plan_on_connection(
     plan,  # ImportPlan from plan_crm_import_batch
     actor: NorthStarUser,
     fail_after: str | None = None,
+    source_system: str = SOURCE_CRM_IMPORT,
+    provenance_source_type: str | None = None,
 ) -> dict[str, Any]:
     """Apply a precomputed CRM import plan on a caller-owned connection.
 
@@ -201,10 +214,12 @@ def apply_crm_import_plan_on_connection(
         notes_unchanged_count,
     ) = _require_allowed_actions(plan)
 
-    # Staged rows include excluded_closed; result audit rows do not.
+    # Staged rows include excluded_closed / excluded_skip; result audit rows do not.
     excluded_closed = int(plan.counts.get("excluded_closed") or 0)
+    excluded_skip = int(plan.counts.get("excluded_skip") or 0)
+    excluded_total = excluded_closed + excluded_skip
     staged_row_count = int(plan.total_rows)
-    total_imported_row_count = staged_row_count - excluded_closed
+    total_imported_row_count = staged_row_count - excluded_total
     expected_result_rows = total_imported_row_count
 
     # Proposed-key resolution maps (transaction-local).
@@ -221,10 +236,13 @@ def apply_crm_import_plan_on_connection(
     search_index_targets: list[tuple[int, int | None]] = []
 
     now = _now()
+    provenance_source = _blank(provenance_source_type) or PROVENANCE_CRM_IMPORT
+    if provenance_source == "LEADMASTER":
+        provenance_source = SOURCE_LEADMASTER
 
     # Apply in planner order to preserve proposed-key dependencies.
     for row in plan.rows:
-        if row.company_action == "excluded_closed":
+        if row.company_action in {"excluded_closed", "excluded_skip"}:
             continue
         # -----------------
         # Company resolve/apply
@@ -268,7 +286,10 @@ def apply_crm_import_plan_on_connection(
             state = _blank(mapped.get("state"))
             zip_ = _blank(mapped.get("zip"))
             website = _blank(mapped.get("website"))
-            legacy_phone = _blank(mapped.get("phone"))
+            legacy_phone, legacy_phone_ext = store_phone_parts(
+                _blank(mapped.get("phone")), field="legacy_phone"
+            )
+            legacy_phone_ext = legacy_phone_ext or None
             # Source-history only — never write these onto created_at / updated_at.
             entered_at = _blank(mapped.get("source_entered_at"))
             source_updated_at = _blank(mapped.get("source_updated_at"))
@@ -277,9 +298,9 @@ def apply_crm_import_plan_on_connection(
                 """
                 INSERT INTO companies (
                     external_record_no, company_name, address, city, state, zip, website,
-                    legacy_phone, type_of_industry, entered_at, source_updated_at,
+                    legacy_phone, legacy_phone_extension, type_of_industry, entered_at, source_updated_at,
                     created_at, last_updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)
                 """,
                 (
                     external_record_no,
@@ -290,6 +311,7 @@ def apply_crm_import_plan_on_connection(
                     zip_,
                     website,
                     legacy_phone,
+                    legacy_phone_ext,
                     entered_at,
                     source_updated_at,
                     now,
@@ -300,6 +322,32 @@ def apply_crm_import_plan_on_connection(
             company_external_record_no = external_record_no
             company_key_to_id[proposed_key] = (company_id, company_external_record_no)
             actual_company_inserts += 1
+            from data_steward import (
+                ENTITY_COMPANY,
+                record_populated_creates,
+                source_ref_batch,
+            )
+
+            record_populated_creates(
+                conn,
+                entity_type=ENTITY_COMPANY,
+                entity_id=company_id,
+                fields={
+                    "company_name": company_name,
+                    "address": address,
+                    "city": city,
+                    "state": state,
+                    "zip": zip_,
+                    "phone": legacy_phone,
+                    "website": website,
+                },
+                actor=actor,
+                source_type=provenance_source,
+                source_ref=source_ref_batch("crm_import_batch", plan.batch_id),
+                trusted=True,
+                action="CREATE",
+                client_id=int(plan.client_id),
+            )
             if fail_after == "after_company_insert" and actual_company_inserts == 1:
                 raise RuntimeError("Injected failure after company insert.")
         else:
@@ -324,6 +372,41 @@ def apply_crm_import_plan_on_connection(
                 if proposed_key not in company_key_to_id:
                     raise BatchNotReusable("Missing proposed company resolution.")
                 company_id, company_external_record_no = company_key_to_id[proposed_key]
+
+        mapped = row.mapped or {}
+        from shared_note_history_import import normalize_record_no
+
+        incoming_record_no = normalize_record_no(mapped.get("external_record_no"))
+        capture_import_company_alias(
+            conn,
+            company_id=company_id,
+            mapped=mapped,
+            source_system=source_system,
+            client_id=int(client_id),
+            source_batch_id=int(batch_id),
+            source_row=int(row.source_row_number) if row.source_row_number else None,
+            created_by_user_id=int(actor.id) if actor.id is not None else None,
+        )
+        if is_leadmaster_source(source_system) and incoming_record_no:
+            _ident_id, ident_status = upsert_company_source_identity(
+                conn,
+                company_id=company_id,
+                source_system=SOURCE_LEADMASTER,
+                source_record_no=incoming_record_no,
+                client_id=int(client_id),
+                source_company_name=_blank(mapped.get("company_name")),
+                source_address=_blank(mapped.get("address")),
+                source_city=_blank(mapped.get("city")),
+                source_state=_blank(mapped.get("state")),
+                source_zip=_blank(mapped.get("zip")),
+                source_phone=_blank(mapped.get("phone")),
+                source_website=_blank(mapped.get("website")),
+                source_batch_id=int(batch_id),
+                source_row=int(row.source_row_number) if row.source_row_number else None,
+                created_by_user_id=int(actor.id) if actor.id is not None else None,
+            )
+            if ident_status == "conflict":
+                raise BatchNotReusable(IDENTITY_BOUND_DETAIL)
 
         # -----------------
         # Contact resolve/apply
@@ -351,16 +434,19 @@ def apply_crm_import_plan_on_connection(
                 raise BatchNotReusable("Missing contact name/email for create_contact.")
 
             title = _blank(mapped.get("contact_title"))
-            stored_phone = format_us_phone_display(_blank(mapped.get("contact_phone")))
+            stored_phone, stored_phone_ext = store_phone_parts(
+                _blank(mapped.get("contact_phone")), field="phone"
+            )
+            stored_phone_ext = stored_phone_ext or None
 
             cur = conn.execute(
                 """
                 INSERT INTO contacts (
                     company_id, external_record_no,
                     first_name, last_name, title,
-                    phone, alt_phone, email,
+                    phone, phone_extension, alt_phone, email,
                     source_row_index
-                ) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?)
                 """,
                 (
                     company_id,
@@ -369,6 +455,7 @@ def apply_crm_import_plan_on_connection(
                     last,
                     title,
                     stored_phone,
+                    stored_phone_ext,
                     stored_email,
                     int(row.source_row_number),
                 ),
@@ -380,6 +467,31 @@ def apply_crm_import_plan_on_connection(
 
             # Deterministic key refresh inside the same transaction.
             upsert_contact_phone_keys(conn, contact_id, stored_phone, "")
+            from data_steward import (
+                ENTITY_CONTACT,
+                record_populated_creates,
+                source_ref_batch,
+            )
+
+            record_populated_creates(
+                conn,
+                entity_type=ENTITY_CONTACT,
+                entity_id=contact_id,
+                fields={
+                    "first_name": first,
+                    "last_name": last,
+                    "title": title,
+                    "email": stored_email,
+                    "phone": stored_phone,
+                    "company_id": str(company_id),
+                },
+                actor=actor,
+                source_type=provenance_source,
+                source_ref=source_ref_batch("crm_import_batch", plan.batch_id),
+                trusted=True,
+                action="CREATE",
+                client_id=int(plan.client_id),
+            )
             if fail_after == "after_contact_insert" and actual_contact_inserts == 1:
                 raise RuntimeError("Injected failure after contact insert.")
         else:
@@ -430,7 +542,7 @@ def apply_crm_import_plan_on_connection(
                 (
                     int(client_id),
                     company_id,
-                    company_external_record_no,
+                    incoming_record_no or company_external_record_no,
                     resolved_status,
                     planned_notes,
                     1 if is_hot_prospect_status(resolved_status) else 0,
@@ -442,6 +554,24 @@ def apply_crm_import_plan_on_connection(
             relationship_key_to_id[proposed_key] = relationship_id
             relationship_key_to_company_id[proposed_key] = int(company_id)
             actual_relationship_inserts += 1
+            from data_steward import (
+                ENTITY_CLIENT_RELATIONSHIP,
+                record_populated_creates,
+                source_ref_batch,
+            )
+
+            record_populated_creates(
+                conn,
+                entity_type=ENTITY_CLIENT_RELATIONSHIP,
+                entity_id=relationship_id,
+                fields={"status": resolved_status, "company_id": str(company_id)},
+                actor=actor,
+                source_type=provenance_source,
+                source_ref=source_ref_batch("crm_import_batch", plan.batch_id),
+                trusted=True,
+                action="CREATE",
+                client_id=int(plan.client_id),
+            )
             if fail_after == "after_relationship_insert" and actual_relationship_inserts == 1:
                 raise RuntimeError("Injected failure after relationship insert.")
         else:
@@ -828,6 +958,8 @@ def confirm_admin_crm_import_batch(
     identity_mode: str = IDENTITY_CRM,
     exclude_closed: bool = False,
     use_imported_status_for_existing: bool = False,
+    source_system: str = SOURCE_CRM_IMPORT,
+    provenance_source_type: str | None = None,
 ) -> dict[str, Any]:
     if not actor or not bool(actor.active):
         raise PermissionError("User not found.")
@@ -839,16 +971,24 @@ def confirm_admin_crm_import_batch(
             # Optional read-only fast precheck (no DDL). Locked validation happens
             # again via plan_crm_import_batch inside BEGIN IMMEDIATE.
             batch_row = conn.execute(
-                """
-                SELECT status FROM crm_import_batches
-                WHERE id = ? AND client_id = ?
-                """,
+                "SELECT * FROM crm_import_batches WHERE id = ? AND client_id = ?",
                 (int(batch_id), int(client_id)),
             ).fetchone()
             if batch_row is None:
                 raise LookupError("Import batch not found.")
+            from leadmaster_refresh_staging import refuse_refresh_as_initial_import
+
+            refuse_refresh_as_initial_import(batch_row)
             if _blank(batch_row["status"]) != "previewed":
                 raise BatchNotReusable("Import batch is not in previewed status.")
+            try:
+                frozen_source = normalize_source_type(
+                    batch_row["source_type"] if "source_type" in batch_row.keys() else ""
+                )
+            except ValueError:
+                frozen_source = PROVENANCE_CRM_IMPORT
+            source_system = alias_source_system(frozen_source)
+            provenance_source_type = frozen_source
 
             conn.execute("BEGIN IMMEDIATE")
 
@@ -874,9 +1014,11 @@ def confirm_admin_crm_import_batch(
 
             # Gate on fully importable-only plans.
             excluded_closed = int(plan.counts.get("excluded_closed") or 0)
+            excluded_skip = int(plan.counts.get("excluded_skip") or 0)
+            excluded_total = excluded_closed + excluded_skip
             if int(plan.counts.get("needs_review_rows") or 0) != 0:
                 raise BatchNotReusable("Import batch contains needs-review rows.")
-            if int(plan.counts.get("importable_rows") or 0) + excluded_closed != int(
+            if int(plan.counts.get("importable_rows") or 0) + excluded_total != int(
                 plan.total_rows
             ):
                 raise BatchNotReusable("Import batch is not fully importable.")
@@ -888,6 +1030,8 @@ def confirm_admin_crm_import_batch(
                 plan=plan,
                 actor=actor,
                 fail_after=fail_after,
+                source_system=source_system,
+                provenance_source_type=provenance_source_type,
             )
             conn.commit()
             return result

@@ -55,7 +55,9 @@ function duplicateStatus(kind: DupStatusKind): { text: string } {
 function formatUsPhoneDisplay(raw: string): string {
   const trimmed = raw.trim()
   if (!trimmed) return ''
-  const extMatch = trimmed.match(/(?:\s+extension|\s+ext\.?|\s+x|x|#)\s*([0-9][0-9 \-]*)$/i)
+  const extMatch = trimmed.match(
+    /(?:(?:[\s\-./,])*(?:extension|ext\.?|xt)\s*[:.\-]?\s*|(?<![A-Za-z])x\s*[:.\-]?\s*|\s*#\s*)(\d{1,6})\)?\s*$/i,
+  )
   let main = trimmed
   let ext = ''
   if (extMatch && extMatch.index != null) {

@@ -7,12 +7,14 @@ No live ZoomInfo API — callers supply a snapshot (tests and future fetch).
 
 from __future__ import annotations
 
+from staff_context import resolve_staff_actor
+
 from datetime import datetime
 from typing import Any
 
 from access import get_default_user, require_write_client_id, user_can_access_client
 from activities_data import insert_activity_row
-from contact_phone import format_us_phone_display, upsert_contact_phone_keys
+from contact_phone import store_phone_parts, upsert_contact_phone_keys
 from db import get_connection
 from models import (
     ManualContactMatch,
@@ -63,7 +65,7 @@ def _now() -> str:
 
 
 def _require_user_and_client(client_id: object) -> tuple[Any, int]:
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
     cid = require_write_client_id(client_id, user_id=user.id)
@@ -496,13 +498,19 @@ def apply_zoominfo_contact_update(
                 new_val = zi.get(key, "")
                 if not new_val:
                     continue
+                phone_ext = ""
                 if key in {"phone", "alt_phone"}:
-                    new_val = format_us_phone_display(str(new_val))
+                    new_val, phone_ext = store_phone_parts(str(new_val), field=key)
                 old_val = _row_text(row, key)
                 if new_val == old_val:
                     continue
                 updates.append(f"{key} = ?")
                 params.append(new_val)
+                if key in {"phone", "alt_phone"}:
+                    ext_key = "phone_extension" if key == "phone" else "alt_phone_extension"
+                    if ext_key in contact_cols:
+                        updates.append(f"{ext_key} = ?")
+                        params.append(phone_ext or None)
                 changed.append(key)
 
             zi_contact_id = _blank(body.zoominfo.zoominfo_contact_id)

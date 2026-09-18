@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -5,13 +7,16 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from access import (
     WriteClientIdError,
     dashboard_scope_summary,
-    get_default_user,
     get_user_by_id,
     list_clients_for_user,
 )
+from staff_context import resolve_staff_actor
+from staff_rbac import user_has_permission
 from auth_http import (
     add_staff_csrf_middleware,
+    auth_enforcement_active,
     require_administrator,
+    require_authenticated_staff,
     require_client_access,
     require_client_setup_editor,
     staff_auth_router,
@@ -36,7 +41,7 @@ from carmeco_data import (
     update_relationship_notes,
     update_relationship_status,
 )
-from db import ensure_schema
+from db import ensure_schema, get_connection
 from milestones_data import (
     create_milestone,
     list_milestones_for_company,
@@ -122,8 +127,12 @@ from models import (
     CrmImportDryRunResponse,
     CrmImportConfirmRequest,
     CrmImportConfirmResponse,
+    CrmImportHistoryPage,
     CrmImportMappingRequest,
+    CrmImportMatchResolutionRequest,
+    CrmImportMatchResolutionResponse,
     CrmImportRowsPage,
+    CrmImportSourceTypeRequest,
     CrmImportStatusResolutionRequest,
     CrmImportStatusResolutionResponse,
     CrmImportUploadResult,
@@ -335,14 +344,32 @@ from crm_import_staging import (
     MAX_FILE_BYTES,
     cancel_crm_import,
     get_crm_import_batch,
+    list_crm_import_batches,
     list_crm_import_rows,
     save_crm_import_mapping,
+    save_crm_import_source_type,
     upload_crm_import,
 )
 from crm_import_plan import dry_run_crm_import
 from crm_identity_keys import IdentityKeysNotReady
 from crm_import_confirm import confirm_admin_crm_import_batch
 from crm_import_status_resolution import save_crm_import_status_resolution
+from crm_import_match_resolution import save_crm_import_match_resolution_http
+from leadmaster_refresh_http import (
+    confirm_refresh,
+    preview_refresh,
+    readiness_refresh,
+    refresh_meta,
+    upload_refresh,
+)
+from leadmaster_refresh_staging import (
+    RefreshApplyDisabled,
+    RefreshLiveWriteError,
+    refresh_batch_view,
+    save_refresh_mapping,
+    save_refresh_policy,
+    save_refresh_resolutions,
+)
 from shared_note_history_import import (
     MAX_FILE_BYTES as SNH_MAX_FILE_BYTES,
     confirm_shared_note_history_import,
@@ -428,6 +455,22 @@ from reports_data import (
     list_report_records,
     list_team_performance,
 )
+from master_data_export import build_master_data_export
+
+def _cors_allow_origins() -> list[str]:
+    origins = [
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:5174",
+    ]
+    extra = os.environ.get("NORTHSTAR_CORS_ORIGINS", "")
+    for part in extra.split(","):
+        origin = part.strip()
+        if origin and origin not in origins:
+            origins.append(origin)
+    return origins
+
 
 app = FastAPI(
     title="NorthStar AI",
@@ -440,14 +483,17 @@ app = FastAPI(
 add_staff_csrf_middleware(app)
 app.include_router(staff_auth_router)
 
+if os.environ.get("NORTHSTAR_TRUST_PROXY", "").strip() == "1":
+    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+    app.add_middleware(
+        ProxyHeadersMiddleware,
+        trusted_hosts=["127.0.0.1", "localhost", "::1"],
+    )
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:5174",
-    ],
+    allow_origins=_cors_allow_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -457,6 +503,14 @@ app.add_middleware(
 @app.exception_handler(WriteClientIdError)
 async def write_client_id_error_handler(_request, exc: WriteClientIdError):
     return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+
+@app.exception_handler(PermissionError)
+async def permission_error_handler(_request, exc: PermissionError):
+    return JSONResponse(
+        status_code=403,
+        content={"detail": str(exc) or "Not authorized."},
+    )
 
 
 @app.on_event("startup")
@@ -482,6 +536,26 @@ def health():
     return {"status": "healthy"}
 
 
+@app.get("/api/ready")
+def ready():
+    """Readiness for reverse-proxy checks. No paths, tokens, or user data."""
+    database = "error"
+    try:
+        conn = get_connection()
+        try:
+            conn.execute("SELECT 1")
+            database = "ok"
+        finally:
+            conn.close()
+    except Exception:
+        database = "error"
+    return {
+        "status": "ready" if database == "ok" else "degraded",
+        "database": database,
+        "auth_enforced": auth_enforcement_active(),
+    }
+
+
 @app.get("/api/client", response_model=ActiveClient)
 def active_client(
     client_id: int | None = Query(default=None),
@@ -497,6 +571,10 @@ def list_prospects_api(
     all_clients: bool = Query(default=False),
     q: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    milestone_type: str | None = Query(
+        default=None,
+        description="Optional: Quote | Purchase Order | WebLead | Appointment Set",
+    ),
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ):
@@ -507,6 +585,7 @@ def list_prospects_api(
             all_clients=all_clients,
             q=q,
             status=status,
+            milestone_type=milestone_type,
             limit=limit,
             offset=offset,
         )
@@ -632,6 +711,7 @@ def patch_company_notes(record_no: str, body: NotesUpdateRequest):
             client_id=body.client_id,
             note_text=body.note_text,
             user=body.user,
+            mode=body.mode,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1465,13 +1545,15 @@ def follow_up_task_reschedule_api(body: FollowUpTaskRescheduleRequest):
 
 @app.get("/api/work-queue/clients")
 def work_queue_clients_api(user_id: int | None = Query(default=None)):
-    return {"clients": clients_for_work_queue(user_id)}
+    del user_id
+    actor = resolve_staff_actor()
+    return {"clients": clients_for_work_queue(actor.id if actor is not None else None)}
 
 
 @app.get("/api/users/default", response_model=UserClientsResponse)
 def default_user_with_clients():
-    """Default logged-in specialist (Julie) and assigned clients — architecture support."""
-    user = get_default_user()
+    """Authenticated session user and allowed clients."""
+    user = resolve_staff_actor()
     if user is None:
         raise HTTPException(status_code=404, detail="Default user not found.")
     clients = list_clients_for_user(user.id, active_only=True)
@@ -1479,8 +1561,11 @@ def default_user_with_clients():
 
 
 @app.get("/api/users/{user_id}/clients", response_model=UserClientsResponse)
-def user_clients(user_id: int):
-    """List clients assigned to a NorthStar user (security boundary)."""
+def user_clients(user_id: int, request: Request):
+    """List clients for a user. Self or administrator only."""
+    actor = require_authenticated_staff(request)
+    if int(actor.id) != int(user_id) and not bool(actor.is_administrator):
+        raise HTTPException(status_code=403, detail="Not authorized.")
     user = get_user_by_id(user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found.")
@@ -1500,8 +1585,9 @@ def dashboard_scope(
     Dashboard query foundation:
     - no client_id → aggregates across every assigned client
     - client_id set → aggregates for that client only (assignment required)
+    Query user_id is ignored as actor identity.
     """
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found.")
     try:
@@ -1517,7 +1603,7 @@ def dashboard_follow_ups(
     client_id: int = Query(..., description="Active Client id — follow-ups are client-scoped."),
 ):
     """Open follow-up tasks for the Active Client, split overdue / due today / upcoming."""
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found.")
     try:
@@ -1896,6 +1982,29 @@ def delete_campaign_api(client_id: int, campaign_id: int):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# --- Administrator Master Data Export ---
+
+
+@app.get("/api/admin/master-data-export")
+def admin_master_data_export_api(
+    request: Request,
+    mode: str = Query(default="companies"),
+    file_format: str = Query(default="xlsx", alias="format"),
+):
+    require_administrator(request)
+    try:
+        filename, content, media_type = build_master_data_export(
+            mode=mode, file_format=file_format
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # --- Client Onboarding Wizard (administrator) ---
@@ -2789,6 +2898,16 @@ async def upload_admin_crm_import_api(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get(
+    "/api/clients/{client_id}/admin/imports",
+    response_model=CrmImportHistoryPage,
+)
+def list_admin_crm_import_history_api(client_id: int, request: Request, limit: int = 20):
+    _require_admin_client(request, client_id)
+    items = list_crm_import_batches(client_id, limit=limit)
+    return CrmImportHistoryPage(client_id=int(client_id), items=items)
+
+
 @app.get("/api/clients/{client_id}/admin/imports/{batch_id}")
 def get_admin_crm_import_api(client_id: int, batch_id: int, request: Request):
     _require_admin_client(request, client_id)
@@ -2820,6 +2939,262 @@ def list_admin_crm_import_rows_api(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/admin/leadmaster-refresh/meta")
+def leadmaster_refresh_meta_api(request: Request):
+    require_administrator(request)
+    return refresh_meta()
+
+
+@app.get("/api/admin/data-steward/meta")
+def data_steward_meta_api(request: Request):
+    require_administrator(request)
+    from data_steward import live_destructive_enabled
+
+    return {
+        "live_mutations_enabled": live_destructive_enabled(),
+        "archive_enabled": False,
+        "delete_enabled": False,
+        "merge_enabled": False,
+        "message": "Live archive/delete/merge are not enabled",
+    }
+
+
+@app.get("/api/admin/data-steward/provenance")
+def data_steward_provenance_api(
+    request: Request,
+    entity_type: str = "",
+    entity_id: int = 0,
+    field: str = "",
+    source_type: str = "",
+    actor_id: int = 0,
+    since: str = "",
+    until: str = "",
+    limit: int = 100,
+):
+    require_administrator(request)
+    from data_steward import current_field_authority, provenance_history, provenance_table_ready
+
+    with get_connection() as conn:
+        if not provenance_table_ready(conn):
+            return {
+                "schema_ready": False,
+                "events": [],
+                "current": None,
+                "message": "Provenance schema is not on live northstar.db",
+            }
+        events = provenance_history(
+            conn,
+            entity_type=entity_type or None,
+            entity_id=entity_id or None,
+            field=field,
+            source_type=source_type,
+            actor_id=actor_id or None,
+            since=since,
+            until=until,
+            limit=min(max(int(limit or 100), 1), 500),
+        )
+        current = None
+        if entity_type and entity_id and field:
+            current = current_field_authority(
+                conn, entity_type=entity_type, entity_id=int(entity_id), field=field
+            )
+        return {
+            "schema_ready": True,
+            "current": current,
+            "events": events,
+        }
+
+
+@app.post("/api/clients/{client_id}/admin/leadmaster-refresh")
+async def upload_leadmaster_refresh_api(
+    client_id: int,
+    request: Request,
+    file: UploadFile = File(...),
+    worksheet: str = Form(default=""),
+):
+    actor = _require_admin_client(request, client_id)
+    content = await file.read(MAX_FILE_BYTES + 1)
+    if len(content) > MAX_FILE_BYTES:
+        raise HTTPException(status_code=400, detail="This file is too large to upload.")
+    try:
+        return upload_refresh(
+            client_id=client_id,
+            actor=actor,
+            filename=file.filename or "upload.csv",
+            content=content,
+            worksheet=worksheet or "",
+        )
+    except RefreshLiveWriteError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/clients/{client_id}/admin/leadmaster-refresh/{batch_id}")
+def get_leadmaster_refresh_batch_api(client_id: int, batch_id: int, request: Request):
+    _require_admin_client(request, client_id)
+    try:
+        return refresh_batch_view(client_id, batch_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/clients/{client_id}/admin/leadmaster-refresh/{batch_id}/mapping")
+def save_leadmaster_refresh_mapping_api(
+    client_id: int, batch_id: int, body: dict, request: Request
+):
+    actor = _require_admin_client(request, client_id)
+    try:
+        return save_refresh_mapping(
+            client_id=client_id,
+            batch_id=batch_id,
+            actor=actor,
+            mapping=dict(body.get("mapping") or {}),
+        )
+    except RefreshLiveWriteError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/clients/{client_id}/admin/leadmaster-refresh/{batch_id}/policy")
+def save_leadmaster_refresh_policy_api(
+    client_id: int, batch_id: int, body: dict, request: Request
+):
+    actor = _require_admin_client(request, client_id)
+    try:
+        return save_refresh_policy(
+            client_id=client_id,
+            batch_id=batch_id,
+            actor=actor,
+            policy_payload=dict(body.get("policy") or body),
+        )
+    except RefreshLiveWriteError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/clients/{client_id}/admin/leadmaster-refresh/{batch_id}/preview")
+def preview_leadmaster_refresh_api(client_id: int, batch_id: int, request: Request):
+    _require_admin_client(request, client_id)
+    try:
+        return preview_refresh(client_id=client_id, batch_id=batch_id, persist=False)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/clients/{client_id}/admin/leadmaster-refresh/{batch_id}/review")
+def review_leadmaster_refresh_api(client_id: int, batch_id: int, request: Request):
+    _require_admin_client(request, client_id)
+    try:
+        plan = preview_refresh(client_id=client_id, batch_id=batch_id, persist=False)
+        return {
+            "plan_fingerprint": plan.get("plan_fingerprint"),
+            "policy": plan.get("policy_visible") or plan.get("policy"),
+            "counts": plan.get("counts"),
+            "review_rows": plan.get("review_rows") or [],
+        }
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/clients/{client_id}/admin/leadmaster-refresh/{batch_id}/recalculate")
+def recalculate_leadmaster_refresh_api(client_id: int, batch_id: int, request: Request):
+    _require_admin_client(request, client_id)
+    try:
+        return preview_refresh(client_id=client_id, batch_id=batch_id, persist=True)
+    except RefreshLiveWriteError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/clients/{client_id}/admin/leadmaster-refresh/{batch_id}/resolutions")
+def save_leadmaster_refresh_resolutions_api(
+    client_id: int, batch_id: int, body: dict, request: Request
+):
+    actor = _require_admin_client(request, client_id)
+    try:
+        return save_refresh_resolutions(
+            client_id=client_id,
+            batch_id=batch_id,
+            actor=actor,
+            resolutions=list(body.get("resolutions") or []),
+        )
+    except RefreshLiveWriteError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/clients/{client_id}/admin/leadmaster-refresh/{batch_id}/readiness")
+def leadmaster_refresh_readiness_api(client_id: int, batch_id: int, request: Request):
+    actor = _require_admin_client(request, client_id)
+    try:
+        return readiness_refresh(client_id=client_id, batch_id=batch_id, actor=actor)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/clients/{client_id}/admin/leadmaster-refresh/{batch_id}/confirm")
+def confirm_leadmaster_refresh_api(client_id: int, batch_id: int, request: Request, body: dict | None = None):
+    actor = _require_admin_client(request, client_id)
+    payload = body or {}
+    expected = str(payload.get("plan_fingerprint") or "")
+    try:
+        return confirm_refresh(
+            client_id=client_id,
+            batch_id=batch_id,
+            actor=actor,
+            expected_fingerprint=expected,
+        )
+    except RefreshLiveWriteError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RefreshApplyDisabled as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.delete("/api/clients/{client_id}/admin/imports/{batch_id}")
@@ -2864,6 +3239,34 @@ def save_admin_crm_import_mapping_api(
 
 
 @app.put(
+    "/api/clients/{client_id}/admin/imports/{batch_id}/source-type",
+    response_model=CrmImportBatchView,
+)
+def save_admin_crm_import_source_type_api(
+    client_id: int,
+    batch_id: int,
+    body: CrmImportSourceTypeRequest,
+    request: Request,
+):
+    actor = _require_admin_client(request, client_id)
+    try:
+        return save_crm_import_source_type(
+            client_id,
+            batch_id,
+            actor=actor,
+            source_type=body.source_type,
+        )
+    except BatchNotReusable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put(
     "/api/clients/{client_id}/admin/imports/{batch_id}/rows/{row_id}/status-resolution",
     response_model=CrmImportStatusResolutionResponse,
 )
@@ -2886,6 +3289,40 @@ def save_admin_crm_import_status_resolution_api(
             clear=bool(body.clear),
         )
         return CrmImportStatusResolutionResponse(**result)
+    except BatchNotReusable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put(
+    "/api/clients/{client_id}/admin/imports/{batch_id}/rows/{row_id}/match-resolution",
+    response_model=CrmImportMatchResolutionResponse,
+)
+def save_admin_crm_import_match_resolution_api(
+    client_id: int,
+    batch_id: int,
+    row_id: int,
+    body: CrmImportMatchResolutionRequest,
+    request: Request,
+):
+    actor = _require_admin_client(request, client_id)
+    try:
+        result = save_crm_import_match_resolution_http(
+            client_id,
+            batch_id,
+            row_id,
+            actor=actor,
+            resolution_type=body.resolution_type,
+            company_id=body.company_id,
+            contact_id=body.contact_id,
+            clear=bool(body.clear),
+        )
+        return CrmImportMatchResolutionResponse(**result)
     except BatchNotReusable as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -3896,10 +4333,16 @@ def research_company_api(body: ResearchStartRequest, request: Request):
     """Research This Company — Quick (deterministic) or Deep (background job)."""
     try:
         depth = (body.research_depth or "quick").strip().lower()
+        actor = resolve_staff_actor()
+        if actor is None:
+            raise PermissionError("Not authorized.")
+        cid = body.working_for_client_id
         if depth in {"deep", "deep_research"}:
             actor = require_administrator(request)
             return start_company_research(body, user_id=actor.id)
-        return start_company_research(body)
+        if not user_has_permission(int(actor.id), "research.run", client_id=cid):
+            raise PermissionError("Not authorized.")
+        return start_company_research(body, user_id=actor.id)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
@@ -3938,7 +4381,14 @@ def research_company_get(
             if depth in {"deep", "deep_research"}:
                 actor = require_administrator(request)
                 return start_company_research(body, user_id=actor.id)
-            return start_company_research(body)
+            actor = resolve_staff_actor()
+            if actor is None:
+                raise PermissionError("Not authorized.")
+            if not user_has_permission(
+                int(actor.id), "research.run", client_id=working_for_client_id
+            ):
+                raise PermissionError("Not authorized.")
+            return start_company_research(body, user_id=actor.id)
         return get_latest_research(
             company_id=company_id,
             external_record_no=external_record_no,

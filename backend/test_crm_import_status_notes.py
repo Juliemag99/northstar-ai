@@ -262,7 +262,7 @@ class StatusNotesPlanConfirmTests(unittest.TestCase):
         )
         with get_connection() as conn:
             plan = plan_crm_import_batch(conn, client_id=self.client_id, batch_id=batch_id)
-            self.assertEqual(PLANNER_VERSION, "crm-import-plan-v7")
+            self.assertEqual(PLANNER_VERSION, "crm-import-plan-v11")
             row = plan.rows[0]
             self.assertEqual(row.status_action, STATUS_USE_IMPORTED)
             self.assertEqual(row.resolved_status, "Active")
@@ -360,15 +360,19 @@ class StatusNotesPlanConfirmTests(unittest.TestCase):
             conflict_batch = _insert_batch(
                 conn,
                 self.client_id,
-                ["Company", "Status"],
-                [{"Company": "Existing Co SN", "Status": "New"}],
+                ["Company", "Record No.", "Status"],
+                [{"Company": "Existing Co SN", "Record No.": "NS-EX-SN", "Status": "New"}],
             )
 
         save_crm_import_mapping(
             self.client_id,
             conflict_batch,
             actor=_actor(),
-            mapping={"company_name": "Company", "relationship_status": "Status"},
+            mapping={
+                "company_name": "Company",
+                "external_record_no": "Record No.",
+                "relationship_status": "Status",
+            },
         )
         with get_connection() as conn:
             conflict_plan = plan_crm_import_batch(
@@ -389,14 +393,18 @@ class StatusNotesPlanConfirmTests(unittest.TestCase):
             ok_batch = _insert_batch(
                 conn,
                 self.client_id,
-                ["Company", "Notes"],
-                [{"Company": "Existing Co SN", "Notes": "Fresh note"}],
+                ["Company", "Record No.", "Notes"],
+                [{"Company": "Existing Co SN", "Record No.": "NS-EX-SN", "Notes": "Fresh note"}],
             )
         save_crm_import_mapping(
             self.client_id,
             ok_batch,
             actor=_actor(),
-            mapping={"company_name": "Company", "relationship_notes": "Notes"},
+            mapping={
+                "company_name": "Company",
+                "external_record_no": "Record No.",
+                "relationship_notes": "Notes",
+            },
         )
         with get_connection() as conn:
             ok_plan = plan_crm_import_batch(conn, client_id=self.client_id, batch_id=ok_batch)
@@ -456,14 +464,18 @@ class StatusNotesPlanConfirmTests(unittest.TestCase):
             batch_id = _insert_batch(
                 conn,
                 self.client_id,
-                ["Company", "Notes"],
-                [{"Company": "Dup Co SN", "Notes": "Keep me"}],
+                ["Company", "Record No.", "Notes"],
+                [{"Company": "Dup Co SN", "Record No.": "NS-DUP-SN", "Notes": "Keep me"}],
             )
         save_crm_import_mapping(
             self.client_id,
             batch_id,
             actor=_actor(),
-            mapping={"company_name": "Company", "relationship_notes": "Notes"},
+            mapping={
+                "company_name": "Company",
+                "external_record_no": "Record No.",
+                "relationship_notes": "Notes",
+            },
         )
         with get_connection() as conn:
             plan = plan_crm_import_batch(conn, client_id=self.client_id, batch_id=batch_id)
@@ -496,14 +508,18 @@ class StatusNotesPlanConfirmTests(unittest.TestCase):
             batch2 = _insert_batch(
                 conn,
                 self.client_id,
-                ["Company", "Notes"],
-                [{"Company": "Dup Co SN", "Notes": "Extra"}],
+                ["Company", "Record No.", "Notes"],
+                [{"Company": "Dup Co SN", "Record No.": "NS-DUP-SN", "Notes": "Extra"}],
             )
         save_crm_import_mapping(
             self.client_id,
             batch2,
             actor=_actor(),
-            mapping={"company_name": "Company", "relationship_notes": "Notes"},
+            mapping={
+                "company_name": "Company",
+                "external_record_no": "Record No.",
+                "relationship_notes": "Notes",
+            },
         )
         with get_connection() as conn:
             plan2 = plan_crm_import_batch(conn, client_id=self.client_id, batch_id=batch2)

@@ -160,6 +160,13 @@
   font-weight: 650;
 }
 
+.client-badge__name {
+  display: block;
+  font-size: 0.92rem;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
 .sidebar-nav {
   display: flex;
   flex-direction: column;
@@ -543,6 +550,21 @@
   }
 }
 
+.brand-text .pilot-indicator {
+  display: inline-block;
+  align-self: flex-start;
+  margin-top: 0.2rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 999px;
+  background: #e8eef7;
+  color: #35557a;
+  opacity: 1;
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .topbar-actions {
   display: flex;
   align-items: center;
@@ -716,6 +738,16 @@
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--muted);
+}
+
+.dashboard-start-here {
+  margin: 0 0 0.55rem;
+  padding: 0.55rem 0.7rem;
+  border-left: 3px solid #2f7a58;
+  background: rgba(47, 122, 88, 0.08);
+  color: var(--ink);
+  font-size: 0.86rem;
+  line-height: 1.4;
 }
 
 .stat-grid {

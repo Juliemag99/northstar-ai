@@ -965,7 +965,7 @@ def test_matching_policy_safety_cases() -> None:
         if scope.contact_action == "use_existing_contact":
             _fail("must not reuse contact from wrong company")
 
-        # CDI: name-only must not high-reuse
+        # CRM and CDI: unique name-only must not auto-reuse a stored master
         name_batch = _mapped_batch(
             http,
             client_id,
@@ -986,8 +986,8 @@ def test_matching_policy_safety_cases() -> None:
             )
         crm_act = crm_name.rows[0].company_action
         cdi_act = cdi_name.rows[0].company_action
-        if crm_act != "use_existing_company":
-            _fail(f"CRM name-only should reuse when unique: {crm_act}")
+        if crm_act != "possible_company_match":
+            _fail(f"CRM name-only must be possible not reuse: {crm_act}")
         if cdi_act != "possible_company_match":
             _fail(f"CDI name-only must be possible not reuse: {cdi_act}")
 

@@ -6,6 +6,8 @@ Never infers Carmeco. Does not use Client Knowledge.
 
 from __future__ import annotations
 
+from staff_context import resolve_staff_actor
+
 from typing import Any
 
 from access import get_default_user, require_write_client_id, user_can_access_client
@@ -15,6 +17,7 @@ from company_match import (
     find_scored_matches,
     names_match,
 )
+from contact_phone import store_phone_parts
 from db import get_connection
 from models import (
     ManualCompanyMatch,
@@ -41,7 +44,7 @@ def _blank(value: object | None) -> str:
 
 
 def _require_user_and_client(client_id: object) -> tuple[Any, int]:
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
     cid = require_write_client_id(client_id, user_id=user.id)
@@ -72,10 +75,12 @@ def _assert_other_ccrs_unchanged(conn, company_id: int, client_id: int, before: 
 
 
 def _already_assigned(conn, company_id: int, client_id: int) -> bool:
+    cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(client_company_relationships)")}
+    archived_sql = "AND TRIM(COALESCE(archived_at,'')) = ''" if "archived_at" in cols else ""
     row = conn.execute(
-        """
+        f"""
         SELECT 1 FROM client_company_relationships
-        WHERE company_id = ? AND client_id = ?
+        WHERE company_id = ? AND client_id = ? {archived_sql}
         LIMIT 1
         """,
         (company_id, client_id),
@@ -212,8 +217,18 @@ def _link_company_on_conn(
     user,
     created_by: str,
     notes: str,
+    typed_name: str = "",
+    typed_record_no: str = "",
+    typed_address: str = "",
+    typed_city: str = "",
+    typed_state: str = "",
+    typed_zip: str = "",
+    typed_phone: str = "",
+    typed_website: str = "",
 ) -> dict[str, Any]:
+    from company_aliases import SOURCE_MANUAL, should_store_alias, upsert_company_alias
     from crm_add_data import ensure_client_relationship
+    from crm_identity_keys import normalize_record_no
 
     row = conn.execute(
         "SELECT id, company_name, external_record_no FROM companies WHERE id = ?",
@@ -228,14 +243,51 @@ def _link_company_on_conn(
     )
     company_name = _blank(row["company_name"])
     record_no = _blank(row["external_record_no"])
+    incoming_rn = normalize_record_no(typed_record_no)
+    ccr_rn = incoming_rn or record_no
     rel_id, created, _status = ensure_client_relationship(
         conn,
         client_id=client_id,
         company_id=company_id,
-        external_record_no=record_no,
+        external_record_no=ccr_rn,
         user_id=int(user.id),
         provenance_note=_blank(notes) or f"Linked by {created_by}.",
     )
+    if created:
+        from data_steward import ENTITY_CLIENT_RELATIONSHIP, record_populated_creates, source_ref_manual
+
+        record_populated_creates(
+            conn,
+            entity_type=ENTITY_CLIENT_RELATIONSHIP,
+            entity_id=int(rel_id),
+            fields={"status": _status or "New", "company_id": str(company_id)},
+            actor=user,
+            source_ref=source_ref_manual(),
+            action="CREATE",
+            client_id=client_id,
+        )
+    if should_store_alias(
+        source_system=SOURCE_MANUAL,
+        alias_name=_blank(typed_name),
+        canonical_name=company_name,
+        source_record_no=incoming_rn,
+        master_record_no=record_no,
+    ):
+        upsert_company_alias(
+            conn,
+            company_id=company_id,
+            alias_name=_blank(typed_name),
+            source_system=SOURCE_MANUAL,
+            source_record_no=incoming_rn,
+            client_id=client_id,
+            source_address=_blank(typed_address),
+            source_city=_blank(typed_city),
+            source_state=_blank(typed_state),
+            source_zip=_blank(typed_zip),
+            source_phone=_blank(typed_phone),
+            source_website=_blank(typed_website),
+            created_by_user_id=int(user.id),
+        )
     _assert_other_ccrs_unchanged(conn, company_id, client_id, other_before)
     if already and not created:
         return {
@@ -297,6 +349,14 @@ def save_manual_company(body: ManualCompanySaveRequest) -> ManualCompanySaveResu
                     user=user,
                     created_by=created_by,
                     notes=_blank(body.notes),
+                    typed_name=name,
+                    typed_record_no=_blank(body.external_record_no),
+                    typed_address=_blank(body.address),
+                    typed_city=_blank(body.city),
+                    typed_state=_blank(body.state),
+                    typed_zip=_blank(body.zip),
+                    typed_phone=_blank(body.phone),
+                    typed_website=_blank(body.website),
                 )
                 conn.commit()
                 return ManualCompanySaveResult(**result)
@@ -354,6 +414,7 @@ def save_manual_company(body: ManualCompanySaveRequest) -> ManualCompanySaveResu
                 "created_at",
                 "last_updated_at",
             ]
+            phone_main, phone_ext = store_phone_parts(_blank(body.phone), field="legacy_phone")
             insert_vals: list[object] = [
                 record_no,
                 name,
@@ -362,7 +423,7 @@ def save_manual_company(body: ManualCompanySaveRequest) -> ManualCompanySaveResu
                 _blank(body.state),
                 _blank(body.zip),
                 _blank(body.website),
-                _blank(body.phone),
+                phone_main,
                 _blank(body.industry),
                 _blank(body.employee_size),
                 _blank(body.sales_volume),
@@ -370,6 +431,9 @@ def save_manual_company(body: ManualCompanySaveRequest) -> ManualCompanySaveResu
                 now,
             ]
             source_value = _blank(body.source) or "manual"
+            if "legacy_phone_extension" in columns:
+                insert_cols.insert(-2, "legacy_phone_extension")
+                insert_vals.insert(-2, phone_ext or None)
             if "source" in columns:
                 insert_cols.insert(-2, "source")
                 insert_vals.insert(-2, source_value)
@@ -386,6 +450,32 @@ def save_manual_company(body: ManualCompanySaveRequest) -> ManualCompanySaveResu
                 insert_vals,
             )
             company_id = int(cur.lastrowid)
+            from data_steward import (
+                ENTITY_CLIENT_RELATIONSHIP,
+                ENTITY_COMPANY,
+                record_populated_creates,
+                source_ref_manual,
+            )
+
+            record_populated_creates(
+                conn,
+                entity_type=ENTITY_COMPANY,
+                entity_id=company_id,
+                fields={
+                    "company_name": name,
+                    "address": _blank(body.address),
+                    "city": _blank(body.city),
+                    "state": _blank(body.state),
+                    "zip": _blank(body.zip),
+                    "phone": phone_main,
+                    "phone_extension": phone_ext or "",
+                    "website": _blank(body.website),
+                },
+                actor=user,
+                source_ref=source_ref_manual(),
+                action="CREATE",
+                client_id=client_id,
+            )
             rel_id, _created, _status = ensure_client_relationship(
                 conn,
                 client_id=client_id,
@@ -393,6 +483,16 @@ def save_manual_company(body: ManualCompanySaveRequest) -> ManualCompanySaveResu
                 external_record_no=record_no,
                 user_id=int(user.id),
                 provenance_note=_blank(body.notes) or f"Created by {created_by}.",
+            )
+            record_populated_creates(
+                conn,
+                entity_type=ENTITY_CLIENT_RELATIONSHIP,
+                entity_id=int(rel_id),
+                fields={"status": _status or "New", "company_id": str(company_id)},
+                actor=user,
+                source_ref=source_ref_manual(),
+                action="CREATE",
+                client_id=client_id,
             )
             client_name = _blank(
                 conn.execute("SELECT name FROM clients WHERE id = ?", (client_id,)).fetchone()["name"]

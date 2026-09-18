@@ -39,6 +39,8 @@ export type CrmImportBatch = {
   mapping: Record<string, string>
   mapping_updated_at: string
   mapping_updated_by_user_id: number | null
+  source_type: string
+  suggested_mapping: Record<string, string>
   sample_rows: CrmImportRow[]
 }
 
@@ -116,12 +118,23 @@ export type CrmImportDryRunCompanyPossible = {
   company_id: number
   company_name: string
   external_record_no: string
+  address?: string
+  city?: string
+  state?: string
+  zip?: string
+  phone?: string
+  website?: string
+  identity_record_nos?: string[]
   reasons: string[]
 }
 
 export type CrmImportDryRunContactPossible = {
   contact_id: number
   display_name: string
+  email?: string
+  phone?: string
+  company_id?: number | null
+  company_name?: string
   reasons: string[]
 }
 
@@ -132,6 +145,7 @@ export type CrmImportDryRunCompanyPlan = {
   proposed_key: string | null
   created_at_source_row: number | null
   name: string
+  can_create_company?: boolean
   possibles: CrmImportDryRunCompanyPossible[]
 }
 
@@ -142,6 +156,7 @@ export type CrmImportDryRunContactPlan = {
   proposed_key: string | null
   created_at_source_row: number | null
   display_name: string
+  can_create_contact?: boolean
   possibles: CrmImportDryRunContactPossible[]
 }
 
@@ -197,6 +212,25 @@ export type CrmImportDryRunCounts = {
   imported_notes_already_present: number
   importable_rows: number
   needs_review_rows: number
+  excluded_closed?: number
+  excluded_skip?: number
+}
+
+export type CrmImportValidationSummary = {
+  client_id: number
+  client_name: string
+  source_type: string
+  original_filename: string
+  source_row_count: number
+  mapped_company_name_field: string
+  mapped_source_rn_field: string
+  mapped_status_field: string
+  mapped_notes_field: string
+  unresolved_company_matches: number
+  unresolved_contact_matches: number
+  status_conflicts: number
+  invalid_rows: number
+  confirm_blocked: boolean
 }
 
 export type CrmImportDryRunResponse = {
@@ -212,6 +246,29 @@ export type CrmImportDryRunResponse = {
   counts: CrmImportDryRunCounts
   rows: CrmImportDryRunRow[]
   status_catalog: string[]
+  source_type?: string
+  original_filename?: string
+  mapped_fields?: Record<string, string>
+  validation_summary?: CrmImportValidationSummary
+}
+
+export type CrmImportHistoryItem = {
+  batch_id: number
+  client_id: number
+  created_at: string
+  imported_at: string
+  original_filename: string
+  source_type: string
+  uploaded_by_name: string
+  status: string
+  source_row_count: number
+  created_company_count: number
+  reused_company_count: number
+  created_contact_count: number
+  reused_contact_count: number
+  created_relationship_count: number
+  existing_relationship_count: number
+  total_imported_row_count: number
 }
 
 export type CrmImportStatusResolutionRequest = {
@@ -371,6 +428,35 @@ export async function saveCrmImportMapping(
   return parseJson<CrmImportBatch>(response)
 }
 
+export async function saveCrmImportSourceType(
+  clientId: number,
+  batchId: number,
+  sourceType: string,
+): Promise<CrmImportBatch> {
+  requirePositiveIds(clientId, batchId)
+  const response = await apiFetch(
+    `/api/clients/${encodeURIComponent(String(clientId))}/admin/imports/${encodeURIComponent(String(batchId))}/source-type`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source_type: sourceType }),
+    },
+  )
+  return parseJson<CrmImportBatch>(response)
+}
+
+export async function fetchCrmImportHistory(
+  clientId: number,
+  limit = 20,
+): Promise<{ client_id: number; items: CrmImportHistoryItem[] }> {
+  requirePositiveIds(clientId)
+  const params = new URLSearchParams({ limit: String(limit) })
+  const response = await apiFetch(
+    `/api/clients/${encodeURIComponent(String(clientId))}/admin/imports?${params}`,
+  )
+  return parseJson<{ client_id: number; items: CrmImportHistoryItem[] }>(response)
+}
+
 export async function dryRunCrmImport(
   clientId: number,
   batchId: number,
@@ -446,4 +532,36 @@ export async function saveCrmImportStatusResolution(
     },
   )
   return parseJson<CrmImportStatusResolutionResponse>(response)
+}
+
+export async function saveCrmImportMatchResolution(
+  clientId: number,
+  batchId: number,
+  rowId: number,
+  body: {
+    resolution_type?: string | null
+    company_id?: number | null
+    contact_id?: number | null
+    clear?: boolean
+  },
+): Promise<{
+  client_id: number
+  batch_id: number
+  staged_row_id: number
+  cleared: boolean
+  resolution: Record<string, unknown> | null
+}> {
+  requirePositiveIds(clientId, batchId)
+  if (!Number.isFinite(rowId) || rowId <= 0) {
+    throw new Error('Import row is missing or invalid.')
+  }
+  const response = await apiFetch(
+    `/api/clients/${encodeURIComponent(String(clientId))}/admin/imports/${encodeURIComponent(String(batchId))}/rows/${encodeURIComponent(String(rowId))}/match-resolution`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  )
+  return parseJson(response)
 }

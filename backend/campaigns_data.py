@@ -8,7 +8,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from access import get_default_user, resolve_dashboard_client_ids, user_can_access_client
+from access import resolve_dashboard_client_ids, user_can_access_client
+from data_steward import sql_active_ccr, sql_active_company, sql_active_contact
+from staff_context import resolve_staff_actor
+from staff_rbac import user_has_permission
 from db import get_connection
 from models import (
     CampaignActionResult,
@@ -160,12 +163,19 @@ def ensure_campaigns_schema(conn=None) -> None:
             conn.close()
 
 
-def _authorized_client_ids(selected_client_id: int | None) -> list[int]:
-    user = get_default_user()
+def _authorized_client_ids(
+    selected_client_id: int | None,
+    *,
+    write: bool = False,
+) -> list[int]:
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
-    if selected_client_id is not None and int(selected_client_id) > 0:
-        cid = int(selected_client_id)
+    perm = "campaigns.manage" if write else "campaigns.view"
+    cid = int(selected_client_id) if selected_client_id is not None and int(selected_client_id) > 0 else None
+    if not user_has_permission(int(user.id), perm, client_id=cid):
+        raise PermissionError("Not authorized for this client.")
+    if cid is not None:
         if not user_can_access_client(user.id, cid) and not user.is_administrator:
             raise PermissionError("Not authorized for this client.")
         return resolve_dashboard_client_ids(user.id, selected_client_id=cid)
@@ -224,13 +234,31 @@ def _member_activity_exists_sql(alias: str) -> str:
 def _stats_for_campaign(conn, campaign_id: int, client_id: int) -> dict[str, int]:
     company_count = int(
         conn.execute(
-            "SELECT COUNT(*) AS n FROM campaign_companies WHERE campaign_id = ? AND client_id = ?",
+            f"""
+            SELECT COUNT(*) AS n
+            FROM campaign_companies cc
+            JOIN companies co ON co.id = cc.company_id
+            JOIN client_company_relationships ccr
+              ON ccr.id = cc.relationship_id AND ccr.client_id = cc.client_id
+             AND {sql_active_ccr(conn, "ccr")}
+            WHERE cc.campaign_id = ? AND cc.client_id = ?
+              AND {sql_active_company(conn, "co")}
+            """,
             (campaign_id, client_id),
         ).fetchone()["n"]
     )
     contact_count = int(
         conn.execute(
-            "SELECT COUNT(*) AS n FROM campaign_contacts WHERE campaign_id = ? AND client_id = ?",
+            f"""
+            SELECT COUNT(*) AS n
+            FROM campaign_contacts m
+            JOIN contacts ct ON ct.id = m.contact_id
+            JOIN client_company_relationships ccr
+              ON ccr.company_id = m.company_id AND ccr.client_id = m.client_id
+             AND {sql_active_ccr(conn, "ccr")}
+            WHERE m.campaign_id = ? AND m.client_id = ?
+              AND {sql_active_contact(conn, "ct")}
+            """,
             (campaign_id, client_id),
         ).fetchone()["n"]
     )
@@ -496,7 +524,7 @@ def get_campaign_workspace(campaign_id: int) -> CampaignWorkspace:
                 client_id=int(r["client_id"]),
             )
             for r in conn.execute(
-                """
+                f"""
                 SELECT
                     cc.company_id, cc.client_id,
                     co.company_name, co.city, co.state,
@@ -505,16 +533,18 @@ def get_campaign_workspace(campaign_id: int) -> CampaignWorkspace:
                     COALESCE(ccr.status, '') AS status
                 FROM campaign_companies cc
                 JOIN companies co ON co.id = cc.company_id
-                LEFT JOIN client_company_relationships ccr
+                JOIN client_company_relationships ccr
                   ON ccr.id = cc.relationship_id AND ccr.client_id = cc.client_id
+                 AND {sql_active_ccr(conn, "ccr")}
                 WHERE cc.campaign_id = ? AND cc.client_id = ?
+                  AND {sql_active_company(conn, "co")}
                 ORDER BY co.company_name COLLATE NOCASE
                 """,
                 (int(campaign_id), int(row["client_id"])),
             )
         ]
         contact_rows = conn.execute(
-            """
+            f"""
             SELECT
                 m.id AS membership_id,
                 m.contact_id, m.company_id, m.client_id,
@@ -527,9 +557,12 @@ def get_campaign_workspace(campaign_id: int) -> CampaignWorkspace:
             FROM campaign_contacts m
             JOIN contacts ct ON ct.id = m.contact_id
             JOIN companies co ON co.id = m.company_id
-            LEFT JOIN client_company_relationships ccr
+            JOIN client_company_relationships ccr
               ON ccr.company_id = m.company_id AND ccr.client_id = m.client_id
+             AND {sql_active_ccr(conn, "ccr")}
             WHERE m.campaign_id = ? AND m.client_id = ?
+              AND {sql_active_contact(conn, "ct")}
+              AND {sql_active_company(conn, "co")}
             ORDER BY m.id ASC
             """,
             (int(campaign_id), int(row["client_id"])),
@@ -571,9 +604,11 @@ def get_campaign_workspace(campaign_id: int) -> CampaignWorkspace:
 def create_operational_campaign(body: CampaignCreateRequest) -> CampaignSummary:
     from access import require_write_client_id
 
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
+    if not user_has_permission(int(user.id), "campaigns.manage", client_id=int(body.client_id or 0) or None):
+        raise PermissionError("Not authorized for this client.")
     client_id = require_write_client_id(body.client_id, user_id=user.id)
     name = _blank(body.campaign_name)
     if not name:
@@ -626,7 +661,7 @@ def create_operational_campaign(body: CampaignCreateRequest) -> CampaignSummary:
 
 
 def update_operational_campaign(campaign_id: int, body: CampaignUpdateRequest) -> CampaignSummary:
-    allowed = _authorized_client_ids(None)
+    allowed = _authorized_client_ids(None, write=True)
     ensure_campaigns_schema()
     with get_connection() as conn:
         row = _require_campaign(conn, campaign_id, allowed)
@@ -675,7 +710,7 @@ def update_operational_campaign(campaign_id: int, body: CampaignUpdateRequest) -
 def set_campaign_status(campaign_id: int, status: str) -> CampaignActionResult:
     if status not in CAMPAIGN_STATUSES:
         raise ValueError(f"Unknown campaign status '{status}'.")
-    allowed = _authorized_client_ids(None)
+    allowed = _authorized_client_ids(None, write=True)
     ensure_campaigns_schema()
     with get_connection() as conn:
         row = _require_campaign(conn, campaign_id, allowed)
@@ -707,13 +742,14 @@ def set_campaign_status(campaign_id: int, status: str) -> CampaignActionResult:
 
 def _company_record_no(conn, client_id: int, company_id: int) -> tuple[int | None, str]:
     rel = conn.execute(
-        """
+        f"""
         SELECT ccr.id AS relationship_id,
                COALESCE(NULLIF(TRIM(ccr.external_record_no), ''), co.external_record_no, '')
                    AS external_record_no
         FROM client_company_relationships ccr
         JOIN companies co ON co.id = ccr.company_id
         WHERE ccr.client_id = ? AND ccr.company_id = ?
+          AND {sql_active_ccr(conn, "ccr")}
         """,
         (int(client_id), int(company_id)),
     ).fetchone()
@@ -770,7 +806,7 @@ def _log_campaign_membership_activity(
         if kind == "removal":
             raise ValueError("Company is not assigned to this campaign's client.")
         return
-    user = get_default_user()
+    user = resolve_staff_actor()
     user_id = int(user.id) if user is not None else None
     actor = created_by or (_blank(user.full_name) if user is not None else "")
     types = {
@@ -887,9 +923,10 @@ def _insert_campaign_company_membership(
     created_by: str,
 ) -> bool:
     rel = conn.execute(
-        """
+        f"""
         SELECT id FROM client_company_relationships
         WHERE client_id = ? AND company_id = ?
+          AND {sql_active_ccr(conn, "client_company_relationships")}
         """,
         (int(client_id), int(company_id)),
     ).fetchone()
@@ -925,12 +962,14 @@ def _insert_campaign_contact_membership(
     created_by: str,
 ) -> bool:
     contact = conn.execute(
-        """
+        f"""
         SELECT ct.id, ct.company_id
         FROM contacts ct
         JOIN client_company_relationships ccr
           ON ccr.company_id = ct.company_id AND ccr.client_id = ?
+         AND {sql_active_ccr(conn, "ccr")}
         WHERE ct.id = ?
+          AND {sql_active_contact(conn, "ct")}
         """,
         (int(client_id), int(contact_id)),
     ).fetchone()
@@ -962,11 +1001,11 @@ def add_campaign_company(
     *,
     log_activity: bool = True,
 ) -> CampaignWorkspace:
-    allowed = _authorized_client_ids(None)
+    allowed = _authorized_client_ids(None, write=True)
     company_id = int(body.company_id or 0)
     if company_id <= 0:
         raise ValueError("company_id is required.")
-    user = get_default_user()
+    user = resolve_staff_actor()
     created_by = _blank(user.full_name) if user is not None else ""
     ensure_campaigns_schema()
     with get_connection() as conn:
@@ -1032,11 +1071,11 @@ def add_campaign_contact(
     *,
     log_activity: bool = True,
 ) -> CampaignWorkspace:
-    allowed = _authorized_client_ids(None)
+    allowed = _authorized_client_ids(None, write=True)
     contact_id = int(body.contact_id or 0)
     if contact_id <= 0:
         raise ValueError("contact_id is required.")
-    user = get_default_user()
+    user = resolve_staff_actor()
     created_by = _blank(user.full_name) if user is not None else ""
     ensure_campaigns_schema()
     with get_connection() as conn:
@@ -1220,10 +1259,10 @@ def _unassign_company_from_campaign(
 
 
 def remove_campaign_company(campaign_id: int, company_id: int) -> CampaignWorkspace:
-    allowed = _authorized_client_ids(None)
+    allowed = _authorized_client_ids(None, write=True)
     if int(company_id) <= 0:
         raise ValueError("company_id is required.")
-    user = get_default_user()
+    user = resolve_staff_actor()
     created_by = _blank(user.full_name) if user is not None else ""
     ensure_campaigns_schema()
     with get_connection() as conn:
@@ -1244,10 +1283,10 @@ def remove_campaign_company(campaign_id: int, company_id: int) -> CampaignWorksp
 
 
 def remove_campaign_contact(campaign_id: int, contact_id: int) -> CampaignWorkspace:
-    allowed = _authorized_client_ids(None)
+    allowed = _authorized_client_ids(None, write=True)
     if int(contact_id) <= 0:
         raise ValueError("contact_id is required.")
-    user = get_default_user()
+    user = resolve_staff_actor()
     created_by = _blank(user.full_name) if user is not None else ""
     ensure_campaigns_schema()
     with get_connection() as conn:
@@ -1324,7 +1363,7 @@ def search_campaign_members(campaign_id: int, q: str = "") -> CampaignMemberSear
     with get_connection() as conn:
         row = _require_campaign(conn, campaign_id, allowed)
         client_id = int(row["client_id"])
-        company_sql = """
+        company_sql = f"""
             SELECT
                 co.id AS company_id,
                 co.company_name,
@@ -1337,6 +1376,8 @@ def search_campaign_members(campaign_id: int, q: str = "") -> CampaignMemberSear
             FROM client_company_relationships ccr
             JOIN companies co ON co.id = ccr.company_id
             WHERE ccr.client_id = ?
+              AND {sql_active_ccr(conn)}
+              AND {sql_active_company(conn)}
         """
         company_params: list[object] = [client_id]
         if needle:
@@ -1360,7 +1401,7 @@ def search_campaign_members(campaign_id: int, q: str = "") -> CampaignMemberSear
             )
             for r in conn.execute(company_sql, company_params)
         ]
-        contact_sql = """
+        contact_sql = f"""
             SELECT
                 ct.id AS contact_id,
                 ct.company_id,
@@ -1376,6 +1417,9 @@ def search_campaign_members(campaign_id: int, q: str = "") -> CampaignMemberSear
             JOIN client_company_relationships ccr
               ON ccr.company_id = ct.company_id AND ccr.client_id = ?
             WHERE 1 = 1
+              AND {sql_active_ccr(conn)}
+              AND {sql_active_company(conn)}
+              AND {sql_active_contact(conn)}
         """
         contact_params: list[object] = [client_id]
         if needle:
@@ -1541,7 +1585,11 @@ def _place_unassigned(
     created_by: str,
 ) -> None:
     rel = conn.execute(
-        "SELECT id FROM client_company_relationships WHERE client_id = ? AND company_id = ?",
+        f"""
+        SELECT id FROM client_company_relationships
+        WHERE client_id = ? AND company_id = ?
+          AND {sql_active_ccr(conn, "client_company_relationships")}
+        """,
         (client_id, company_id),
     ).fetchone()
     conn.execute(
@@ -1588,7 +1636,11 @@ def suggest_campaign_route(
         if company is None:
             raise LookupError("Company not found.")
         rel = conn.execute(
-            "SELECT id FROM client_company_relationships WHERE client_id = ? AND company_id = ?",
+            f"""
+            SELECT id FROM client_company_relationships
+            WHERE client_id = ? AND company_id = ?
+              AND {sql_active_ccr(conn, "client_company_relationships")}
+            """,
             (int(client_id), int(company_id)),
         ).fetchone()
         if rel is None:
@@ -1627,7 +1679,7 @@ def suggest_campaign_route(
                 campaigns=choices,
             )
         if not choices:
-            user = get_default_user()
+            user = resolve_staff_actor()
             created_by = _blank(user.full_name) if user is not None else ""
             _place_unassigned(
                 conn,
@@ -1666,10 +1718,10 @@ def confirm_campaign_route(body: CampaignRouteConfirmRequest) -> CampaignRouteSu
     from access import require_write_client_id
 
     require_write_client_id(body.client_id)
-    allowed = _authorized_client_ids(body.client_id)
+    allowed = _authorized_client_ids(body.client_id, write=True)
     if int(body.client_id) not in allowed:
         raise PermissionError("Not authorized for this client.")
-    user = get_default_user()
+    user = resolve_staff_actor()
     created_by = _blank(user.full_name) if user is not None else ""
     campaign_id = int(body.campaign_id)
     company_id = int(body.company_id)
@@ -1765,15 +1817,19 @@ def defer_campaign_route(body: CampaignRouteDeferRequest) -> CampaignRouteSugges
     from access import require_write_client_id
 
     require_write_client_id(body.client_id)
-    allowed = _authorized_client_ids(body.client_id)
+    allowed = _authorized_client_ids(body.client_id, write=True)
     if int(body.client_id) not in allowed:
         raise PermissionError("Not authorized for this client.")
-    user = get_default_user()
+    user = resolve_staff_actor()
     created_by = _blank(user.full_name) if user is not None else ""
     ensure_campaigns_schema()
     with get_connection() as conn:
         if not conn.execute(
-            "SELECT id FROM client_company_relationships WHERE client_id = ? AND company_id = ?",
+            f"""
+            SELECT id FROM client_company_relationships
+            WHERE client_id = ? AND company_id = ?
+              AND {sql_active_ccr(conn, "client_company_relationships")}
+            """,
             (int(body.client_id), int(body.company_id)),
         ).fetchone():
             raise LookupError("Company is not assigned to this client.")
@@ -1887,8 +1943,10 @@ def _matching_unassigned_rows(conn, allowed: list[int], q: str = "") -> list[dic
         FROM ({union_sql}) src
         JOIN clients cl ON cl.id = src.client_id
         JOIN companies co ON co.id = src.company_id
-        LEFT JOIN client_company_relationships ccr
+         AND {sql_active_company(conn, "co")}
+        JOIN client_company_relationships ccr
           ON ccr.client_id = src.client_id AND ccr.company_id = src.company_id
+         AND {sql_active_ccr(conn, "ccr")}
         LEFT JOIN users usr ON usr.id = ccr.assigned_user_id
         LEFT JOIN contacts ct ON ct.id = COALESCE(
             src.contact_id,
@@ -2080,9 +2138,10 @@ def _assign_unassigned_row(
     ).fetchone():
         return "skipped"
     rel = conn.execute(
-        """
+        f"""
         SELECT id FROM client_company_relationships
         WHERE client_id = ? AND company_id = ?
+          AND {sql_active_ccr(conn, "client_company_relationships")}
         """,
         (int(client_id), int(company_id)),
     ).fetchone()
@@ -2107,12 +2166,14 @@ def _assign_unassigned_row(
     )
     if contact_id:
         contact = conn.execute(
-            """
+            f"""
             SELECT ct.id, ct.company_id
             FROM contacts ct
             JOIN client_company_relationships ccr
               ON ccr.company_id = ct.company_id AND ccr.client_id = ?
+             AND {sql_active_ccr(conn, "ccr")}
             WHERE ct.id = ?
+              AND {sql_active_contact(conn, "ct")}
             """,
             (int(client_id), int(contact_id)),
         ).fetchone()
@@ -2145,10 +2206,10 @@ def bulk_assign_unassigned(body: UnassignedBulkAssignRequest) -> UnassignedBulkA
     campaign_id = int(body.campaign_id)
     if campaign_id <= 0:
         raise ValueError("Select a campaign.")
-    allowed = _authorized_client_ids(client_id)
+    allowed = _authorized_client_ids(client_id, write=True)
     if client_id not in allowed:
         raise PermissionError("Not authorized for this client.")
-    user = get_default_user()
+    user = resolve_staff_actor()
     created_by = _blank(user.full_name) if user is not None else ""
     query = _blank(body.q)
     exclude = {int(cid) for cid in body.exclude_company_ids if int(cid) > 0}

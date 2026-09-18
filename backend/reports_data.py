@@ -13,7 +13,10 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any, Iterable, Literal
 
-from access import get_default_user, resolve_dashboard_client_ids, user_can_access_client
+from access import resolve_dashboard_client_ids, user_can_access_client
+from data_steward import sql_active_ccr, sql_active_company
+from staff_context import resolve_staff_actor
+from staff_rbac import user_has_permission
 from activities_data import ACTIVITY_TIMELINE_TYPES
 from campaigns_data import ensure_campaigns_schema
 from db import DB_PATH, get_connection
@@ -219,10 +222,13 @@ class ReportQuery:
 
 
 def _scope_client_ids(selected_client_id: int | None) -> tuple[int, list[int]]:
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
     raw = int(selected_client_id or 0)
+    cid = raw if raw > 0 else None
+    if not user_has_permission(int(user.id), "reports.view", client_id=cid):
+        raise PermissionError("Not authorized for this client.")
     if raw > 0:
         if not user_can_access_client(user.id, raw) and not user.is_administrator:
             raise PermissionError("Not authorized for this client.")
@@ -672,7 +678,10 @@ def _grouped_hot_counts(conn, query: ReportQuery) -> dict[int, int]:
     sql = f"""
         SELECT ccr.client_id AS grp, COUNT(*) AS n
         FROM client_company_relationships ccr
+        JOIN companies co ON co.id = ccr.company_id
         WHERE ccr.client_id IN ({_placeholders(query.client_ids)})
+          AND {sql_active_ccr(conn)}
+          AND {sql_active_company(conn)}
           AND lower(trim(ccr.status)) = 'hot prospect'
           {camp_sql}
           {user_sql}
@@ -1914,11 +1923,24 @@ def list_report_records(
                 user_params = [query.user_id]
             where = f"""
                 ccr.client_id IN ({_placeholders(client_ids)})
+                  AND {sql_active_ccr(conn)}
+                  AND {sql_active_company(conn)}
                   AND lower(trim(ccr.status)) = 'hot prospect'
                   {camp_sql} {user_sql}
             """
             params = [*client_ids, *camp_params, *user_params]
-            total = int(conn.execute(f"SELECT COUNT(*) AS n FROM client_company_relationships ccr WHERE {where}", params).fetchone()["n"] or 0)
+            # COUNT must JOIN companies: sql_active_company() aliases archived_at as co.archived_at.
+            from_hot = """
+                FROM client_company_relationships ccr
+                JOIN companies co ON co.id = ccr.company_id
+            """
+            total = int(
+                conn.execute(
+                    f"SELECT COUNT(*) AS n {from_hot} WHERE {where}",
+                    params,
+                ).fetchone()["n"]
+                or 0
+            )
             rows = conn.execute(
                 f"""
                 SELECT ccr.id, ccr.client_id, ccr.company_id, ccr.status,
@@ -1926,8 +1948,7 @@ def list_report_records(
                        COALESCE(NULLIF(TRIM(ccr.external_record_no), ''), co.external_record_no, '') AS external_record_no,
                        COALESCE(u.full_name, '') AS user_name,
                        COALESCE(ccr.updated_at, '') AS occurred_at
-                FROM client_company_relationships ccr
-                JOIN companies co ON co.id = ccr.company_id
+                {from_hot}
                 LEFT JOIN users u ON u.id = ccr.assigned_user_id
                 WHERE {where}
                 ORDER BY co.company_name COLLATE NOCASE, ccr.id

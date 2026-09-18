@@ -7,13 +7,15 @@ Does not use Client Knowledge contacts.
 
 from __future__ import annotations
 
+from staff_context import resolve_staff_actor
+
 import re
 from datetime import datetime
 from typing import Any
 
 from access import get_default_user, get_user_by_id, user_can_access_client
 from activities_data import create_activity
-from contact_phone import format_us_phone_display, lookup_contact_phone_matches, upsert_contact_phone_keys
+from contact_phone import lookup_contact_phone_matches, store_phone_parts, upsert_contact_phone_keys
 from db import get_connection
 from import_brown_industries import digits_phone, domain, norm_addr, norm_name
 from models import (
@@ -159,6 +161,57 @@ def match_company(
                 "row": row,
                 "possibles": [],
             }
+        from company_aliases import aliases_table_ready, collect_alias_company_ids
+
+        if aliases_table_ready(conn):
+            from crm_identity_keys import normalize_record_no as _norm_rn
+
+            alias_ids = sorted(
+                collect_alias_company_ids(conn, record_nos={_norm_rn(rn)}, names=set())
+            )
+            alias_rows = []
+            for cid in alias_ids:
+                found = conn.execute(
+                    """
+                    SELECT id, company_name, external_record_no, website, address, city, state, zip,
+                           legacy_phone, type_of_industry
+                    FROM companies WHERE id = ?
+                    """,
+                    (cid,),
+                ).fetchone()
+                if found is not None:
+                    alias_rows.append(found)
+            if len(alias_rows) == 1:
+                row = alias_rows[0]
+                return {
+                    "match_type": "existing_company",
+                    "company_id": int(row["id"]),
+                    "external_record_no": _blank(row["external_record_no"]),
+                    "company_name": _blank(row["company_name"]),
+                    "confidence": "high",
+                    "reasons": ["alias_record_no"],
+                    "row": row,
+                    "possibles": [],
+                }
+            if len(alias_rows) > 1:
+                return {
+                    "match_type": "possible_match",
+                    "company_id": int(alias_rows[0]["id"]),
+                    "external_record_no": _blank(alias_rows[0]["external_record_no"]),
+                    "company_name": _blank(alias_rows[0]["company_name"]),
+                    "confidence": "medium",
+                    "reasons": ["alias_record_no"],
+                    "row": alias_rows[0],
+                    "possibles": [
+                        {
+                            "company_id": int(r["id"]),
+                            "external_record_no": _blank(r["external_record_no"]),
+                            "company_name": _blank(r["company_name"]),
+                            "reasons": ["alias_record_no"],
+                        }
+                        for r in alias_rows[:5]
+                    ],
+                }
 
     name = _blank(company.company_name)
     b_norm = norm_name(name)
@@ -228,6 +281,38 @@ def match_company(
             ):
                 _add(row, ["address_city_state"])
 
+    from company_aliases import aliases_table_ready, collect_alias_company_ids
+    from company_aliases import alias_match_fields, load_aliases_by_company
+
+    if aliases_table_ready(conn) and b_norm:
+        from crm_import_state import state_for_match
+
+        incoming_state = state_for_match(b_state) or b_state
+        for cid in collect_alias_company_ids(conn, record_nos=set(), names={b_norm}):
+            row = conn.execute(
+                """
+                SELECT id, company_name, external_record_no, website, address, city, state, zip,
+                       legacy_phone, type_of_industry
+                FROM companies WHERE id = ?
+                """,
+                (cid,),
+            ).fetchone()
+            if row is None:
+                continue
+            _add(row, ["name_exact"])
+            fields = alias_match_fields(load_aliases_by_company(conn, [cid]).get(cid, []))
+            if b_dom and b_dom in fields["domains"]:
+                _add(row, ["domain_exact"])
+            if b_phone and any(
+                b_phone == phone
+                or (len(phone) >= 7 and (phone.endswith(b_phone[-7:]) or b_phone.endswith(phone[-7:])))
+                for phone in fields["phones"]
+                if phone and len(phone) >= 7
+            ):
+                _add(row, ["phone"])
+            if b_addr and incoming_state and (b_addr, b_city, incoming_state) in fields["addrs"]:
+                _add(row, ["address_city_state"])
+
     high: list[tuple[Any, list[str]]] = []
     possible: list[tuple[Any, list[str]]] = []
     for row, reasons in candidates.values():
@@ -240,11 +325,8 @@ def match_company(
         ):
             high.append((row, reasons))
         elif "name_exact" in reasons and len(reasons) == 1:
-            name_only = [x for x in candidates.values() if "name_exact" in x[1]]
-            if len(name_only) == 1:
-                high.append((row, reasons))
-            else:
-                possible.append((row, reasons))
+            # Name alone is never auto-reuse; require domain, phone, or address.
+            possible.append((row, reasons))
         elif reasons:
             possible.append((row, reasons))
 
@@ -497,7 +579,7 @@ def preview_company_contact_add(
     *,
     user_id: int | None = None,
 ) -> CrmAddPreviewResponse:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     client_id = int(body.client_id)
@@ -693,12 +775,13 @@ def create_or_link_company(
             raise ValueError("company_name is required to create a company.")
         rn = allocate_ns_record_no(conn)
         now = _now()
+        phone_main, phone_ext = store_phone_parts(_blank(company.phone), field="legacy_phone")
         cur = conn.execute(
             """
             INSERT INTO companies (
                 external_record_no, company_name, address, city, state, zip, website,
-                legacy_phone, type_of_industry, created_at, last_updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                legacy_phone, legacy_phone_extension, type_of_industry, created_at, last_updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 rn,
@@ -708,7 +791,8 @@ def create_or_link_company(
                 _blank(company.state),
                 _blank(company.zip),
                 _blank(company.website),
-                _blank(company.phone),
+                phone_main,
+                phone_ext or None,
                 _blank(company.industry),
                 now,
                 now,
@@ -769,13 +853,14 @@ def create_or_link_contact(
             if hit:
                 return int(hit["id"]), "existing", False
 
+        phone_main, phone_ext = store_phone_parts(_blank(contact.phone), field="phone")
         cur = conn.execute(
             """
             INSERT INTO contacts (
                 company_id, external_record_no,
-                first_name, last_name, title, phone, alt_phone, email,
+                first_name, last_name, title, phone, phone_extension, alt_phone, email,
                 source_row_index
-            ) VALUES (?, ?, ?, ?, ?, ?, '', ?, 0)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, 0)
             """,
             (
                 company_id,
@@ -783,14 +868,13 @@ def create_or_link_contact(
                 first,
                 last,
                 _blank(contact.title),
-                format_us_phone_display(_blank(contact.phone)),
+                phone_main,
+                phone_ext or None,
                 email,
             ),
         )
         contact_id = int(cur.lastrowid)
-        upsert_contact_phone_keys(
-            conn, contact_id, format_us_phone_display(_blank(contact.phone)), ""
-        )
+        upsert_contact_phone_keys(conn, contact_id, phone_main, "")
         return contact_id, "created", True
 
     if status == "existing":
@@ -814,7 +898,7 @@ def confirm_company_contact_add(
     *,
     user_id: int | None = None,
 ) -> CrmAddConfirmResult:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     client_id = int(body.client_id)
@@ -841,6 +925,39 @@ def confirm_company_contact_add(
                 existing_company_id=body.existing_company_id or match.get("company_id"),
                 match=match,
             )
+
+            from company_aliases import SOURCE_AI, should_store_alias, upsert_company_alias
+            from crm_identity_keys import normalize_record_no
+
+            incoming_rn = normalize_record_no(body.trusted_external_record_no)
+            ccr_record_no = incoming_rn or record_no
+            canonical = conn.execute(
+                "SELECT company_name FROM companies WHERE id = ?",
+                (company_id,),
+            ).fetchone()
+            canonical_name = _blank(canonical["company_name"]) if canonical else ""
+            if should_store_alias(
+                source_system=SOURCE_AI,
+                alias_name=_blank(company.company_name),
+                canonical_name=canonical_name,
+                source_record_no=incoming_rn,
+                master_record_no=record_no,
+            ):
+                upsert_company_alias(
+                    conn,
+                    company_id=company_id,
+                    alias_name=_blank(company.company_name) or canonical_name,
+                    source_system=SOURCE_AI,
+                    source_record_no=incoming_rn,
+                    client_id=client_id,
+                    source_address=_blank(company.address),
+                    source_city=_blank(company.city),
+                    source_state=_blank(company.state),
+                    source_zip=_blank(company.zip),
+                    source_phone=_blank(company.phone),
+                    source_website=_blank(company.website),
+                    created_by_user_id=int(user.id),
+                )
 
             contact_results: list[dict[str, Any]] = []
             created_contact_ids: list[int] = []
@@ -870,10 +987,78 @@ def confirm_company_contact_add(
                 conn,
                 client_id=client_id,
                 company_id=company_id,
-                external_record_no=record_no,
+                external_record_no=ccr_record_no,
                 user_id=user.id,
                 provenance_note=provenance,
             )
+            from data_steward import (
+                ENTITY_CLIENT_RELATIONSHIP,
+                ENTITY_COMPANY,
+                ENTITY_CONTACT,
+                SOURCE_AI_RESEARCH,
+                record_populated_creates,
+                source_ref_manual,
+            )
+
+            if company_created:
+                phone_main, phone_ext = store_phone_parts(_blank(company.phone), field="legacy_phone")
+                record_populated_creates(
+                    conn,
+                    entity_type=ENTITY_COMPANY,
+                    entity_id=int(company_id),
+                    fields={
+                        "company_name": _blank(company.company_name),
+                        "address": _blank(company.address),
+                        "city": _blank(company.city),
+                        "state": _blank(company.state),
+                        "zip": _blank(company.zip),
+                        "phone": phone_main,
+                        "website": _blank(company.website),
+                    },
+                    actor=user,
+                    source_type=SOURCE_AI_RESEARCH,
+                    source_ref=source_ref_manual(),
+                    trusted=True,
+                    action="CREATE",
+                    client_id=client_id,
+                )
+            if rel_created:
+                record_populated_creates(
+                    conn,
+                    entity_type=ENTITY_CLIENT_RELATIONSHIP,
+                    entity_id=int(rel_id),
+                    fields={"status": rel_status or "New", "company_id": str(company_id)},
+                    actor=user,
+                    source_type=SOURCE_AI_RESEARCH,
+                    source_ref=source_ref_manual(),
+                    trusted=True,
+                    action="CREATE",
+                    client_id=client_id,
+                )
+            for item, result in zip(selected, contact_results):
+                if not result.get("created") or not result.get("contact_id"):
+                    continue
+                first, last, _full = _resolve_contact_names(item.contact)
+                phone_main, phone_ext = store_phone_parts(_blank(item.contact.phone), field="phone")
+                record_populated_creates(
+                    conn,
+                    entity_type=ENTITY_CONTACT,
+                    entity_id=int(result["contact_id"]),
+                    fields={
+                        "first_name": first,
+                        "last_name": last,
+                        "title": _blank(item.contact.title),
+                        "email": _blank(item.contact.email),
+                        "phone": phone_main,
+                        "company_id": str(company_id),
+                    },
+                    actor=user,
+                    source_type=SOURCE_AI_RESEARCH,
+                    source_ref=source_ref_manual(),
+                    trusted=True,
+                    action="CREATE",
+                    client_id=client_id,
+                )
             conn.commit()
         except Exception:
             conn.rollback()

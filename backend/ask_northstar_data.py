@@ -9,8 +9,11 @@ Architecture:
 
 from __future__ import annotations
 
+from staff_context import resolve_staff_actor
+
 import json
 import re
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -37,6 +40,9 @@ from models import (
 from opportunities_data import list_cross_client_opportunities
 from search_data import search as run_search
 from work_queue_data import list_work_queue
+from data_steward import sql_active_ccr, sql_active_company, sql_active_contact
+
+_ASK_INCLUDE_ARCHIVED: ContextVar[bool] = ContextVar("ask_include_archived", default=False)
 
 ScopeMode = Literal["all", "active_client"]
 
@@ -152,6 +158,28 @@ def _placeholders(ids: list[int]) -> str:
     return ",".join("?" for _ in ids)
 
 
+def _ask_sql_company(conn, alias: str = "co") -> str:
+    return "1=1" if _ASK_INCLUDE_ARCHIVED.get() else sql_active_company(conn, alias)
+
+
+def _ask_sql_ccr(conn, alias: str = "ccr") -> str:
+    return "1=1" if _ASK_INCLUDE_ARCHIVED.get() else sql_active_ccr(conn, alias)
+
+
+def _ask_sql_contact(conn, alias: str = "ct") -> str:
+    return "1=1" if _ASK_INCLUDE_ARCHIVED.get() else sql_active_contact(conn, alias)
+
+
+def _ask_visible_company_clause(conn, company_alias: str, id_placeholders: str) -> str:
+    extra = "" if _ASK_INCLUDE_ARCHIVED.get() else f" AND {sql_active_ccr(conn, 'ccr_vis')}"
+    return (
+        f"{_ask_sql_company(conn, company_alias)} AND EXISTS ("
+        f"SELECT 1 FROM client_company_relationships ccr_vis "
+        f"WHERE ccr_vis.company_id = {company_alias}.id "
+        f"AND ccr_vis.client_id IN ({id_placeholders}){extra})"
+    )
+
+
 def _resolve_scope_client_ids(
     user_id: int,
     *,
@@ -252,6 +280,8 @@ def _find_companies_by_name(
     if not needle:
         return []
     ids = visible_ids if visible_ids else [-1]
+    ph = _placeholders(ids)
+    vis = _ask_visible_company_clause(conn, "co", ph)
     rows = conn.execute(
         f"""
         SELECT DISTINCT
@@ -264,11 +294,15 @@ def _find_companies_by_name(
         FROM companies co
         LEFT JOIN client_company_relationships ccr
             ON ccr.company_id = co.id
-           AND ccr.client_id IN ({_placeholders(ids)})
-        WHERE lower(co.company_name) = lower(?)
-           OR lower(co.company_name) LIKE lower(?)
-           OR lower(co.company_name) LIKE lower(?)
-           OR lower(co.company_name) LIKE lower(?)
+           AND ccr.client_id IN ({ph})
+           AND {_ask_sql_ccr(conn, "ccr")}
+        WHERE ({vis})
+          AND (
+            lower(co.company_name) = lower(?)
+            OR lower(co.company_name) LIKE lower(?)
+            OR lower(co.company_name) LIKE lower(?)
+            OR lower(co.company_name) LIKE lower(?)
+          )
         ORDER BY
             CASE
                 WHEN lower(co.company_name) = lower(?) THEN 0
@@ -281,6 +315,7 @@ def _find_companies_by_name(
         LIMIT ?
         """,
         [
+            *ids,
             *ids,
             needle,
             f"{needle}%",
@@ -298,7 +333,7 @@ def _find_companies_by_name(
         token = needle.split()[0]
         if len(token) >= 2:
             rows = conn.execute(
-                """
+                f"""
                 SELECT
                     co.id AS company_id,
                     co.company_name,
@@ -306,9 +341,12 @@ def _find_companies_by_name(
                     co.city,
                     co.state
                 FROM companies co
-                WHERE lower(co.company_name) = lower(?)
-                   OR lower(co.company_name) LIKE lower(?)
-                   OR lower(co.company_name) LIKE lower(?)
+                WHERE ({vis})
+                  AND (
+                    lower(co.company_name) = lower(?)
+                    OR lower(co.company_name) LIKE lower(?)
+                    OR lower(co.company_name) LIKE lower(?)
+                  )
                 ORDER BY
                     CASE
                         WHEN lower(co.company_name) = lower(?) THEN 0
@@ -320,6 +358,7 @@ def _find_companies_by_name(
                 LIMIT ?
                 """,
                 (
+                    *ids,
                     token,
                     f"{token}%",
                     f"{token} %",
@@ -1598,30 +1637,6 @@ def _answer_call_prep(
 
     matches = _find_companies_by_name(conn, company_name_query, visible_ids=visible_ids)
     if not matches:
-        rows = conn.execute(
-            """
-            SELECT id AS company_id, company_name, external_record_no, city, state
-            FROM companies
-            WHERE lower(company_name) = lower(?)
-               OR lower(company_name) LIKE lower(?)
-               OR lower(company_name) LIKE lower(?)
-            ORDER BY
-                CASE WHEN lower(company_name) = lower(?) THEN 0
-                     WHEN lower(company_name) LIKE lower(?) THEN 1
-                     ELSE 2 END,
-                company_name COLLATE NOCASE
-            LIMIT 5
-            """,
-            (
-                company_name_query,
-                f"{company_name_query}%",
-                f"%{company_name_query}%",
-                company_name_query,
-                f"{company_name_query}%",
-            ),
-        ).fetchall()
-        matches = [dict(r) for r in rows]
-    if not matches:
         return _empty_answer(
             intent="call_prep",
             summary=NO_DATA,
@@ -1705,6 +1720,7 @@ def _answer_call_prep(
         JOIN clients cl ON cl.id = ccr.client_id
         WHERE ccr.company_id = ?
           AND ccr.client_id IN ({_placeholders(visible_ids)})
+          AND {_ask_sql_ccr(conn, "ccr")}
         ORDER BY cl.name COLLATE NOCASE
         """,
         [company_id, *visible_ids],
@@ -1833,7 +1849,7 @@ def _answer_call_prep(
 
     # Contacts (master company) — label with relationship client when possible
     contact_rows = conn.execute(
-        """
+        f"""
         SELECT
             ct.id,
             ct.first_name,
@@ -1844,6 +1860,7 @@ def _answer_call_prep(
             ct.email
         FROM contacts ct
         WHERE ct.company_id = ?
+          AND {_ask_sql_contact(conn, "ct")}
         """,
         (company_id,),
     ).fetchall()
@@ -3046,6 +3063,7 @@ def _answer_company_intelligence(
         JOIN clients cl ON cl.id = ccr.client_id
         WHERE ccr.company_id = ?
           AND ccr.client_id IN ({_placeholders(visible_ids)})
+          AND {_ask_sql_ccr(conn, "ccr")}
         ORDER BY cl.name COLLATE NOCASE
         """,
         [record_fallback, company_id, *visible_ids],
@@ -3133,6 +3151,8 @@ def _answer_company_intelligence(
         JOIN clients cl ON cl.id = ccr.client_id
         WHERE ct.company_id = ?
           AND ccr.client_id IN ({_placeholders(visible_ids)})
+          AND {_ask_sql_contact(conn, "ct")}
+          AND {_ask_sql_ccr(conn, "ccr")}
         ORDER BY ct.last_name COLLATE NOCASE, ct.first_name COLLATE NOCASE
         LIMIT 25
         """,
@@ -3310,8 +3330,9 @@ def _answer_company_intelligence(
                 COALESCE(NULLIF(TRIM(ccr.external_record_no), ''), ?) AS external_record_no
             FROM legacy_notes ln
             JOIN clients cl ON cl.id = ln.client_id
-            LEFT JOIN client_company_relationships ccr
+            JOIN client_company_relationships ccr
                 ON ccr.company_id = ln.company_id AND ccr.client_id = ln.client_id
+               AND {_ask_sql_ccr(conn, "ccr")}
             WHERE ln.company_id = ?
               AND ln.client_id IN ({_placeholders(visible_ids)})
             ORDER BY COALESCE(ln.created_at, '') DESC, ln.id DESC
@@ -3732,7 +3753,7 @@ def _answer_status_list(
             )
 
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 co.id AS company_id,
                 co.company_name,
@@ -3748,6 +3769,8 @@ def _answer_status_list(
             JOIN clients cl ON cl.id = ccr.client_id
             WHERE ccr.client_id = ?
               AND lower(trim(ccr.status)) = lower(trim(?))
+              AND {_ask_sql_ccr(conn, "ccr")}
+              AND {_ask_sql_company(conn, "co")}
             ORDER BY co.company_name COLLATE NOCASE
             """,
             (int(client["id"]), status_key),
@@ -3897,9 +3920,11 @@ def _answer_note_search(
                     FROM legacy_notes ln
                     JOIN companies co ON co.id = ln.company_id
                     JOIN clients cl ON cl.id = ln.client_id
-                    LEFT JOIN client_company_relationships ccr
+                    JOIN client_company_relationships ccr
                         ON ccr.company_id = ln.company_id AND ccr.client_id = ln.client_id
+                       AND {_ask_sql_ccr(conn, "ccr")}
                     WHERE ln.client_id IN ({_placeholders(visible_ids)})
+                      AND {_ask_sql_company(conn, "co")}
                       AND lower(ln.note_text) LIKE lower(?)
                     ORDER BY COALESCE(ln.created_at, '') DESC
                     LIMIT 30
@@ -3951,9 +3976,11 @@ def _answer_note_search(
                     FROM activities a
                     JOIN companies co ON co.id = a.company_id
                     JOIN clients cl ON cl.id = a.client_id
-                    LEFT JOIN client_company_relationships ccr
+                    JOIN client_company_relationships ccr
                         ON ccr.company_id = a.company_id AND ccr.client_id = a.client_id
+                       AND {_ask_sql_ccr(conn, "ccr")}
                     WHERE a.client_id IN ({_placeholders(visible_ids)})
+                      AND {_ask_sql_company(conn, "co")}
                       AND (
                         lower(COALESCE(a.notes, '')) LIKE lower(?)
                         OR lower(COALESCE(a.outcome, '')) LIKE lower(?)
@@ -4136,9 +4163,11 @@ def _answer_milestone_list(
             FROM revenue_milestones rm
             JOIN companies co ON co.id = rm.company_id
             JOIN clients cl ON cl.id = rm.client_id
-            LEFT JOIN client_company_relationships ccr
+            JOIN client_company_relationships ccr
                 ON ccr.company_id = rm.company_id AND ccr.client_id = rm.client_id
+               AND {_ask_sql_ccr(conn, "ccr")}
             WHERE rm.client_id IN ({_placeholders(visible_ids)})
+              AND {_ask_sql_company(conn, "co")}
               AND lower(rm.milestone_type) = lower(?)
             ORDER BY COALESCE(rm.milestone_date, '') DESC, co.company_name COLLATE NOCASE
             LIMIT 100
@@ -4213,9 +4242,11 @@ def _answer_appointments_without_quote(
             FROM revenue_milestones appt
             JOIN companies co ON co.id = appt.company_id
             JOIN clients cl ON cl.id = appt.client_id
-            LEFT JOIN client_company_relationships ccr
+            JOIN client_company_relationships ccr
                 ON ccr.company_id = appt.company_id AND ccr.client_id = appt.client_id
+               AND {_ask_sql_ccr(conn, "ccr")}
             WHERE appt.client_id IN ({_placeholders(visible_ids)})
+              AND {_ask_sql_company(conn, "co")}
               AND appt.milestone_type = 'Appointment Set'
               AND NOT EXISTS (
                   SELECT 1 FROM revenue_milestones q
@@ -5912,7 +5943,7 @@ def list_ask_history(
     When scope=all (or unset filter), return authorized cross-client history.
     Never deletes or rewrites stored rows.
     """
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
     ensure_ask_northstar_schema()
@@ -5932,6 +5963,10 @@ def list_ask_history(
                 filter_client_name="",
             )
         filter_client_id = int(active_client_id)
+        from access import user_can_access_client
+
+        if not user_can_access_client(user.id, filter_client_id) and not user.is_administrator:
+            raise PermissionError("Not authorized for this client.")
         filter_scope_label = "active_client"
     else:
         filter_scope_label = "all"
@@ -5996,7 +6031,7 @@ def list_ask_history(
 
 def ask_northstar(body: AskNorthStarRequest) -> AskNorthStarResponse:
     """Phase 1 entrypoint — read-only retrieval, never mutates CRM data."""
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
 
@@ -6047,6 +6082,36 @@ def ask_northstar(body: AskNorthStarRequest) -> AskNorthStarResponse:
     if not work_ids and not intel_ids:
         raise PermissionError("No authorized clients available for Ask NorthStar.")
 
+    include_archived = bool(getattr(body, "include_archived", False)) and bool(
+        getattr(user, "is_administrator", False)
+    )
+    archived_token = _ASK_INCLUDE_ARCHIVED.set(include_archived)
+    try:
+        return _ask_northstar_dispatch(
+            body=body,
+            user=user,
+            question=question,
+            scope=scope,
+            work_ids=work_ids,
+            intel_ids=intel_ids,
+            active_resolved=active_resolved,
+            scope_label=scope_label,
+        )
+    finally:
+        _ASK_INCLUDE_ARCHIVED.reset(archived_token)
+
+
+def _ask_northstar_dispatch(
+    *,
+    body: AskNorthStarRequest,
+    user,
+    question: str,
+    scope: ScopeMode,
+    work_ids: list[int],
+    intel_ids: list[int],
+    active_resolved: int | None,
+    scope_label: str,
+) -> AskNorthStarResponse:
     # Active Client scope: preferred = that client.
     # All NorthStar: do NOT inherit sidebar client — only explicit question text may set Working For.
     preferred_client_id = active_resolved if scope == "active_client" else None

@@ -353,6 +353,7 @@ export async function fetchProspects(params?: {
   all_clients?: boolean
   q?: string
   status?: string
+  milestone_type?: string
   limit?: number
   offset?: number
 }): Promise<ProspectsResponse> {
@@ -367,6 +368,9 @@ export async function fetchProspects(params?: {
   }
   if (params?.status != null && String(params.status).trim()) {
     query.set('status', String(params.status).trim())
+  }
+  if (params?.milestone_type != null && String(params.milestone_type).trim()) {
+    query.set('milestone_type', String(params.milestone_type).trim())
   }
   const limitRaw = params?.limit
   const limit =
@@ -390,8 +394,15 @@ export async function fetchProspects(params?: {
   return normalizeProspectsResponse(raw)
 }
 
-export async function fetchMilestoneSummary(): Promise<MilestoneSummary> {
-  const response = await fetch('/api/milestones/summary')
+export async function fetchMilestoneSummary(
+  clientId?: number | null,
+): Promise<MilestoneSummary> {
+  const query = new URLSearchParams()
+  if (clientId != null && clientId > 0) {
+    query.set('client_id', String(clientId))
+  }
+  const qs = query.toString()
+  const response = await fetch(`/api/milestones/summary${qs ? `?${qs}` : ''}`)
   const raw = await parseJson<Record<string, unknown>>(response)
   return {
     appointments_set: asNumber(raw.appointments_set),
@@ -652,6 +663,7 @@ export async function updateCompanyNotes(
         client_id: writeClientId,
         note_text: noteText,
         user,
+        mode: 'append',
       }),
     },
   )
@@ -1222,11 +1234,28 @@ export type AssignedClientOption = {
   client_code: string
 }
 
-/** Clients assigned to the logged-in NorthStar user (from DB assignments). */
+/** Clients assigned to the authenticated session user. */
 export async function fetchAssignedClients(): Promise<AssignedClientOption[]> {
-  const response = await fetch('/api/users/default')
+  const response = await fetch('/api/auth/me')
   const raw = await parseJson<Record<string, unknown>>(response)
-  const items = Array.isArray(raw.clients) ? raw.clients : []
+  const user = (raw.user ?? {}) as Record<string, unknown>
+  const fromMe = Array.isArray(user.clients) ? user.clients : Array.isArray(raw.clients) ? raw.clients : []
+  if (fromMe.length > 0 || raw.authenticated === true) {
+    const items = fromMe
+    return items
+      .map((item) => {
+        const record = (item ?? {}) as Record<string, unknown>
+        return {
+          client_id: asNumber(record.client_id),
+          client_name: pick(record, 'client_name', 'name'),
+          client_code: pick(record, 'client_code', 'code'),
+        }
+      })
+      .filter((c) => c.client_id > 0 && Boolean(c.client_name || c.client_code))
+  }
+  const fallback = await fetch('/api/users/default')
+  const fbRaw = await parseJson<Record<string, unknown>>(fallback)
+  const items = Array.isArray(fbRaw.clients) ? fbRaw.clients : []
   return items
     .map((item) => {
       const record = (item ?? {}) as Record<string, unknown>

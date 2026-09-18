@@ -92,6 +92,14 @@ def _insert_batch(conn, client_id: int, headers: list[str], rows: list[dict]) ->
     return batch_id
 
 
+STATUS_ROW_HEADERS = ["Company", "Record No.", "Status"]
+STATUS_ROW_MAPPING = {
+    "company_name": "Company",
+    "external_record_no": "Record No.",
+    "relationship_status": "Status",
+}
+
+
 class StandardCatalogTests(unittest.TestCase):
     def setUp(self) -> None:
         opened = Path(os.fspath(DB_PATH)).resolve()
@@ -234,18 +242,15 @@ class AuthoritativeStatusOptionTests(unittest.TestCase):
             batch_id = _insert_batch(
                 conn,
                 self.client_id,
-                ["Company", "Status"],
-                [{"Company": "Auth Co", "Status": "Hot Prospect"}],
+                STATUS_ROW_HEADERS,
+                [{"Company": "Auth Co", "Record No.": "NS-AUTH-1", "Status": "Hot Prospect"}],
             )
 
         save_crm_import_mapping(
             self.client_id,
             batch_id,
             actor=_actor(),
-            mapping={
-                "company_name": "Company",
-                "relationship_status": "Status",
-            },
+            mapping=STATUS_ROW_MAPPING,
         )
 
         with get_connection() as conn:
@@ -262,7 +267,7 @@ class AuthoritativeStatusOptionTests(unittest.TestCase):
                 use_imported_status_for_existing=True,
             )
 
-        self.assertEqual(PLANNER_VERSION, "crm-import-plan-v7")
+        self.assertEqual(PLANNER_VERSION, "crm-import-plan-v11")
         self.assertEqual(off.rows[0].status_action, STATUS_CONFLICT)
         self.assertEqual(off.counts["status_conflict"], 1)
         self.assertEqual(off.counts["update_existing_status"], 0)
@@ -292,14 +297,14 @@ class AuthoritativeStatusOptionTests(unittest.TestCase):
             blank_batch = _insert_batch(
                 conn,
                 self.client_id,
-                ["Company", "Status"],
-                [{"Company": "Auth Update Co", "Status": ""}],
+                STATUS_ROW_HEADERS,
+                [{"Company": "Auth Update Co", "Record No.": "NS-AUTH-2", "Status": ""}],
             )
             update_batch = _insert_batch(
                 conn,
                 self.client_id,
-                ["Company", "Status"],
-                [{"Company": "Auth Update Co", "Status": "Current Customer"}],
+                STATUS_ROW_HEADERS,
+                [{"Company": "Auth Update Co", "Record No.": "NS-AUTH-2", "Status": "Current Customer"}],
             )
             other_status_before = None
             if self.other_client_id is not None:
@@ -320,7 +325,7 @@ class AuthoritativeStatusOptionTests(unittest.TestCase):
             self.client_id,
             blank_batch,
             actor=_actor(),
-            mapping={"company_name": "Company", "relationship_status": "Status"},
+            mapping=STATUS_ROW_MAPPING,
         )
         with get_connection() as conn:
             blank_plan = plan_crm_import_batch(
@@ -336,7 +341,7 @@ class AuthoritativeStatusOptionTests(unittest.TestCase):
             self.client_id,
             update_batch,
             actor=_actor(),
-            mapping={"company_name": "Company", "relationship_status": "Status"},
+            mapping=STATUS_ROW_MAPPING,
         )
         with get_connection() as conn:
             plan = plan_crm_import_batch(
@@ -404,14 +409,14 @@ class AuthoritativeStatusOptionTests(unittest.TestCase):
             batch_id = _insert_batch(
                 conn,
                 self.client_id,
-                ["Company", "Status"],
-                [{"Company": "Auth FP Co", "Status": "Future/Nurture"}],
+                STATUS_ROW_HEADERS,
+                [{"Company": "Auth FP Co", "Record No.": "NS-AUTH-3", "Status": "Future/Nurture"}],
             )
         save_crm_import_mapping(
             self.client_id,
             batch_id,
             actor=_actor(),
-            mapping={"company_name": "Company", "relationship_status": "Status"},
+            mapping=STATUS_ROW_MAPPING,
         )
         with get_connection() as conn:
             on = plan_crm_import_batch(
@@ -475,7 +480,7 @@ class PreviousStatusAuditTests(unittest.TestCase):
             self.client_id,
             batch_id,
             actor=_actor(),
-            mapping={"company_name": "Company", "relationship_status": "Status"},
+            mapping=STATUS_ROW_MAPPING,
         )
         with get_connection() as conn:
             plan = plan_crm_import_batch(
@@ -512,8 +517,8 @@ class PreviousStatusAuditTests(unittest.TestCase):
             batch_id = _insert_batch(
                 conn,
                 self.client_id,
-                ["Company", "Status"],
-                [{"Company": "Prev Change Co", "Status": "Hot Prospect"}],
+                STATUS_ROW_HEADERS,
+                [{"Company": "Prev Change Co", "Record No.": "NS-PREV-1", "Status": "Hot Prospect"}],
             )
         planned_existing, audit = self._map_and_confirm(batch_id, use_imported=True)
         self.assertEqual(planned_existing, "New")
@@ -532,8 +537,8 @@ class PreviousStatusAuditTests(unittest.TestCase):
             batch_id = _insert_batch(
                 conn,
                 self.client_id,
-                ["Company", "Status"],
-                [{"Company": "Prev Same Co", "Status": "New"}],
+                STATUS_ROW_HEADERS,
+                [{"Company": "Prev Same Co", "Record No.": "NS-PREV-2", "Status": "New"}],
             )
         _, audit = self._map_and_confirm(batch_id, use_imported=True)
         self.assertEqual(audit["previous_status"], "New")
@@ -552,8 +557,8 @@ class PreviousStatusAuditTests(unittest.TestCase):
             batch_id = _insert_batch(
                 conn,
                 self.client_id,
-                ["Company", "Status"],
-                [{"Company": "Prev Blank Co", "Status": ""}],
+                STATUS_ROW_HEADERS,
+                [{"Company": "Prev Blank Co", "Record No.": "NS-PREV-3", "Status": ""}],
             )
         _, audit = self._map_and_confirm(batch_id, use_imported=True)
         self.assertEqual(audit["previous_status"], "Contacted")
@@ -575,8 +580,8 @@ class PreviousStatusAuditTests(unittest.TestCase):
             batch_id = _insert_batch(
                 conn,
                 self.client_id,
-                ["Company", "Status"],
-                [{"Company": "Brand New Audit Co", "Status": "Qualified"}],
+                STATUS_ROW_HEADERS,
+                [{"Company": "Brand New Audit Co", "Record No.": "", "Status": "Qualified"}],
             )
         _, audit = self._map_and_confirm(batch_id, use_imported=False)
         self.assertIsNone(audit["previous_status"])

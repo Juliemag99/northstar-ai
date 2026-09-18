@@ -7,6 +7,9 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
   },
+  build: {
+    sourcemap: false,
+  },
   server: {
     proxy: {
       '/api': {

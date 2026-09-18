@@ -225,6 +225,7 @@ class NotesUpdateRequest(BaseModel):
     client_id: PositiveClientId
     note_text: str = ""
     user: str = "Julie Magnani"
+    mode: str = "append"
 
 
 class FieldUpdateResponse(BaseModel):
@@ -929,6 +930,7 @@ class AskNorthStarRequest(BaseModel):
     question: str
     scope: str = "all"  # all | active_client
     active_client_id: int | None = None
+    include_archived: bool = False
 
 
 class AskSource(BaseModel):
@@ -3166,11 +3168,56 @@ class CrmImportBatchView(BaseModel):
     mapping: dict[str, str] = Field(default_factory=dict)
     mapping_updated_at: str = ""
     mapping_updated_by_user_id: int | None = None
+    source_type: str = "CRM_IMPORT"
+    suggested_mapping: dict[str, str] = Field(default_factory=dict)
     sample_rows: list[CrmImportRowView] = Field(default_factory=list)
 
 
 class CrmImportMappingRequest(BaseModel):
     mapping: dict[str, str] = Field(default_factory=dict)
+
+
+class CrmImportSourceTypeRequest(BaseModel):
+    source_type: str = "CRM_IMPORT"
+
+
+class CrmImportMatchResolutionRequest(BaseModel):
+    resolution_type: str | None = None
+    company_id: int | None = None
+    contact_id: int | None = None
+    clear: bool = False
+
+
+class CrmImportMatchResolutionResponse(BaseModel):
+    client_id: int
+    batch_id: int
+    staged_row_id: int
+    cleared: bool = False
+    resolution: dict[str, object] | None = None
+
+
+class CrmImportHistoryItem(BaseModel):
+    batch_id: int
+    client_id: int
+    created_at: str = ""
+    imported_at: str = ""
+    original_filename: str = ""
+    source_type: str = "CRM_IMPORT"
+    uploaded_by_name: str = ""
+    status: str = ""
+    source_row_count: int = 0
+    created_company_count: int = 0
+    reused_company_count: int = 0
+    created_contact_count: int = 0
+    reused_contact_count: int = 0
+    created_relationship_count: int = 0
+    existing_relationship_count: int = 0
+    total_imported_row_count: int = 0
+
+
+class CrmImportHistoryPage(BaseModel):
+    client_id: int
+    items: list[CrmImportHistoryItem] = Field(default_factory=list)
 
 
 class CrmImportUploadResult(BaseModel):
@@ -3202,12 +3249,23 @@ class CrmImportDryRunCompanyPossible(BaseModel):
     company_id: int
     company_name: str = ""
     external_record_no: str = ""
+    address: str = ""
+    city: str = ""
+    state: str = ""
+    zip: str = ""
+    phone: str = ""
+    website: str = ""
+    identity_record_nos: list[str] = Field(default_factory=list)
     reasons: list[str] = Field(default_factory=list)
 
 
 class CrmImportDryRunContactPossible(BaseModel):
     contact_id: int
     display_name: str = ""
+    email: str = ""
+    phone: str = ""
+    company_id: int | None = None
+    company_name: str = ""
     reasons: list[str] = Field(default_factory=list)
 
 
@@ -3218,6 +3276,7 @@ class CrmImportDryRunCompanyPlan(BaseModel):
     proposed_key: str | None = None
     created_at_source_row: int | None = None
     name: str = ""
+    can_create_company: bool = True
     possibles: list[CrmImportDryRunCompanyPossible] = Field(default_factory=list)
 
 
@@ -3228,6 +3287,7 @@ class CrmImportDryRunContactPlan(BaseModel):
     proposed_key: str | None = None
     created_at_source_row: int | None = None
     display_name: str = ""
+    can_create_contact: bool = True
     possibles: list[CrmImportDryRunContactPossible] = Field(default_factory=list)
 
 
@@ -3285,6 +3345,25 @@ class CrmImportDryRunCounts(BaseModel):
     imported_notes_already_present: int = 0
     importable_rows: int = 0
     needs_review_rows: int = 0
+    excluded_closed: int = 0
+    excluded_skip: int = 0
+
+
+class CrmImportValidationSummary(BaseModel):
+    client_id: int = 0
+    client_name: str = ""
+    source_type: str = "CRM_IMPORT"
+    original_filename: str = ""
+    source_row_count: int = 0
+    mapped_company_name_field: str = ""
+    mapped_source_rn_field: str = ""
+    mapped_status_field: str = ""
+    mapped_notes_field: str = ""
+    unresolved_company_matches: int = 0
+    unresolved_contact_matches: int = 0
+    status_conflicts: int = 0
+    invalid_rows: int = 0
+    confirm_blocked: bool = False
 
 
 class CrmImportDryRunResponse(BaseModel):
@@ -3300,6 +3379,12 @@ class CrmImportDryRunResponse(BaseModel):
     counts: CrmImportDryRunCounts = Field(default_factory=CrmImportDryRunCounts)
     rows: list[CrmImportDryRunRow] = Field(default_factory=list)
     status_catalog: list[str] = Field(default_factory=list)
+    source_type: str = "CRM_IMPORT"
+    original_filename: str = ""
+    mapped_fields: dict[str, str] = Field(default_factory=dict)
+    validation_summary: CrmImportValidationSummary = Field(
+        default_factory=CrmImportValidationSummary
+    )
 
 
 class CrmImportStatusResolutionRequest(BaseModel):

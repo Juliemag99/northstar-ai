@@ -18,6 +18,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from crm_import_source import (
+    DEFAULT_SOURCE_TYPE,
+    UNQUOTED_NEWLINE_DETAIL,
+    normalize_source_type,
+)
 from models import (
     CrmImportBatchView,
     CrmImportRowsPage,
@@ -267,6 +272,7 @@ def ensure_crm_import_schema(conn=None) -> None:
                 notes_appended_count INTEGER NOT NULL DEFAULT 0,
                 notes_duplicate_count INTEGER NOT NULL DEFAULT 0,
                 notes_unchanged_count INTEGER NOT NULL DEFAULT 0,
+                source_type TEXT NOT NULL DEFAULT 'CRM_IMPORT',
                 FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE,
                 FOREIGN KEY (uploaded_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
                 FOREIGN KEY (mapping_updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
@@ -318,10 +324,12 @@ def ensure_crm_import_schema(conn=None) -> None:
             """
         )
         from crm_import_status_resolution import ensure_crm_import_status_resolution_schema
+        from crm_import_match_resolution import ensure_crm_import_match_resolution_schema
 
         ensure_crm_import_status_resolution_schema(conn)
+        ensure_crm_import_match_resolution_schema(conn)
         existing = {
-            str(r["name"])
+            str(r[1] if not hasattr(r, "keys") else r["name"])
             for r in conn.execute("PRAGMA table_info(crm_import_batches)").fetchall()
         }
         for name, declaration in (
@@ -348,6 +356,7 @@ def ensure_crm_import_schema(conn=None) -> None:
             ("notes_appended_count", "INTEGER NOT NULL DEFAULT 0"),
             ("notes_duplicate_count", "INTEGER NOT NULL DEFAULT 0"),
             ("notes_unchanged_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("source_type", "TEXT NOT NULL DEFAULT 'CRM_IMPORT'"),
         ):
             if name not in existing:
                 conn.execute(f"ALTER TABLE crm_import_batches ADD COLUMN {name} {declaration}")
@@ -485,19 +494,58 @@ def _decode_csv_bytes(content: bytes) -> tuple[str, list[str]]:
         raise ValueError(GENERIC_PARSE_ERROR) from exc
 
 
+def _csv_quote_closed(text: str) -> bool:
+    in_quotes = False
+    i = 0
+    while i < len(text):
+        if text[i] == '"':
+            if in_quotes and i + 1 < len(text) and text[i + 1] == '"':
+                i += 2
+                continue
+            in_quotes = not in_quotes
+        i += 1
+    return not in_quotes
+
+
+def _csv_delimiter(text: str, warnings: list[str]) -> str:
+    first = ""
+    for line in text.splitlines():
+        if line.strip():
+            first = line
+            break
+    if "\t" in first and first.count("\t") >= first.count(","):
+        warnings.append("A non-comma delimiter was detected.")
+        return "\t"
+    if first.count(";") > first.count(",") and first.count(";") >= 1:
+        warnings.append("A non-comma delimiter was detected.")
+        return ";"
+    return ","
+
+
 def _parse_csv(content: bytes) -> tuple[list[str], list[dict[str, Any]], dict[str, int], list[str]]:
     text, warnings = _decode_csv_bytes(content)
-    sample = text[:8192]
-    dialect = csv.excel
-    if sample.strip():
-        try:
-            dialect = csv.Sniffer().sniff(sample, delimiters=",\t;")
-            if getattr(dialect, "delimiter", ",") in {"\t", ";"}:
-                warnings.append("A non-comma delimiter was detected.")
-        except csv.Error:
-            dialect = csv.excel
-    reader = csv.reader(io.StringIO(text), dialect)
+    if not _csv_quote_closed(text):
+        raise ValueError(UNQUOTED_NEWLINE_DETAIL)
+    delimiter = _csv_delimiter(text, warnings)
+    reader = csv.reader(
+        io.StringIO(text),
+        delimiter=delimiter,
+        quotechar='"',
+        doublequote=True,
+        skipinitialspace=False,
+        quoting=csv.QUOTE_MINIMAL,
+    )
     rows = list(reader)
+    if rows:
+        header_width = len(rows[0])
+        if header_width >= 2:
+            for row in rows[1:]:
+                if not any(str(c or "").strip() for c in row):
+                    continue
+                # Extra cells are reported as EXTRA_SOURCE_COLUMNS in materialize.
+                # Fewer cells than the header is the unquoted-newline split pattern.
+                if len(row) < header_width:
+                    raise ValueError(UNQUOTED_NEWLINE_DETAIL)
     return _materialize_grid(rows, warnings)
 
 
@@ -649,6 +697,7 @@ def _insert_batch(
     counts: dict[str, int],
     staged: list[dict[str, Any]],
 ) -> int:
+    ensure_crm_import_schema(conn)
     now = _now()
     expires = now + timedelta(days=RETENTION_DAYS)
     cur = conn.execute(
@@ -658,8 +707,8 @@ def _insert_batch(
             original_filename, file_type, worksheet_name, file_size_bytes, sha256,
             status, error_message, headers_json, warnings_json,
             total_rows, source_row_count, blank_row_count, error_row_count,
-            created_at, updated_at, cancelled_at, expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?)
+            created_at, updated_at, cancelled_at, expires_at, source_type
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
         """,
         (
             client_id,
@@ -681,6 +730,7 @@ def _insert_batch(
             _iso(now),
             _iso(now),
             _iso(expires),
+            DEFAULT_SOURCE_TYPE,
         ),
     )
     batch_id = int(cur.lastrowid)
@@ -768,6 +818,16 @@ def _batch_view(conn, row, *, include_sample: bool) -> CrmImportBatchView:
             and row["mapping_updated_by_user_id"] is not None
             else None
         ),
+        source_type=_batch_source_type(row),
+        suggested_mapping=_suggested_prior_mapping(
+            conn,
+            client_id=int(row["client_id"]),
+            source_type=_batch_source_type(row),
+            headers=headers,
+            exclude_batch_id=batch_id,
+        )
+        if reusable
+        else {},
         sample_rows=sample,
     )
 
@@ -878,6 +938,7 @@ def upload_crm_import(
 
     with get_connection() as conn:
         purge_expired_staging_rows(conn)
+        ensure_crm_import_schema(conn)
         batch_id = _insert_batch(
             conn,
             client_id=client_id,
@@ -1091,4 +1152,138 @@ def save_crm_import_mapping(
             ),
         )
     return get_crm_import_batch(client_id, batch_id, include_sample=True)
+
+
+def _batch_source_type(row) -> str:
+    if row is None:
+        return DEFAULT_SOURCE_TYPE
+    keys = row.keys() if hasattr(row, "keys") else []
+    if "source_type" not in keys:
+        return DEFAULT_SOURCE_TYPE
+    try:
+        return normalize_source_type(row["source_type"])
+    except ValueError:
+        return DEFAULT_SOURCE_TYPE
+
+
+def _suggested_prior_mapping(
+    conn,
+    *,
+    client_id: int,
+    source_type: str,
+    headers: list[str],
+    exclude_batch_id: int,
+) -> dict[str, str]:
+    if not headers:
+        return {}
+    header_json = json.dumps(headers)
+    row = conn.execute(
+        """
+        SELECT mapping_json FROM crm_import_batches
+        WHERE client_id = ?
+          AND id != ?
+          AND headers_json = ?
+          AND COALESCE(source_type, 'CRM_IMPORT') = ?
+          AND mapping_json NOT IN ('', '{}')
+        ORDER BY
+            CASE WHEN status = 'imported' THEN 0 ELSE 1 END,
+            COALESCE(imported_at, updated_at, created_at) DESC
+        LIMIT 1
+        """,
+        (int(client_id), int(exclude_batch_id), header_json, source_type),
+    ).fetchone()
+    if row is None:
+        return {}
+    try:
+        parsed = json.loads(row["mapping_json"] or "{}")
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(k): str(v) for k, v in parsed.items() if str(k).strip() and str(v).strip()}
+
+
+def save_crm_import_source_type(
+    client_id: int,
+    batch_id: int,
+    *,
+    actor: NorthStarUser,
+    source_type: str,
+) -> CrmImportBatchView:
+    if actor is None or not bool(actor.active) or not bool(actor.is_administrator):
+        raise PermissionError("Not authorized.")
+    normalized = normalize_source_type(source_type)
+    from db import get_connection
+
+    now = _iso(_now())
+    with get_connection() as conn:
+        purge_expired_staging_rows(conn)
+        ensure_crm_import_schema(conn)
+        row = _load_batch_row(conn, client_id, batch_id)
+        if row is None:
+            raise LookupError("Import batch not found.")
+        if _blank(row["status"]) != USABLE_STATUS:
+            raise BatchNotReusable(BATCH_NOT_REUSABLE)
+        conn.execute(
+            """
+            UPDATE crm_import_batches
+            SET source_type = ?, updated_at = ?
+            WHERE id = ? AND client_id = ?
+            """,
+            (normalized, now, int(batch_id), int(client_id)),
+        )
+    return get_crm_import_batch(client_id, batch_id, include_sample=True)
+
+
+def list_crm_import_batches(client_id: int, *, limit: int = 20) -> list[dict[str, Any]]:
+    from db import get_connection
+
+    cap = max(1, min(int(limit or 20), 50))
+    with get_connection() as conn:
+        ensure_crm_import_schema(conn)
+        rows = conn.execute(
+            """
+            SELECT
+                id, client_id, created_at, imported_at, original_filename,
+                COALESCE(source_type, 'CRM_IMPORT') AS source_type,
+                uploaded_by_name, status, source_row_count,
+                created_company_count, reused_company_count,
+                created_contact_count, reused_contact_count,
+                created_relationship_count, existing_relationship_count,
+                total_imported_row_count
+            FROM crm_import_batches
+            WHERE client_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (int(client_id), cap),
+        ).fetchall()
+    items = []
+    for row in rows:
+        try:
+            source_type = normalize_source_type(row["source_type"])
+        except ValueError:
+            source_type = DEFAULT_SOURCE_TYPE
+        items.append(
+            {
+                "batch_id": int(row["id"]),
+                "client_id": int(row["client_id"]),
+                "created_at": _blank(row["created_at"]),
+                "imported_at": _blank(row["imported_at"]),
+                "original_filename": _blank(row["original_filename"]),
+                "source_type": source_type,
+                "uploaded_by_name": _blank(row["uploaded_by_name"]),
+                "status": _blank(row["status"]),
+                "source_row_count": int(row["source_row_count"] or 0),
+                "created_company_count": int(row["created_company_count"] or 0),
+                "reused_company_count": int(row["reused_company_count"] or 0),
+                "created_contact_count": int(row["created_contact_count"] or 0),
+                "reused_contact_count": int(row["reused_contact_count"] or 0),
+                "created_relationship_count": int(row["created_relationship_count"] or 0),
+                "existing_relationship_count": int(row["existing_relationship_count"] or 0),
+                "total_imported_row_count": int(row["total_imported_row_count"] or 0),
+            }
+        )
+    return items
+
 

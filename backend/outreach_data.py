@@ -5,6 +5,8 @@ Reuses activities + client_company_relationships. No email send. No appointment 
 
 from __future__ import annotations
 
+from staff_context import resolve_staff_actor
+
 from datetime import date, datetime
 from typing import Any
 
@@ -146,7 +148,7 @@ def log_outreach(
     user_id: int | None = None,
 ) -> OutreachLogResult:
     """Save client-scoped outreach activity (+ optional follow-up / status)."""
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     client_id = int(body.client_id)
@@ -318,7 +320,7 @@ def list_priority_prospects(
     limit: int = 50,
 ) -> PriorityProspectsResponse:
     """Deterministic Active Client calling queue for dashboard + Save & Next."""
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_client_access(user.id, client_id)

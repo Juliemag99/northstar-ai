@@ -24,10 +24,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from access import (
     DEFAULT_USER_EMAIL,
-    get_default_user,
     get_user_by_id,
+    list_clients_for_user,
     user_can_access_client,
 )
+from staff_context import bind_staff_actor, reset_staff_actor
 from auth_passwords import verify_password
 from auth_sessions import (
     ABSOLUTE_HOURS,
@@ -56,6 +57,7 @@ UNAUTHENTICATED_EXACT = frozenset(
         ("POST", "/api/auth/logout"),
         ("GET", "/api/email/google/callback"),
         ("GET", "/health"),
+        ("GET", "/api/ready"),
     }
 )
 
@@ -103,7 +105,17 @@ def _dummy_verify(password: str) -> None:
 
 
 def _cookie_secure(request: Request) -> bool:
-    return request.url.scheme == "https"
+    """Secure cookies when the request is HTTPS, including a trusted reverse proxy.
+
+    NORTHSTAR_TRUST_PROXY=1 is required before X-Forwarded-Proto is honored.
+    Without it, a client cannot force Secure cookies by spoofing the header.
+    """
+    if request.url.scheme == "https":
+        return True
+    if os.environ.get("NORTHSTAR_TRUST_PROXY", "").strip() != "1":
+        return False
+    forwarded = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    return forwarded.lower() == "https"
 
 
 def _session_max_age() -> int:
@@ -134,8 +146,8 @@ def _clear_session_cookie(response: Response, request: Request) -> None:
     )
 
 
-def _public_user(user: NorthStarUser) -> dict[str, Any]:
-    return {
+def _public_user(user: NorthStarUser, *, include_access: bool = False) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "id": int(user.id),
         "email": user.email,
         "full_name": user.full_name,
@@ -144,6 +156,19 @@ def _public_user(user: NorthStarUser) -> dict[str, Any]:
         "active": bool(user.active),
         "created_at": user.created_at,
     }
+    if include_access:
+        from staff_rbac import public_role_payload
+
+        payload.update(public_role_payload(user))
+        payload["clients"] = [
+            {
+                "client_id": a.client_id,
+                "client_name": a.client_name,
+                "client_code": a.client_code,
+            }
+            for a in list_clients_for_user(int(user.id), active_only=True)
+        ]
+    return payload
 
 
 def _default_password_hash(conn=None) -> str:
@@ -377,9 +402,30 @@ class StaffAuthEnforceMiddleware(BaseHTTPMiddleware):
         return _auth_required_response()
 
 
+class StaffActorMiddleware(BaseHTTPMiddleware):
+    """Bind the session user as the request actor for CRM identity/ACL."""
+
+    async def dispatch(self, request: Request, call_next):
+        user = None
+        try:
+            session = lookup_request_session(request, touch=False)
+            if session is not None:
+                found = get_user_by_id(int(session["user_id"]))
+                if found is not None and bool(found.active):
+                    user = found
+        except Exception:
+            user = None
+        token = bind_staff_actor(user)
+        try:
+            return await call_next(request)
+        finally:
+            reset_staff_actor(token)
+
+
 def add_staff_csrf_middleware(app) -> None:
     # Add order is inner-first: last added runs first. main.py then wraps CORS
-    # outermost, so the request stack is CORS → CSRF → enforcement → routes.
+    # outermost, so the request stack is CORS → CSRF → enforcement → actor → routes.
+    app.add_middleware(StaffActorMiddleware)
     app.add_middleware(StaffAuthEnforceMiddleware)
     app.add_middleware(StaffCsrfMiddleware)
 
@@ -440,7 +486,7 @@ def staff_login(body: StaffLoginRequest, request: Request, response: Response):
     return {
         "ok": True,
         "authenticated": True,
-        "user": _public_user(user),
+        "user": _public_user(user, include_access=True),
         "csrf_token": str(session["csrf_secret"]),
         **_auth_state(),
     }
@@ -477,15 +523,14 @@ def staff_me(request: Request, response: Response):
         else:
             return {
                 "authenticated": True,
-                "user": _public_user(user),
+                "user": _public_user(user, include_access=True),
                 "csrf_token": str(session["csrf_secret"]),
                 **_auth_state(),
             }
 
-    default = get_default_user()
     return {
         "authenticated": False,
-        "user": _public_user(default) if default is not None else None,
+        "user": None,
         "csrf_token": "",
         **_auth_state(),
     }

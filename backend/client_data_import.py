@@ -1599,6 +1599,7 @@ def confirm_client_data_import(
                     plan=plan,
                     actor=actor,
                     fail_after=fail_after,
+                    source_system="client_data_import",
                 )
                 if fail_after == "after_crm_apply":
                     raise RuntimeError("Injected failure after CRM apply.")

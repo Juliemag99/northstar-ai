@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from staff_context import resolve_staff_actor
+
 import json
 import re
 from typing import Any
@@ -271,7 +273,7 @@ def list_client_contacts(
     user_id: int | None = None,
     include_inactive: bool = False,
 ) -> list[ClientContactView]:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)
@@ -305,7 +307,7 @@ def create_client_contact(
     user_id: int | None = None,
     allow_duplicate_flag: bool = False,
 ) -> ClientContactView:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -372,7 +374,7 @@ def update_client_contact(
     *,
     user_id: int | None = None,
 ) -> ClientContactView:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -466,7 +468,7 @@ def preview_split_contact_proposal(
     user_id: int | None = None,
 ) -> ClientContactSplitPreview:
     """Parse a multi-person proposal into individual draft people. Read-only."""
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)
@@ -525,7 +527,7 @@ def create_split_contact_proposals(
     Create individual Pending extraction proposals for each person.
     Does NOT approve the parent proposal and does NOT create contacts yet.
     """
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -954,7 +956,7 @@ def analyze_proposal_incorporation(
         ProposalIncorporationAnalysis,
     )
 
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)
@@ -1360,7 +1362,7 @@ def create_contact_enrichment_proposal(
     user_id: int | None = None,
 ) -> dict[str, Any]:
     """Create a Pending enrichment proposal. Does not approve."""
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)

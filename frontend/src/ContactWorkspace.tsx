@@ -1407,6 +1407,10 @@ export default function ContactWorkspacePage({
             {(data.sales_events || []).length === 1 ? '' : 's'} · newest first
           </span>
         </div>
+        <p className="muted-note">
+          Read-only imported Quote / appointment history. This is not a place to edit LeadMaster
+          source records.
+        </p>
         {(data.sales_events || []).length === 0 ? (
           <p className="queue-sub">No imported sales events for this contact yet.</p>
         ) : (

@@ -6,6 +6,8 @@ Does not auto-create NorthStar users (including Julie Magnani) as outside contac
 
 from __future__ import annotations
 
+from staff_context import resolve_staff_actor
+
 import re
 from typing import Any
 
@@ -13,8 +15,10 @@ from access import get_default_user, require_write_client_id, user_can_access_cl
 from activities_data import insert_activity_row
 from contact_phone import (
     canonical_contact_phone,
+    format_phone_with_extension,
     format_us_phone_display,
     lookup_contact_phone_matches,
+    store_phone_parts,
     upsert_contact_phone_keys,
 )
 from db import get_connection
@@ -67,7 +71,7 @@ def _has_contact_info(email: str, phone: str, alt_phone: str) -> bool:
 
 
 def _require_user_and_client(client_id: object) -> tuple[Any, int]:
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
     cid = require_write_client_id(client_id, user_id=user.id)
@@ -212,7 +216,7 @@ def _match_dict(
         """
         SELECT
             ct.id, ct.first_name, ct.last_name, ct.title, ct.email,
-            ct.phone, ct.alt_phone, ct.company_id, co.company_name
+            ct.phone, ct.phone_extension, ct.alt_phone, ct.alt_phone_extension, ct.company_id, co.company_name
         FROM contacts ct
         JOIN companies co ON co.id = ct.company_id
         WHERE ct.id = ?
@@ -228,8 +232,14 @@ def _match_dict(
         "last_name": _blank(row["last_name"]),
         "title": _blank(row["title"]),
         "email": _blank(row["email"]),
-        "phone": format_us_phone_display(_blank(row["phone"])),
-        "alt_phone": format_us_phone_display(_blank(row["alt_phone"])),
+        "phone": format_phone_with_extension(
+            _blank(row["phone"]),
+            _blank(row["phone_extension"]) if "phone_extension" in row.keys() else "",
+        ),
+        "alt_phone": format_phone_with_extension(
+            _blank(row["alt_phone"]),
+            _blank(row["alt_phone_extension"]) if "alt_phone_extension" in row.keys() else "",
+        ),
         "company_id": company_id,
         "company_name": _blank(row["company_name"]),
         "reasons": reasons,
@@ -692,6 +702,8 @@ def save_manual_contact(body: ManualContactSaveRequest) -> ManualContactSaveResu
             client_name = _blank(rel["client_name"])
             relationship_id = int(rel["relationship_id"])
             columns = {str(r["name"]) for r in conn.execute("PRAGMA table_info(contacts)")}
+            phone_main, phone_ext = store_phone_parts(_blank(body.phone), field="phone")
+            alt_main, alt_ext = store_phone_parts(_blank(body.alt_phone), field="alt_phone")
             insert_cols = [
                 "company_id",
                 "external_record_no",
@@ -709,11 +721,17 @@ def save_manual_contact(body: ManualContactSaveRequest) -> ManualContactSaveResu
                 first,
                 last,
                 _blank(body.title),
-                format_us_phone_display(_blank(body.phone)),
-                format_us_phone_display(_blank(body.alt_phone)),
+                phone_main,
+                alt_main,
                 _blank(body.email),
                 0,
             ]
+            if "phone_extension" in columns:
+                insert_cols.append("phone_extension")
+                insert_vals.append(phone_ext or None)
+            if "alt_phone_extension" in columns:
+                insert_cols.append("alt_phone_extension")
+                insert_vals.append(alt_ext or None)
             if _blank(body.linkedin_url) and "linkedin_url" in columns:
                 insert_cols.append("linkedin_url")
                 insert_vals.append(_blank(body.linkedin_url))
@@ -738,11 +756,33 @@ def save_manual_contact(body: ManualContactSaveRequest) -> ManualContactSaveResu
                 insert_vals,
             )
             contact_id = int(cur.lastrowid)
+            from data_steward import ENTITY_CONTACT, record_populated_creates, source_ref_manual
+
+            record_populated_creates(
+                conn,
+                entity_type=ENTITY_CONTACT,
+                entity_id=contact_id,
+                fields={
+                    "first_name": first,
+                    "last_name": last,
+                    "title": _blank(body.title),
+                    "email": _blank(body.email),
+                    "phone": phone_main,
+                    "phone_extension": phone_ext or "",
+                    "alt_phone": alt_main,
+                    "alt_phone_extension": alt_ext or "",
+                    "company_id": str(selected_company_id),
+                },
+                actor=user,
+                source_ref=source_ref_manual(),
+                action="CREATE",
+                client_id=client_id,
+            )
             upsert_contact_phone_keys(
                 conn,
                 contact_id,
-                format_us_phone_display(_blank(body.phone)),
-                format_us_phone_display(_blank(body.alt_phone)),
+                phone_main,
+                alt_main,
             )
             conn.execute(
                 """

@@ -25,6 +25,7 @@ import {
   fetchDashboardFollowUps,
   fetchAssignedClients,
   fetchAppointmentSummary,
+  fetchMilestoneSummary,
   fetchClientActivities,
   globalSearch,
   isCampaignRouteStatus,
@@ -35,6 +36,11 @@ import {
 } from './api/carmeco'
 import { pathAfterActiveClientChange } from './activeClientNavigation'
 import { ASK_NORTHSTAR_PATH, isFromAskNorthStar, withAskReturnParam } from './askNorthStarReturn'
+import {
+  APPOINTMENTS_SET_SUBTITLE,
+  revenueOpportunityCountsFromSummary,
+  type RevenueOpportunityCounts,
+} from './revenueOpportunityKpis'
 import {
   formatClientStatusChip,
   sortedClientStatuses,
@@ -95,6 +101,17 @@ import AppointmentDetailsFields from './AppointmentDetailsFields'
 import { useAuth } from './auth/useAuth'
 import { staffCanAdminister } from './auth/staffCanAdminister'
 import {
+  dashboardStartHereMessage,
+  isSingleAssignedClient,
+  resolveActiveClientId,
+  staffNavItemVisible,
+  staffRoleLabel,
+} from './auth/staffWorkspace'
+import {
+  northStarPilotLabel,
+  showNorthStarPilotIndicator,
+} from './auth/pilotIndicator'
+import {
   APPOINTMENT_SET_STATUSES,
   appointmentDetailsAreValid,
   appointmentSourceForStatus,
@@ -143,6 +160,15 @@ type ProspectFilterKey =
   | 'hot'
   | 'new'
   | null
+
+const PROSPECT_MILESTONE_FILTER_TYPES: Partial<
+  Record<Exclude<ProspectFilterKey, null>, string>
+> = {
+  quotes: 'Quote',
+  'purchase-orders': 'Purchase Order',
+  webleads: 'WebLead',
+  'appointments-set': 'Appointment Set',
+}
 
 const PROSPECT_FILTER_META: Record<
   Exclude<ProspectFilterKey, null>,
@@ -502,6 +528,18 @@ function buildWorkQueueCards(
       to: followUpCountHref(upcomingItems, 'dashboard-follow-ups-upcoming'),
     },
     {
+      id: 'new',
+      label: 'New Assignments',
+      value:
+        queueSummary != null
+          ? String(queueSummary.new_assignments)
+          : String(prospects.filter(isNewAssignment).length),
+      change: 'Status = New — start here when nothing is due',
+      tone: 'work' as const,
+      icon: '＋',
+      to: `/work-queue?${scopeQuery}type=new`,
+    },
+    {
       id: 'needs-next-action',
       label: 'Needs Next Action',
       value: needsNextActionCount != null ? String(needsNextActionCount) : '—',
@@ -531,36 +569,23 @@ function buildWorkQueueCards(
       icon: '⇄',
       to: `/cross-client-opportunities${oppTarget}`,
     },
-    {
-      id: 'new',
-      label: 'New Assignments',
-      value:
-        queueSummary != null
-          ? String(queueSummary.new_assignments)
-          : String(prospects.filter(isNewAssignment).length),
-      change: 'Status = New',
-      tone: 'work' as const,
-      icon: '＋',
-      to: `/work-queue?${scopeQuery}type=new`,
-    },
   ]
 }
 
 function buildKpiCards(
   prospects: ProspectListItem[],
-  appointmentSetCount: number | null,
+  revenueCounts: RevenueOpportunityCounts | null,
   hotCount: number | null,
-  queueSummary: WorkQueueSummaryV2 | null = null,
 ) {
   return [
     {
       id: 'appointments',
       label: 'Appointments Set',
       value:
-        appointmentSetCount != null
-          ? String(appointmentSetCount)
+        revenueCounts != null
+          ? String(revenueCounts.appointments_set)
           : String(prospects.filter((prospect) => prospect.has_appointment_set).length),
-      change: 'Live appointment records',
+      change: APPOINTMENTS_SET_SUBTITLE,
       tone: 'appointments' as const,
       icon: '◷',
       to: '/appointments',
@@ -568,8 +593,11 @@ function buildKpiCards(
     {
       id: 'quotes',
       label: 'Quotes',
-      value: String(prospects.filter((prospect) => prospect.has_quote).length),
-      change: 'Revenue milestone',
+      value:
+        revenueCounts != null
+          ? String(revenueCounts.quotes)
+          : String(prospects.filter((prospect) => prospect.has_quote).length),
+      change: 'Quote milestones',
       tone: 'quotes' as const,
       icon: '▤',
       to: '/prospects?filter=quotes',
@@ -577,7 +605,10 @@ function buildKpiCards(
     {
       id: 'purchase-orders',
       label: 'Purchase Orders',
-      value: String(prospects.filter((prospect) => prospect.has_purchase_order).length),
+      value:
+        revenueCounts != null
+          ? String(revenueCounts.purchase_orders)
+          : String(prospects.filter((prospect) => prospect.has_purchase_order).length),
       change: 'Revenue milestone',
       tone: 'purchase-orders' as const,
       icon: '✓',
@@ -587,8 +618,8 @@ function buildKpiCards(
       id: 'webleads',
       label: 'WebLeads',
       value:
-        queueSummary != null
-          ? String(queueSummary.webleads)
+        revenueCounts != null
+          ? String(revenueCounts.webleads)
           : String(prospects.filter((prospect) => prospect.has_weblead).length),
       change: 'Revenue milestone',
       tone: 'webleads' as const,
@@ -738,9 +769,10 @@ function App() {
   const [searchParams, setSearchParams] = useSearchParams()
   const { authenticated, user, authAvailable, authEnforced, logout } = useAuth()
   const canAdminister = staffCanAdminister(authenticated, user)
-  const visibleNavItems = navItems.filter(
-    (item) => item.id !== 'administration' || canAdminister,
+  const visibleNavItems = navItems.filter((item) =>
+    staffNavItemVisible(item.id, canAdminister),
   )
+  const roleLabel = staffRoleLabel(authenticated, user)
   const displayName =
     authenticated && user?.full_name.trim() ? user.full_name.trim() : WORKSPACE_USER
   const displayInitials = staffInitials(authenticated, displayName)
@@ -822,11 +854,11 @@ function App() {
   const [focusFlashId, setFocusFlashId] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [dateFilter, setDateFilter] = useState('today')
   const [client, setClient] = useState<ActiveClient | null>(null)
   const [availableClients, setAvailableClients] = useState<
     Array<{ client_id: number; client_name: string; client_code: string }>
   >([])
+  const singleAssignedClient = isSingleAssignedClient(availableClients.length)
   const [activeClientId, setActiveClientId] = useState<number | null>(() => readStoredActiveClientId())
   const [prospects, setProspects] = useState<ProspectListItem[]>([])
   const [companyListQuery, setCompanyListQuery] = useState('')
@@ -914,6 +946,7 @@ function App() {
   const [outreachError, setOutreachError] = useState<string | null>(null)
   const [priorityQueue, setPriorityQueue] = useState<PriorityProspectItem[]>([])
   const [appointmentSummary, setAppointmentSummary] = useState<AppointmentSummary | null>(null)
+  const [milestoneSummary, setMilestoneSummary] = useState<RevenueOpportunityCounts | null>(null)
   const [recentActivities, setRecentActivities] = useState<ActivityTimelineRow[]>([])
   const [salesEventFilter, setSalesEventFilter] = useState<
     'all' | 'appointments' | 'rfq' | 'send'
@@ -933,16 +966,21 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [authenticated, user?.id])
 
-  // Hydrate Active Client once from localStorage or first assignment (no Carmeco hard-code).
+  // Hydrate Active Client from localStorage or first assignment (no Carmeco hard-code).
+  // One-client specialists are pinned to that client so leftover "All My Clients" is not shown.
   useEffect(() => {
-    if (activeClientId != null) return
-    if (availableClients.length === 0) return
-    const next = availableClients[0]?.client_id ?? null
-    if (next == null) return
+    if (availableClients.length === 0) {
+      return
+    }
+    const next = resolveActiveClientId({
+      availableClientIds: availableClients.map((c) => c.client_id),
+      storedOrCurrent: activeClientId,
+    })
+    if (next === activeClientId) return
     setActiveClientId(next)
-    writeStoredActiveClientId(next)
+    if (next != null) writeStoredActiveClientId(next)
   }, [activeClientId, availableClients])
 
   // Prospects / statuses follow Active Client only — never reset activeClientId here.
@@ -1028,10 +1066,15 @@ function App() {
           ? 'New'
           : '')
 
-    // Non-status prospect shortcuts (calls/quotes/etc.) belong on Work Queue — do not
-    // rehydrate an unbounded Companies book into memory.
+    const milestoneTypeForApi =
+      prospectFilter && PROSPECT_MILESTONE_FILTER_TYPES[prospectFilter]
+        ? PROSPECT_MILESTONE_FILTER_TYPES[prospectFilter]
+        : undefined
+
+    // Non-milestone shortcuts (calls/follow-ups) still belong on Work Queue.
     if (
       prospectFilter &&
+      !milestoneTypeForApi &&
       prospectFilter !== 'hot' &&
       prospectFilter !== 'new' &&
       !prospectStatusFilter
@@ -1052,6 +1095,7 @@ function App() {
       all_clients: allClients,
       q: debouncedCompanyListQuery,
       status: statusForApi || undefined,
+      milestone_type: milestoneTypeForApi,
       limit: COMPANY_PAGE_SIZE,
       offset: companyListPage * COMPANY_PAGE_SIZE,
     })
@@ -1099,17 +1143,23 @@ function App() {
     const scopedId = activeClientId != null && activeClientId > 0 ? activeClientId : null
     setDashboardFollowUps(null)
     setAppointmentSummary(null)
+    setMilestoneSummary(null)
     const followUpsPromise =
       scopedId != null ? fetchDashboardFollowUps(scopedId) : Promise.resolve(null)
     const appointmentPromise =
       scopedId != null ? fetchAppointmentSummary(scopedId).catch(() => null) : Promise.resolve(null)
+    const milestonePromise =
+      activeClientId != null
+        ? fetchMilestoneSummary(scopedId).catch(() => null)
+        : Promise.resolve(null)
     void Promise.all([
       fetchOpportunityCount(scopedId),
       fetchWorkQueue({ client_id: scopedId, limit: 1, offset: 0 }),
       followUpsPromise,
       appointmentPromise,
+      milestonePromise,
     ])
-      .then(([count, queue, followUps, appointments]) => {
+      .then(([count, queue, followUps, appointments, milestones]) => {
         if (cancelled) return
         setOpportunityCount(count)
         setWorkQueueSummary(queue.summary)
@@ -1117,6 +1167,7 @@ function App() {
         setHotCount(queue.summary.hot ?? 0)
         setDashboardFollowUps(followUps)
         setAppointmentSummary(appointments)
+        setMilestoneSummary(revenueOpportunityCountsFromSummary(milestones))
       })
       .catch(() => {
         if (cancelled) return
@@ -1126,6 +1177,7 @@ function App() {
         setHotCount(null)
         setDashboardFollowUps(null)
         setAppointmentSummary(null)
+        setMilestoneSummary(null)
       })
     return () => {
       cancelled = true
@@ -1421,14 +1473,8 @@ function App() {
     ],
   )
   const kpiCards = useMemo(
-    () =>
-      buildKpiCards(
-        companyListRows,
-        appointmentSummary?.set_count ?? null,
-        hotCount,
-        workQueueSummary,
-      ),
-    [companyListRows, appointmentSummary, hotCount, workQueueSummary],
+    () => buildKpiCards(companyListRows, milestoneSummary, hotCount),
+    [companyListRows, milestoneSummary, hotCount],
   )
   const upcomingAppointments = appointmentSummary?.upcoming ?? []
 
@@ -1438,6 +1484,13 @@ function App() {
       : availableClients.find((c) => c.client_id === activeClientId)?.client_name) ||
     client?.name ||
     'Select client'
+  const startHereMessage = dashboardStartHereMessage({
+    clientName,
+    newAssignments: workQueueSummary?.new_assignments ?? 0,
+    callsDue: workQueueSummary?.calls_due ?? 0,
+    followUpsDueToday: dashboardFollowUps?.due_today_count ?? 0,
+    overdueFollowUps: dashboardFollowUps?.overdue_count ?? 0,
+  })
   const workspaceClientId =
     (selectedClientId != null && selectedClientId > 0 && Number.isFinite(selectedClientId)
       ? selectedClientId
@@ -1889,7 +1942,7 @@ function App() {
         queue_source: workQueueContext.source,
         queue_source_id: workQueueContext.source_id,
         complete_current: true,
-        created_by: WORKSPACE_USER,
+        created_by: displayName,
         appointment: isAppointmentSetStatus(callStatus)
           ? {
               appointment_date: callAppointmentDetails.appointment_date,
@@ -2038,7 +2091,7 @@ function App() {
         next_action: storedNextAction(outreachNextSel, nextActionCatalog),
         follow_up_date: outreachFollowUpDate || null,
         return_next: andNext,
-        created_by: WORKSPACE_USER,
+        created_by: displayName,
       })
       const activities = await fetchCompanyActivities(
         selectedRecordNo,
@@ -2135,7 +2188,7 @@ function App() {
       const created = await createCompanyNote({
         external_record_no: selectedRecordNo,
         notes: noteDraft,
-        created_by: WORKSPACE_USER,
+        created_by: displayName,
         client: workspaceClientName,
         client_id: workspaceClientId,
       })
@@ -2191,7 +2244,7 @@ function App() {
         reference_number: milestoneReference || undefined,
         source: milestoneSource || undefined,
         notes: milestoneNotes || undefined,
-        created_by: WORKSPACE_USER,
+        created_by: displayName,
       })
       const [nextWorkspace, activities] = await Promise.all([
         fetchCompanyByRecordNo(selectedRecordNo, workspaceClientId),
@@ -2246,7 +2299,7 @@ function App() {
         client_id: workspaceClientId,
         external_record_no: selectedRecordNo,
         is_hot: !workspace.is_hot,
-        created_by: WORKSPACE_USER,
+        created_by: displayName,
       })
       if (next) {
         applyWorkspaceUpdate(next)
@@ -2335,6 +2388,9 @@ function App() {
             <div className="brand-text">
               <strong>NorthStar Group</strong>
               <span>NorthStar AI</span>
+              {showNorthStarPilotIndicator() ? (
+                <span className="pilot-indicator">{northStarPilotLabel()}</span>
+              ) : null}
             </div>
           )}
           <button
@@ -2351,43 +2407,47 @@ function App() {
         {!sidebarCollapsed && (
           <div className="client-badge" aria-label="Active client">
             <span className="client-badge__label">Active client</span>
-            <label className="client-badge__select-label" htmlFor="active-client-select">
-              <span className="sr-only">Active client</span>
-              <select
-                id="active-client-select"
-                className="client-badge__select"
-                value={
-                  activeClientId == null
-                    ? ''
-                    : activeClientId === 0
-                      ? 'all'
-                      : String(activeClientId)
-                }
-                onChange={(e) => {
-                  const v = e.target.value
-                  if (v === '') return
-                  if (v === 'all') {
-                    changeActiveClient(0)
-                    return
+            {singleAssignedClient ? (
+              <strong className="client-badge__name">{availableClients[0].client_name}</strong>
+            ) : (
+              <label className="client-badge__select-label" htmlFor="active-client-select">
+                <span className="sr-only">Active client</span>
+                <select
+                  id="active-client-select"
+                  className="client-badge__select"
+                  value={
+                    activeClientId == null
+                      ? ''
+                      : activeClientId === 0
+                        ? 'all'
+                        : String(activeClientId)
                   }
-                  const nextId = Number(v)
-                  if (!Number.isFinite(nextId) || nextId <= 0) return
-                  changeActiveClient(nextId)
-                }}
-              >
-                {availableClients.length === 0 && (
-                  <option value="" disabled>
-                    Loading clients…
-                  </option>
-                )}
-                {availableClients.map((c) => (
-                  <option key={c.client_id} value={String(c.client_id)}>
-                    {c.client_name}
-                  </option>
-                ))}
-                {availableClients.length > 1 && <option value="all">All My Clients</option>}
-              </select>
-            </label>
+                  onChange={(e) => {
+                    const v = e.target.value
+                    if (v === '') return
+                    if (v === 'all') {
+                      changeActiveClient(0)
+                      return
+                    }
+                    const nextId = Number(v)
+                    if (!Number.isFinite(nextId) || nextId <= 0) return
+                    changeActiveClient(nextId)
+                  }}
+                >
+                  {availableClients.length === 0 && (
+                    <option value="" disabled>
+                      Loading clients…
+                    </option>
+                  )}
+                  {availableClients.map((c) => (
+                    <option key={c.client_id} value={String(c.client_id)}>
+                      {c.client_name}
+                    </option>
+                  ))}
+                  {availableClients.length > 1 && <option value="all">All My Clients</option>}
+                </select>
+              </label>
+            )}
           </div>
         )}
 
@@ -2418,7 +2478,7 @@ function App() {
             {!sidebarCollapsed && (
               <div>
                 <strong>{displayName}</strong>
-                <span>Account Executive</span>
+                <span>{roleLabel}</span>
               </div>
             )}
           </div>
@@ -4262,6 +4322,8 @@ function App() {
               <Navigate to="/" replace />
             ))}
 
+          {showClientSetupPage && !canAdminister ? <Navigate to="/" replace /> : null}
+
           {!loading && !error && showWorkQueue && (
             <WorkQueue
               activeClientId={activeClientId}
@@ -4305,13 +4367,14 @@ function App() {
             <CrossClientOpportunities client={client} />
           )}
 
-          {!loading && !error && showClientSetupPage && showClientOnboarding && (
+          {!loading && !error && showClientSetupPage && canAdminister && showClientOnboarding && (
             <ClientOnboarding />
           )}
 
           {!loading &&
             !error &&
             showClientSetupPage &&
+            canAdminister &&
             !showClientOnboarding &&
             clientKnowledgeId &&
             clientKnowledgeId > 0 && (
@@ -4321,6 +4384,7 @@ function App() {
           {!loading &&
             !error &&
             showClientSetupPage &&
+            canAdminister &&
             !showClientOnboarding &&
             !clientKnowledgeId && (
             <ClientSetup clientId={clientSetupId && clientSetupId > 0 ? clientSetupId : null} />
@@ -4340,18 +4404,6 @@ function App() {
                 </div>
                 <div className="heading-controls">
                   <span className="date-chip">{todayLabel}</span>
-                  <label className="filter-select">
-                    <span className="sr-only">Date filter</span>
-                    <select
-                      value={dateFilter}
-                      onChange={(e) => setDateFilter(e.target.value)}
-                      aria-label="Date filter"
-                    >
-                      <option value="today">Today</option>
-                      <option value="week">This week</option>
-                      <option value="month">This month</option>
-                    </select>
-                  </label>
                 </div>
               </div>
 
@@ -4380,6 +4432,11 @@ function App() {
 
               <div className="kpi-section">
                 <h2 className="kpi-section__label">Today&apos;s Work</h2>
+                {startHereMessage ? (
+                  <p className="dashboard-start-here" role="status">
+                    {startHereMessage}
+                  </p>
+                ) : null}
                 <section className="stat-grid stat-grid--work-queue" aria-label="Today's work">
                   {workQueueCards.map((card) => (
                     <Link

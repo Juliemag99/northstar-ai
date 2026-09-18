@@ -11,6 +11,8 @@ Architecture:
 
 from __future__ import annotations
 
+from staff_context import resolve_staff_actor
+
 import json
 from datetime import datetime, timezone
 from typing import Any
@@ -973,7 +975,7 @@ def compute_completeness(
 
 def list_client_setup_summaries(*, user_id: int | None = None) -> list[ClientListSetupItem]:
     ensure_client_setup_schema()
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     assignments = list_clients_for_user(user.id, active_only=True)
@@ -1039,7 +1041,7 @@ def get_client_setup(
     client_id: int, *, user_id: int | None = None
 ) -> ClientSetupResponse:
     ensure_client_setup_schema()
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     if not user_can_access_client(user.id, client_id) and not user.is_administrator:
@@ -1149,7 +1151,7 @@ def update_client_overview(
     *,
     user_id: int | None = None,
 ) -> ClientSetupResponse:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     require_write_client_id(client_id, user_id=user.id)
@@ -1260,7 +1262,7 @@ def update_client_sells(
     *,
     user_id: int | None = None,
 ) -> ClientSetupResponse:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     require_write_client_id(client_id, user_id=user.id)
@@ -1346,7 +1348,7 @@ def create_campaign(
     *,
     user_id: int | None = None,
 ) -> ClientSetupResponse:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     require_write_client_id(client_id, user_id=user.id)
@@ -1457,7 +1459,7 @@ def update_campaign(
     *,
     user_id: int | None = None,
 ) -> ClientSetupResponse:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     require_write_client_id(client_id, user_id=user.id)
@@ -1558,7 +1560,7 @@ def set_default_campaign(
     *,
     user_id: int | None = None,
 ) -> ClientSetupResponse:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     require_write_client_id(client_id, user_id=user.id)
@@ -1612,7 +1614,7 @@ def delete_campaign(
     *,
     user_id: int | None = None,
 ) -> ClientSetupResponse:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     require_write_client_id(client_id, user_id=user.id)

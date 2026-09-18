@@ -14,6 +14,9 @@ vi.mock('./api/crmImport', async () => {
     dryRunCrmImport: vi.fn(),
     confirmCrmImport: vi.fn(),
     saveCrmImportStatusResolution: vi.fn(),
+    saveCrmImportSourceType: vi.fn(),
+    saveCrmImportMatchResolution: vi.fn(),
+    fetchCrmImportHistory: vi.fn(async () => ({ client_id: 7, items: [] })),
   }
 })
 
@@ -46,6 +49,8 @@ function baseBatch(overrides: Partial<crmImport.CrmImportBatch> = {}): crmImport
     mapping: {},
     mapping_updated_at: '',
     mapping_updated_by_user_id: null,
+    source_type: 'CRM_IMPORT',
+    suggested_mapping: {},
     sample_rows: [],
     ...overrides,
   }
@@ -158,6 +163,10 @@ afterEach(() => {
   vi.mocked(crmImport.dryRunCrmImport).mockReset()
   vi.mocked(crmImport.confirmCrmImport).mockReset()
   vi.mocked(crmImport.saveCrmImportStatusResolution).mockReset()
+  vi.mocked(crmImport.saveCrmImportSourceType).mockReset()
+  vi.mocked(crmImport.saveCrmImportMatchResolution).mockReset()
+  vi.mocked(crmImport.fetchCrmImportHistory).mockReset()
+  vi.mocked(crmImport.fetchCrmImportHistory).mockResolvedValue({ client_id: 7, items: [] })
 })
 
 describe('Administration import tab', () => {
@@ -1249,7 +1258,7 @@ describe('Administration import tab', () => {
     fireEvent.click(openBtn)
     const dialog = await screen.findByRole('dialog')
     expect(dialog.getAttribute('aria-modal')).toBe('true')
-    expect(screen.getByRole('heading', { name: 'Import 116 rows for Carmeco?' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Import 116 rows for Carmeco (Client 7)?' })).toBeTruthy()
     expect(within(dialog).getByText('40')).toBeTruthy()
     expect(within(dialog).getByLabelText('Confirm import summary')).toBeTruthy()
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))

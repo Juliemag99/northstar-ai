@@ -6,11 +6,14 @@ leak into another client's results.
 
 from __future__ import annotations
 
+from staff_context import resolve_staff_actor
+
 import re
 
 from access import get_default_user, get_user_by_id, resolve_visibility_client_ids
 from db import DB_PATH, get_connection
 from models import SearchHit, SearchResponse
+from data_steward import sql_active_ccr, sql_active_company, sql_active_contact
 
 _FTS_SPECIAL = re.compile(r'[^\w\s]+', re.UNICODE)
 
@@ -762,7 +765,7 @@ def search(
     if not raw_q and not has_milestone_filters:
         return SearchResponse(query="", total=0)
 
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
 
@@ -857,6 +860,45 @@ def search(
                 """
             )
             params.append(status)
+
+        filters.append(
+            f"""
+            (
+              search_fts.company_id IS NULL
+              OR EXISTS (
+                SELECT 1 FROM companies co
+                WHERE co.id = search_fts.company_id
+                  AND {sql_active_company(conn, "co")}
+              )
+            )
+            """
+        )
+        filters.append(
+            f"""
+            (
+              search_fts.company_id IS NULL
+              OR search_fts.client_id IS NULL
+              OR EXISTS (
+                SELECT 1 FROM client_company_relationships ccr
+                WHERE ccr.company_id = search_fts.company_id
+                  AND ccr.client_id = search_fts.client_id
+                  AND {sql_active_ccr(conn, "ccr")}
+              )
+            )
+            """
+        )
+        filters.append(
+            f"""
+            (
+              search_fts.contact_id IS NULL
+              OR EXISTS (
+                SELECT 1 FROM contacts ct
+                WHERE ct.id = search_fts.contact_id
+                  AND {sql_active_contact(conn, "ct")}
+              )
+            )
+            """
+        )
 
         for enabled, mtype in (
             (had_appointment, "Appointment Set"),

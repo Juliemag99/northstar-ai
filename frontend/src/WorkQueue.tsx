@@ -710,7 +710,7 @@ export default function WorkQueue({
               value={selectedClientId ?? ''}
               onChange={(event) => setFilter('client_id', event.target.value)}
             >
-              <option value="">All My Clients</option>
+              {clients.length > 1 && <option value="">All My Clients</option>}
               {clients.map((client) => (
                 <option key={client.client_id} value={client.client_id}>
                   {client.client_name}
@@ -911,21 +911,27 @@ export default function WorkQueue({
               </>
             ) : (
               <>
-                <p>You&apos;re caught up.</p>
+                <p>
+                  {summary.new_assignments > 0
+                    ? 'Nothing is scheduled due. Open New Assignments to start calling.'
+                    : "You're caught up."}
+                </p>
                 <div className="edit-actions">
                   <button type="button" className="primary-btn" onClick={() => applySummaryFilter('new')}>
                     View New Assignments
                   </button>
-                  <button
-                    type="button"
-                    className="link-btn"
-                    onClick={() => {
-                      setSearchDraft('')
-                      setSearchParams(new URLSearchParams())
-                    }}
-                  >
-                    Change Client
-                  </button>
+                  {clients.length > 1 ? (
+                    <button
+                      type="button"
+                      className="link-btn"
+                      onClick={() => {
+                        setSearchDraft('')
+                        setSearchParams(new URLSearchParams())
+                      }}
+                    >
+                      Change Client
+                    </button>
+                  ) : null}
                   <Link className="link-btn" to="/">
                     Return to Dashboard
                   </Link>

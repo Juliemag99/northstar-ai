@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from staff_context import resolve_staff_actor
+
 from datetime import date, datetime, timezone
 
 from db import get_connection
@@ -472,7 +474,7 @@ def insert_appointment_row(
     from access import get_default_user
     from activities_data import insert_activity_row
 
-    actor = get_default_user()
+    actor = resolve_staff_actor()
     insert_activity_row(
         conn,
         client_id=int(client_id),
@@ -535,7 +537,7 @@ def ensure_appointment_set_milestone(conn, *, activity_id: int, created_by: str)
 def _require_client_access(client_id: int):
     from access import get_default_user, require_write_client_id
 
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
     require_write_client_id(client_id, user_id=user.id)
@@ -722,7 +724,7 @@ def reschedule_appointment(appointment_id: int, body) -> AppointmentActionResult
             )
             from access import get_default_user
 
-            actor = get_default_user()
+            actor = resolve_staff_actor()
             created_by = _blank(actor.full_name) if actor is not None else "Julie Magnani"
             _write_appointment_history_activity(
                 conn,
@@ -757,7 +759,7 @@ def _write_appointment_history_activity(
     from access import get_default_user
     from activities_data import insert_activity_row
 
-    user = get_default_user()
+    user = resolve_staff_actor()
     activity_id = insert_activity_row(
         conn,
         client_id=int(row["client_id"]),
@@ -861,7 +863,7 @@ def cancel_appointment(appointment_id: int, body) -> AppointmentActionResult:
                 from activities_data import insert_activity_row
                 from access import get_default_user
 
-                user = get_default_user()
+                user = resolve_staff_actor()
                 follow_at = f"{follow_date} {follow_time}:00" if follow_time else f"{follow_date} 09:00:00"
                 insert_activity_row(
                     conn,

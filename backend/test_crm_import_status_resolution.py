@@ -159,7 +159,7 @@ class StatusResolutionTests(unittest.TestCase):
         )
         with get_connection() as conn:
             plan = plan_crm_import_batch(conn, client_id=self.client_id, batch_id=batch_id)
-            self.assertEqual(PLANNER_VERSION, "crm-import-plan-v7")
+            self.assertEqual(PLANNER_VERSION, "crm-import-plan-v11")
             self.assertTrue(set(BROWN_STATUSES).issubset(set(plan.status_catalog)))
             for label in BROWN_STATUSES:
                 self.assertIn(label, plan.status_catalog)
@@ -255,14 +255,14 @@ class StatusResolutionTests(unittest.TestCase):
             keep_batch = _insert_batch(
                 conn,
                 self.client_id,
-                ["Company", "Status"],
-                [{"Company": "Conflict Co", "Status": "Contacted"}],
+                ["Company", "Record No.", "Status"],
+                [{"Company": "Conflict Co", "Record No.": "NS-CONF", "Status": "Contacted"}],
             )
             replace_batch = _insert_batch(
                 conn,
                 self.client_id,
-                ["Company", "Status"],
-                [{"Company": "Conflict Co", "Status": "Contacted"}],
+                ["Company", "Record No.", "Status"],
+                [{"Company": "Conflict Co", "Record No.": "NS-CONF", "Status": "Contacted"}],
             )
 
         for batch_id in (keep_batch, replace_batch):
@@ -270,7 +270,11 @@ class StatusResolutionTests(unittest.TestCase):
                 self.client_id,
                 batch_id,
                 actor=_actor(),
-                mapping={"company_name": "Company", "relationship_status": "Status"},
+                mapping={
+                    "company_name": "Company",
+                    "external_record_no": "Record No.",
+                    "relationship_status": "Status",
+                },
             )
 
         with get_connection() as conn:
@@ -473,14 +477,18 @@ class StatusResolutionTests(unittest.TestCase):
             batch_id = _insert_batch(
                 conn,
                 self.client_id,
-                ["Company", "Status"],
-                [{"Company": "Rollback Co", "Status": "Contacted"}],
+                ["Company", "Record No.", "Status"],
+                [{"Company": "Rollback Co", "Record No.": "NS-ROLL", "Status": "Contacted"}],
             )
         save_crm_import_mapping(
             self.client_id,
             batch_id,
             actor=_actor(),
-            mapping={"company_name": "Company", "relationship_status": "Status"},
+            mapping={
+                "company_name": "Company",
+                "external_record_no": "Record No.",
+                "relationship_status": "Status",
+            },
         )
         with get_connection() as conn:
             plan = plan_crm_import_batch(conn, client_id=self.client_id, batch_id=batch_id)

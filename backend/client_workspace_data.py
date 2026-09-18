@@ -6,12 +6,15 @@ Master company identity is companies.id; client context is required for CRM fiel
 
 from __future__ import annotations
 
+from staff_context import resolve_staff_actor
+
 import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 
 from appointments_data import is_hot_prospect_status
+from contact_phone import format_phone_with_extension
 from db import DB_PATH, get_connection
 from models import (
     ActiveClient,
@@ -32,11 +35,38 @@ def _blank(value: object | None) -> str:
     return str(value).strip()
 
 
+def _operational_archive_sql(conn, *, include_contacts: bool = False) -> str:
+    """Hide archived records in operational lists. No-ops when columns are absent."""
+    from data_steward import sql_active_ccr, sql_active_company, sql_active_contact
+
+    parts = [sql_active_ccr(conn), sql_active_company(conn)]
+    if include_contacts:
+        parts.append(sql_active_contact(conn))
+    return " AND " + " AND ".join(parts)
+
+
 def _row_opt(row, key: str) -> str:
     try:
         return _blank(row[key])
     except (KeyError, IndexError):
         return ""
+
+
+def _phone_display(row, field: str, ext_field: str) -> str:
+    return format_phone_with_extension(_row_opt(row, field), _row_opt(row, ext_field))
+
+
+def _row_phone_or_legacy(row) -> str:
+    contact = format_phone_with_extension(
+        _row_opt(row, "contact_phone"),
+        _row_opt(row, "contact_phone_extension"),
+    )
+    if contact:
+        return contact
+    return format_phone_with_extension(
+        _row_opt(row, "legacy_phone"),
+        _row_opt(row, "legacy_phone_extension"),
+    )
 
 
 def _contact_display_name(first: str, last: str) -> str:
@@ -192,10 +222,8 @@ def get_client_summary(client_id: int) -> ActiveClient | None:
 def get_all_my_clients_summary(user_id: int | None = None) -> ActiveClient:
     from access import get_default_user, list_clients_for_user, resolve_dashboard_client_ids
 
-    user = get_default_user() if user_id is None else None
-    uid = user_id
-    if uid is None and user is not None:
-        uid = user.id
+    user = resolve_staff_actor(user_id)
+    uid = int(user.id) if user is not None else None
     if uid is None:
         return ActiveClient(
             id="all",
@@ -264,12 +292,36 @@ def get_active_client(
     all_clients: bool = False,
 ) -> ActiveClient:
     """Active Client summary. Defaults to Carmeco when no selection provided."""
+    from access import resolve_dashboard_client_ids
+
+    actor = resolve_staff_actor()
     if all_clients or (client_id is not None and int(client_id) == 0):
         return get_all_my_clients_summary()
     if client_id is not None:
+        if actor is not None:
+            resolve_dashboard_client_ids(int(actor.id), selected_client_id=int(client_id))
         summary = get_client_summary(int(client_id))
         if summary is not None:
             return summary
+    if actor is not None and not actor.is_administrator:
+        assigned = resolve_dashboard_client_ids(int(actor.id), selected_client_id=None)
+        if len(assigned) == 1:
+            summary = get_client_summary(assigned[0])
+            if summary is not None:
+                return summary
+        if assigned:
+            return get_all_my_clients_summary()
+        return ActiveClient(
+            id="",
+            client_id=0,
+            code="",
+            name="",
+            seed_file="",
+            prospect_count=0,
+            company_count=0,
+            contact_count=0,
+            mode="all_my_clients",
+        )
     # Default: Carmeco if present, else first client
     if not db_exists():
         return ActiveClient(
@@ -463,6 +515,7 @@ def list_prospects(
     user_id: int | None = None,
     q: str | None = None,
     status: str | None = None,
+    milestone_type: str | None = None,
     limit: int | None = None,
     offset: int = 0,
 ) -> list[ProspectListItem]:
@@ -473,9 +526,27 @@ def list_prospects(
         user_id=user_id,
         q=q,
         status=status,
+        milestone_type=milestone_type,
         limit=limit,
         offset=offset,
     )["prospects"]
+
+
+PROSPECT_MILESTONE_TYPES = frozenset(
+    {"Quote", "Purchase Order", "WebLead", "Appointment Set"}
+)
+
+
+def _normalize_prospect_milestone_type(value: str | None) -> str:
+    key = _blank(value)
+    if not key:
+        return ""
+    if key not in PROSPECT_MILESTONE_TYPES:
+        raise ValueError(
+            f"Unsupported milestone_type '{value}'. "
+            f"Allowed: {', '.join(sorted(PROSPECT_MILESTONE_TYPES))}."
+        )
+    return key
 
 
 def list_prospects_page(
@@ -485,6 +556,7 @@ def list_prospects_page(
     user_id: int | None = None,
     q: str | None = None,
     status: str | None = None,
+    milestone_type: str | None = None,
     limit: int | None = None,
     offset: int = 0,
 ) -> dict:
@@ -503,10 +575,12 @@ def list_prospects_page(
 
     from access import get_default_user, resolve_dashboard_client_ids
 
-    user = get_default_user() if user_id is None else None
-    uid = user_id if user_id is not None else (user.id if user else None)
+    user = resolve_staff_actor(user_id)
+    uid = int(user.id) if user is not None else None
     if uid is None:
         return empty
+
+    milestone_wanted = _normalize_prospect_milestone_type(milestone_type)
 
     all_clients_mode = bool(all_clients or client_id == 0)
     if all_clients_mode:
@@ -516,15 +590,18 @@ def list_prospects_page(
             uid, selected_client_id=int(client_id)
         )
     else:
-        with get_connection() as conn:
-            row = conn.execute(
-                "SELECT id FROM clients WHERE code = 'carmeco'"
-            ).fetchone()
-            if row is None:
-                return empty
-            client_ids = resolve_dashboard_client_ids(
-                uid, selected_client_id=int(row["id"])
-            )
+        if user is not None and not user.is_administrator:
+            client_ids = resolve_dashboard_client_ids(uid, selected_client_id=None)
+        else:
+            with get_connection() as conn:
+                row = conn.execute(
+                    "SELECT id FROM clients WHERE code = 'carmeco'"
+                ).fetchone()
+                if row is None:
+                    return empty
+                client_ids = resolve_dashboard_client_ids(
+                    uid, selected_client_id=int(row["id"])
+                )
 
     if not client_ids:
         return empty
@@ -536,6 +613,7 @@ def list_prospects_page(
             client_ids=client_ids,
             q=q,
             status=status,
+            milestone_type=milestone_wanted or None,
             limit=page_size,
             offset=page_offset,
         )
@@ -588,13 +666,30 @@ def list_prospects_page(
         )
         status_params.append(status_wanted)
 
+    milestone_sql = ""
+    milestone_params: list[object] = []
+    if milestone_wanted:
+        milestone_sql = """
+            AND EXISTS (
+                SELECT 1 FROM revenue_milestones rm
+                WHERE rm.client_id = ccr.client_id
+                  AND rm.company_id = ccr.company_id
+                  AND rm.milestone_type = ?
+            )
+        """
+        milestone_params.append(milestone_wanted)
+
+    with get_connection() as _arch_conn:
+        archive_sql = _operational_archive_sql(_arch_conn)
     from_sql = f"""
         FROM client_company_relationships ccr
         JOIN clients cl ON cl.id = ccr.client_id
         JOIN companies co ON co.id = ccr.company_id
         WHERE ccr.client_id IN ({placeholders})
+        {archive_sql}
         {search_sql}
         {status_sql}
+        {milestone_sql}
     """
     select_sql = f"""
         SELECT
@@ -610,6 +705,7 @@ def list_prospects_page(
             co.customer_campaign,
             co.last_updated_at,
             co.legacy_phone,
+            co.legacy_phone_extension,
             co.legacy_first_name,
             co.legacy_last_name,
             COALESCE(ccr.status, '') AS status,
@@ -641,7 +737,13 @@ def list_prospects_page(
                 WHERE ct.company_id = co.id
                 ORDER BY ct.source_row_index ASC, ct.id ASC
                 LIMIT 1
-            ) AS contact_phone
+            ) AS contact_phone,
+            (
+                SELECT ct.phone_extension FROM contacts ct
+                WHERE ct.company_id = co.id
+                ORDER BY ct.source_row_index ASC, ct.id ASC
+                LIMIT 1
+            ) AS contact_phone_extension
         {from_sql}
         ORDER BY
             cl.name COLLATE NOCASE ASC,
@@ -659,12 +761,14 @@ def list_prospects_page(
                 f"""
                 SELECT COUNT(*) AS n
                 FROM client_company_relationships ccr
+                JOIN companies co ON co.id = ccr.company_id
                 WHERE ccr.client_id IN ({placeholders})
+                {_operational_archive_sql(conn)}
                 """,
                 client_ids,
             ).fetchone()["n"]
         )
-        match_params = [*client_ids, *search_params, *status_params]
+        match_params = [*client_ids, *search_params, *status_params, *milestone_params]
         total = int(
             conn.execute(
                 f"SELECT COUNT(*) AS n {from_sql}",
@@ -693,7 +797,7 @@ def list_prospects_page(
                 primary = _contact_display_name(
                     _blank(row["legacy_first_name"]), _blank(row["legacy_last_name"])
                 )
-            phone = _blank(row["contact_phone"]) or _blank(row["legacy_phone"])
+            phone = _row_phone_or_legacy(row)
             company_id = int(row["id"])
             cid = int(row["client_id"])
             flags = flags_by_client.get(cid, {}).get(company_id, {})
@@ -745,6 +849,7 @@ def _list_prospects_page_all_clients(
     client_ids: list[int],
     q: str | None = None,
     status: str | None = None,
+    milestone_type: str | None = None,
     limit: int = PROSPECTS_DEFAULT_LIMIT,
     offset: int = 0,
 ) -> dict:
@@ -817,15 +922,38 @@ def _list_prospects_page_all_clients(
         status_params.extend(list(client_ids))
         status_params.append(status_wanted)
 
+    milestone_wanted = _blank(milestone_type)
+    milestone_sql = ""
+    milestone_params: list[object] = []
+    if milestone_wanted:
+        milestone_sql = f"""
+            AND EXISTS (
+                SELECT 1 FROM revenue_milestones rm
+                WHERE rm.company_id = co.id
+                  AND rm.client_id IN ({placeholders})
+                  AND rm.milestone_type = ?
+            )
+        """
+        milestone_params.extend(list(client_ids))
+        milestone_params.append(milestone_wanted)
+
+    with get_connection() as _arch_conn:
+        from data_steward import sql_active_ccr, sql_active_company
+
+        ccr_active = sql_active_ccr(_arch_conn)
+        co_active = sql_active_company(_arch_conn)
     from_sql = f"""
         FROM companies co
         WHERE EXISTS (
             SELECT 1 FROM client_company_relationships ccr
             WHERE ccr.company_id = co.id
               AND ccr.client_id IN ({placeholders})
+              AND {ccr_active}
         )
+        AND {co_active}
         {search_sql}
         {status_sql}
+        {milestone_sql}
     """
     select_sql = f"""
         SELECT
@@ -840,6 +968,7 @@ def _list_prospects_page_all_clients(
             co.customer_campaign,
             co.last_updated_at,
             co.legacy_phone,
+            co.legacy_phone_extension,
             co.legacy_first_name,
             co.legacy_last_name,
             (
@@ -863,7 +992,13 @@ def _list_prospects_page_all_clients(
                 WHERE ct.company_id = co.id
                 ORDER BY ct.source_row_index ASC, ct.id ASC
                 LIMIT 1
-            ) AS contact_phone
+            ) AS contact_phone,
+            (
+                SELECT ct.phone_extension FROM contacts ct
+                WHERE ct.company_id = co.id
+                ORDER BY ct.source_row_index ASC, ct.id ASC
+                LIMIT 1
+            ) AS contact_phone_extension
         {from_sql}
         ORDER BY co.company_name COLLATE NOCASE ASC, co.id ASC
     """
@@ -873,7 +1008,7 @@ def _list_prospects_page_all_clients(
         from milestones_data import companies_with_milestone_flags
         from work_queue_data import due_record_nos
 
-        match_params = [*client_ids, *search_params, *status_params]
+        match_params = [*client_ids, *search_params, *status_params, *milestone_params]
         client_total = int(
             conn.execute(
                 f"""
@@ -968,7 +1103,7 @@ def _list_prospects_page_all_clients(
                 primary = _contact_display_name(
                     _blank(row["legacy_first_name"]), _blank(row["legacy_last_name"])
                 )
-            phone = _blank(row["contact_phone"]) or _blank(row["legacy_phone"])
+            phone = _row_phone_or_legacy(row)
             record_no = record_no_by_company.get(company_id, "") or _blank(
                 row["master_external_record_no"]
             )
@@ -1045,8 +1180,8 @@ def _workspace_from_relationship(conn, row) -> CompanyWorkspace:
             first_name=_blank(c["first_name"]),
             last_name=_blank(c["last_name"]),
             title=_blank(c["title"]),
-            phone=_blank(c["phone"]),
-            alt_phone=_blank(c["alt_phone"]),
+            phone=_phone_display(c, "phone", "phone_extension"),
+            alt_phone=_phone_display(c, "alt_phone", "alt_phone_extension"),
             email=_blank(c["email"]),
             external_record_no=_blank(c["external_record_no"]),
         )
@@ -1189,7 +1324,7 @@ def _workspace_from_relationship(conn, row) -> CompanyWorkspace:
         status=status,
         relationship_status=status,
         is_hot=is_hot_prospect_status(status),
-        legacy_phone=_blank(row["legacy_phone"]),
+        legacy_phone=_phone_display(row, "legacy_phone", "legacy_phone_extension"),
         legacy_email=_blank(row["legacy_email"]),
         contacts=contacts,
         legacy_notes=notes,
@@ -1249,6 +1384,16 @@ def get_company_workspace(
         return _workspace_from_relationship(conn, row)
 
 
+def _require_visible_client_id(client_id: int) -> None:
+    from access import user_can_access_client
+
+    actor = resolve_staff_actor()
+    if actor is None:
+        return
+    if not user_can_access_client(int(actor.id), int(client_id)) and not actor.is_administrator:
+        raise PermissionError("Not authorized for this client.")
+
+
 def get_company_by_record_no(
     record_no: str,
     *,
@@ -1265,6 +1410,7 @@ def get_company_by_record_no(
             client=client,
         )
         if row is not None:
+            _require_visible_client_id(int(row["client_id"]))
             return _workspace_from_relationship(conn, row)
 
         # Soft open for cross-client prospecting: Working For = requested client
@@ -1272,6 +1418,7 @@ def get_company_by_record_no(
         client_row = resolve_client_row(conn, client_id=client_id, client=client)
         if client_row is None:
             return None
+        _require_visible_client_id(int(client_row["id"]))
 
         key = record_no.strip()
         company = conn.execute(
@@ -1312,8 +1459,8 @@ def _provisional_workspace_for_client(conn, company, client_row) -> CompanyWorks
             first_name=_blank(c["first_name"]),
             last_name=_blank(c["last_name"]),
             title=_blank(c["title"]),
-            phone=_blank(c["phone"]),
-            alt_phone=_blank(c["alt_phone"]),
+            phone=_phone_display(c, "phone", "phone_extension"),
+            alt_phone=_phone_display(c, "alt_phone", "alt_phone_extension"),
             email=_blank(c["email"]),
             external_record_no=_blank(c["external_record_no"]),
         )
@@ -1362,7 +1509,7 @@ def _provisional_workspace_for_client(conn, company, client_row) -> CompanyWorks
         status="New",
         relationship_status="New",
         is_hot=False,
-        legacy_phone=_blank(company["legacy_phone"]),
+        legacy_phone=_phone_display(company, "legacy_phone", "legacy_phone_extension"),
         legacy_email=_blank(company["legacy_email"]),
         contacts=contacts,
         legacy_notes=[],
@@ -1400,8 +1547,8 @@ def list_relationship_statuses(
             # Do NOT silently fall back to Carmeco-only statuses.
             from access import get_default_user, resolve_dashboard_client_ids
 
-            user = get_default_user() if user_id is None else None
-            uid = user_id if user_id is not None else (user.id if user else None)
+            user = resolve_staff_actor(user_id)
+            uid = int(user.id) if user is not None else None
             if uid is None:
                 return []
             client_ids = resolve_dashboard_client_ids(uid, selected_client_id=None)
@@ -1498,6 +1645,11 @@ def update_relationship_status(
     if not new_status:
         raise ValueError("Status is required.")
     del client
+    actor = resolve_staff_actor()
+    if actor is not None:
+        user = actor.full_name
+    else:
+        raise PermissionError("Authentication required.")
 
     with get_connection() as conn:
         cid = require_write_client_id(client_id, conn=conn)
@@ -1544,6 +1696,26 @@ def update_relationship_status(
                 int(rel["relationship_id"]),
             ),
         )
+        from data_steward import (
+            ENTITY_CLIENT_RELATIONSHIP,
+            record_changed_fields,
+            source_ref_manual,
+        )
+
+        new_hot = 1 if is_hot_prospect_status(new_status) else 0
+        record_changed_fields(
+            conn,
+            entity_type=ENTITY_CLIENT_RELATIONSHIP,
+            entity_id=int(rel["relationship_id"]),
+            changes=[
+                ("status", old_status, new_status),
+                ("is_hot", rel["is_hot"] if "is_hot" in rel.keys() else 0, new_hot),
+            ],
+            actor=actor,
+            source_ref=source_ref_manual(),
+            action="AMEND",
+            client_id=cid,
+        )
         changed_at = _write_audit(
             conn,
             client_code=client_code or "unknown",
@@ -1581,14 +1753,32 @@ def update_relationship_notes(
     client_id: int | None = None,
     client: str = "",
     user: str = "Julie Magnani",
+    mode: str = "append",
 ) -> dict:
     from access import require_write_client_id
+    from data_steward import (
+        ENTITY_CLIENT_RELATIONSHIP,
+        StewardError,
+        _amend_transaction,
+        record_provenance,
+        source_ref_manual,
+    )
 
     key = record_no.strip()
-    new_text = note_text if note_text is not None else ""
+    incoming = _blank(note_text)
+    write_mode = _blank(mode).lower() or "append"
+    if write_mode not in {"append", "supersede"}:
+        raise ValueError("Notes mode must be append or supersede.")
     if not key:
         raise ValueError("Record No. is required.")
+    if not incoming:
+        raise ValueError("Note text is required.")
     del client
+    actor = resolve_staff_actor()
+    if actor is not None:
+        user = actor.full_name
+    else:
+        raise PermissionError("Authentication required.")
 
     with get_connection() as conn:
         cid = require_write_client_id(client_id, conn=conn)
@@ -1605,6 +1795,7 @@ def update_relationship_notes(
         rel_rn = _blank(rel["relationship_record_no"])
         client_code = _blank(rel["client_code"])
         client_name = _blank(rel["client_name"])
+        ccr_id = int(rel["relationship_id"])
 
         notes = list(
             conn.execute(
@@ -1617,28 +1808,70 @@ def update_relationship_notes(
             )
         )
         old_text = "\n\n".join(_blank(n["note_text"]) for n in notes) if notes else ""
+        ccr_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(client_company_relationships)")}
+        ccr_notes = ""
+        if "notes" in ccr_cols:
+            ccr_row = conn.execute(
+                "SELECT notes FROM client_company_relationships WHERE id = ?",
+                (ccr_id,),
+            ).fetchone()
+            ccr_notes = _blank(ccr_row["notes"] if ccr_row else "")
 
-        conn.execute(
-            "DELETE FROM legacy_notes WHERE client_id = ? AND company_id = ?",
-            (cid, company_id),
+        import hashlib
+
+        note_hash = hashlib.sha256(incoming.encode("utf-8")).hexdigest()[:16]
+        source_field = (
+            "Sales Rep Comments/Notes"
+            if write_mode == "append"
+            else "Sales Rep Comments/Notes (supersede)"
         )
-        if new_text != "":
-            conn.execute(
-                """
-                INSERT INTO legacy_notes (
-                    client_id, company_id, note_text, source_field
-                ) VALUES (?, ?, ?, ?)
-                """,
-                (cid, company_id, new_text, "Sales Rep Comments/Notes"),
-            )
+        try:
+            with _amend_transaction(conn):
+                conn.execute(
+                    """
+                    INSERT INTO legacy_notes (
+                        client_id, company_id, note_text, source_field
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (cid, company_id, incoming, source_field),
+                )
+                if "notes" in ccr_cols:
+                    merged = (
+                        incoming
+                        if write_mode == "supersede" and not ccr_notes
+                        else (f"{ccr_notes}\n{incoming}".strip() if ccr_notes else incoming)
+                    )
+                    if write_mode == "supersede":
+                        # Keep history rows; CCR blob records the correction as an append
+                        # unless there was no prior blob.
+                        merged = f"{ccr_notes}\n[supersede] {incoming}".strip() if ccr_notes else incoming
+                    conn.execute(
+                        "UPDATE client_company_relationships SET notes = ?, updated_at = ? WHERE id = ?",
+                        (merged, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), ccr_id),
+                    )
+                record_provenance(
+                    conn,
+                    entity_type=ENTITY_CLIENT_RELATIONSHIP,
+                    entity_id=ccr_id,
+                    field="notes",
+                    old_value="",
+                    new_value=incoming,
+                    action="NOTE" if write_mode == "append" else "NOTE_SUPERSEDE",
+                    reason=f"note_hash:{note_hash}",
+                    source_ref=source_ref_manual(),
+                    client_id=cid,
+                    actor=actor,
+                )
+        except StewardError as exc:
+            raise ValueError(str(exc)) from exc
 
         changed_at = _write_audit(
             conn,
             client_code=client_code or "unknown",
             record_no=rel_rn,
             field_name="sales_rep_notes",
-            old_value=old_text,
-            new_value=new_text,
+            old_value="",
+            new_value=incoming,
             changed_by=user,
         )
         conn.commit()
@@ -1653,14 +1886,13 @@ def update_relationship_notes(
         "client_id": cid,
         "field_name": "sales_rep_notes",
         "old_value": old_text,
-        "new_value": new_text,
+        "new_value": incoming,
         "changed_by": user.strip() or "Julie Magnani",
         "changed_at": changed_at,
         "workspace": workspace,
     }
 
 
-# Backward-compatible aliases used by older call sites
 def list_carmeco_statuses() -> list[str]:
     return list_relationship_statuses(client="Carmeco")
 
@@ -1696,6 +1928,7 @@ def update_carmeco_notes(
         client="",
         client_id=client_id,
         user=user,
+        mode="append",
     )
 
 def _contacts_client_ids(
@@ -1706,8 +1939,8 @@ def _contacts_client_ids(
 ) -> list[int]:
     from access import get_default_user, resolve_dashboard_client_ids
 
-    user = get_default_user() if user_id is None else None
-    uid = user_id if user_id is not None else (user.id if user else None)
+    user = resolve_staff_actor(user_id)
+    uid = int(user.id) if user is not None else None
     if uid is None:
         return []
 
@@ -1715,6 +1948,8 @@ def _contacts_client_ids(
         return resolve_dashboard_client_ids(uid, selected_client_id=None)
     if client_id is not None:
         return resolve_dashboard_client_ids(uid, selected_client_id=int(client_id))
+    if user is not None and not user.is_administrator:
+        return resolve_dashboard_client_ids(uid, selected_client_id=None)
     with get_connection() as conn:
         row = conn.execute(
             "SELECT id FROM clients WHERE code = 'carmeco'"
@@ -1842,6 +2077,7 @@ def list_contacts(
 
     contacts: list[ContactListItem] = []
     with get_connection() as conn:
+        where_sql += _operational_archive_sql(conn, include_contacts=True)
         client_total = int(
             conn.execute(
                 f"SELECT COUNT(*) AS n {join_sql} {where_sql}",
@@ -1864,7 +2100,9 @@ def list_contacts(
                 TRIM(ct.first_name || ' ' || ct.last_name) AS full_name,
                 ct.title,
                 ct.phone,
+                ct.phone_extension,
                 ct.alt_phone,
+                ct.alt_phone_extension,
                 ct.email,
                 ct.company_id,
                 co.company_name,
@@ -1900,8 +2138,8 @@ def list_contacts(
                     last_name=last,
                     full_name=_blank(row["full_name"]) or f"{first} {last}".strip(),
                     title=_blank(row["title"]),
-                    phone=_blank(row["phone"]),
-                    alt_phone=_blank(row["alt_phone"]),
+                    phone=_phone_display(row, "phone", "phone_extension"),
+                    alt_phone=_phone_display(row, "alt_phone", "alt_phone_extension"),
                     email=_blank(row["email"]),
                     company_id=int(row["company_id"]) if row["company_id"] else None,
                     company_name=_blank(row["company_name"]),
@@ -2154,8 +2392,8 @@ def get_contact_workspace(
                     first_name=_blank(row["first_name"]),
                     last_name=_blank(row["last_name"]),
                     title=_blank(row["title"]),
-                    phone=_blank(row["phone"]),
-                    alt_phone=_blank(row["alt_phone"]),
+                    phone=_phone_display(row, "phone", "phone_extension"),
+                    alt_phone=_phone_display(row, "alt_phone", "alt_phone_extension"),
                     email=_blank(row["email"]),
                     company_id=company_id,
                     company_name=_blank(row["company_name"]),
@@ -2302,8 +2540,8 @@ def get_contact_workspace(
         first_name=_blank(row["first_name"]),
         last_name=_blank(row["last_name"]),
         title=_blank(row["title"]),
-        phone=_blank(row["phone"]),
-        alt_phone=_blank(row["alt_phone"]),
+        phone=_phone_display(row, "phone", "phone_extension"),
+        alt_phone=_phone_display(row, "alt_phone", "alt_phone_extension"),
         email=_blank(row["email"]),
         company_id=company_id,
         company_name=_blank(row["company_name"]),
@@ -2351,7 +2589,7 @@ def update_contact_workflow(contact_id: int, body) -> dict:
     if not isinstance(body, ContactWorkflowUpdate):
         body = ContactWorkflowUpdate.model_validate(body)
     client_id = require_write_client_id(body.client_id)
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
     if not user_can_access_client(user.id, client_id) and not user.is_administrator:
@@ -2413,6 +2651,7 @@ def update_contact_workflow(contact_id: int, body) -> dict:
                     int(rel["assigned_user_id"]) if rel["assigned_user_id"] is not None else None
                 )
 
+            old_status = _blank(rel["status"])
             if new_status:
                 allowed = {
                     _blank(r["status"])
@@ -2477,6 +2716,32 @@ def update_contact_workflow(contact_id: int, body) -> dict:
                     relationship_id,
                     client_id,
                 ),
+            )
+            from data_steward import (
+                ENTITY_CLIENT_RELATIONSHIP,
+                record_changed_fields,
+                source_ref_manual,
+            )
+
+            record_changed_fields(
+                conn,
+                entity_type=ENTITY_CLIENT_RELATIONSHIP,
+                entity_id=int(relationship_id),
+                changes=[
+                    ("status", old_status, new_status),
+                    ("assigned_user_id", rel["assigned_user_id"] or "", new_assignee or ""),
+                    ("next_action", _blank(rel["next_action"]), new_next),
+                    ("follow_up_date", _blank(rel["follow_up_date"]), follow_stored),
+                    (
+                        "is_hot",
+                        rel["is_hot"] if "is_hot" in rel.keys() else 0,
+                        1 if is_hot_prospect_status(new_status) else 0,
+                    ),
+                ],
+                actor=user,
+                source_ref=source_ref_manual(),
+                action="AMEND",
+                client_id=client_id,
             )
             if new_status and new_status != old_status:
                 from activities_data import insert_activity_row
@@ -2984,7 +3249,7 @@ def create_contact_activity(contact_id: int, body) -> dict:
             f"Unsupported activity_type '{body.activity_type}'. "
             f"Allowed: {', '.join(sorted(ACTIVITY_TYPES))}."
         )
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
     if not user_can_access_client(user.id, client_id) and not user.is_administrator:
@@ -3364,7 +3629,7 @@ def complete_contact_follow_up(contact_id: int, body) -> dict:
     if not isinstance(body, ContactFollowUpCompleteRequest):
         body = ContactFollowUpCompleteRequest.model_validate(body)
     client_id = require_write_client_id(body.client_id)
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
     if not user_can_access_client(user.id, client_id) and not user.is_administrator:
@@ -3514,7 +3779,7 @@ def reschedule_contact_follow_up(contact_id: int, body) -> dict:
     follow_time = _blank(body.follow_up_time)[:5]
     if not follow_date or not follow_time:
         raise ValueError("Follow-up date and time are required to reschedule.")
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
     if not user_can_access_client(user.id, client_id) and not user.is_administrator:
@@ -3735,7 +4000,7 @@ def assign_shared_contact(contact_id: int, body) -> dict:
     if not isinstance(body, ContactAssignRequest):
         body = ContactAssignRequest.model_validate(body)
     client_id = require_write_client_id(body.client_id)
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
     if not user_can_access_client(user.id, client_id) and not user.is_administrator:

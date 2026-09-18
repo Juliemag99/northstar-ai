@@ -100,6 +100,20 @@ class NormalizeUsStateHelperTests(unittest.TestCase):
         self.assertEqual(state_for_match("ia"), "IA")
         self.assertEqual(state_for_match("Narnia"), "NARNIA")
 
+    def test_canadian_provinces_and_codes(self):
+        from crm_import_state import all_canadian_province_name_mappings
+
+        mappings = all_canadian_province_name_mappings()
+        self.assertEqual(len(mappings), 13)
+        for name, code in mappings:
+            self.assertEqual(normalize_us_state(name), code, name)
+            self.assertEqual(normalize_us_state(name.lower()), code, name)
+            self.assertEqual(normalize_us_state(code), code, code)
+            self.assertEqual(normalize_us_state(code.lower()), code, code)
+        self.assertEqual(normalize_us_state("ON"), "ON")
+        self.assertEqual(normalize_us_state("Ontario"), "ON")
+        self.assertEqual(state_for_match("Ontario"), "ON")
+
 
 class StatePlanConfirmTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -175,7 +189,7 @@ class StatePlanConfirmTests(unittest.TestCase):
         )
         with get_connection() as conn:
             plan = plan_crm_import_batch(conn, client_id=self.client_id, batch_id=batch_id)
-            self.assertEqual(PLANNER_VERSION, "crm-import-plan-v7")
+            self.assertEqual(PLANNER_VERSION, "crm-import-plan-v11")
             self.assertEqual(plan.counts["needs_review_rows"], 0)
             by_name = {r.company_name: r for r in plan.rows}
             self.assertEqual(by_name["Spell Co ST"].company_action, "use_existing_company")
@@ -230,6 +244,28 @@ class StatePlanConfirmTests(unittest.TestCase):
                 "SELECT state FROM companies WHERE company_name = 'Brand New ST Co'"
             ).fetchone()
             self.assertEqual(stored["state"], "MN")
+
+    def test_canadian_province_ontario_is_importable(self):
+        with get_connection() as conn:
+            batch_id = _insert_batch(
+                conn,
+                self.client_id,
+                ["Company", "State", "City"],
+                [{"Company": "Viking Cives Test", "State": "ON", "City": "Mount Forest"}],
+            )
+        save_crm_import_mapping(
+            self.client_id,
+            batch_id,
+            actor=_actor(),
+            mapping={"company_name": "Company", "state": "State", "city": "City"},
+        )
+        with get_connection() as conn:
+            plan = plan_crm_import_batch(conn, client_id=self.client_id, batch_id=batch_id)
+            self.assertEqual(plan.rows[0].validity, "ok")
+            self.assertEqual(plan.rows[0].mapped.get("state"), "ON")
+            self.assertEqual(plan.rows[0].company_action, "create_company")
+            self.assertEqual(plan.counts["needs_review_rows"], 0)
+            self.assertEqual(plan.counts["importable_rows"], 1)
 
     def test_unknown_state_needs_review_blocks_confirm_and_changes_fingerprint(self):
         with get_connection() as conn:

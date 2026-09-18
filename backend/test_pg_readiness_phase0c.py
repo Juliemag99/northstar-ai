@@ -338,7 +338,31 @@ class TestMigrationFoundation(unittest.TestCase):
             order.index("companies"),
             order.index("client_company_relationships"),
         )
-        self.assertIn("company_identity_keys", MIGRATION_TABLE_ORDER)
+        self.assertIn("company_locations", MIGRATION_TABLE_ORDER)
+        self.assertIn("company_source_identities", MIGRATION_TABLE_ORDER)
+        self.assertIn("company_merge_history", MIGRATION_TABLE_ORDER)
+        self.assertIn("contact_merge_history", MIGRATION_TABLE_ORDER)
+        self.assertIn("merge_execution_approvals", MIGRATION_TABLE_ORDER)
+        self.assertLess(
+            order.index("companies"),
+            order.index("company_locations"),
+        )
+        self.assertLess(
+            order.index("company_locations"),
+            order.index("contacts"),
+        )
+        self.assertLess(
+            order.index("companies"),
+            order.index("company_merge_history"),
+        )
+        self.assertLess(
+            order.index("contacts"),
+            order.index("contact_merge_history"),
+        )
+        self.assertLess(
+            order.index("company_locations"),
+            order.index("company_source_identities"),
+        )
 
     def test_refuses_production_path(self) -> None:
         with self.assertRaises(RuntimeError):

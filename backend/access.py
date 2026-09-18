@@ -182,10 +182,17 @@ def require_write_client_id(
 
     uid = user_id
     if uid is None:
-        user = get_default_user()
-        uid = int(user.id) if user is not None else None
+        from staff_context import resolve_staff_actor
+
+        actor = resolve_staff_actor()
+        uid = int(actor.id) if actor is not None else None
     if uid is not None and not user_can_access_client(uid, cid):
         raise PermissionError("Not authorized for this client.")
+    if uid is not None:
+        from staff_rbac import user_has_permission
+
+        if not user_has_permission(int(uid), "crm.edit", client_id=cid):
+            raise PermissionError("Not authorized for this client.")
     return cid
 
 
@@ -235,7 +242,7 @@ def resolve_visibility_client_ids(
     if user is None or not user.active:
         raise PermissionError("User not found or inactive.")
 
-    if purpose in {"search", "shared_history"} and user_is_internal_northstar(user):
+    if purpose in {"search", "shared_history"} and user.is_administrator:
         if not _db_exists():
             return []
         with get_connection() as conn:

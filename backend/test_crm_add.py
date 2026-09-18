@@ -135,7 +135,7 @@ def main() -> int:
             contacts=[],
         )
     )
-    assert prev_name.company_match_type in {"existing_company", "possible_match"}
+    assert prev_name.company_match_type == "possible_match", prev_name
     assert prev_name.matched_company_id == int(existing["id"]) or any(
         p.get("company_id") == int(existing["id"])
         for p in prev_name.possible_company_matches

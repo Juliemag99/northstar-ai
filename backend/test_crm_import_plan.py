@@ -653,7 +653,12 @@ def test_planning_classifications() -> None:
         other = session.track_company(_insert_company(f"C2 Other {marker}"))
         twin_a = session.track_company(_insert_company(f"C2 Twin {marker}", city="Austin", state="TX"))
         twin_b = session.track_company(_insert_company(f"C2 Twin {marker}", city="Houston", state="TX"))
-        related = session.track_company(_insert_company(f"C2 Related {marker}"))
+        related = session.track_company(
+            _insert_company(
+                f"C2 Related {marker}",
+                website="https://related-{0}.example.test".format(marker),
+            )
+        )
         _insert_ccr(session.assigned_id, related)
         contact_email = _insert_contact(
             existing, first="Ada", last="Lovelace", email=f"ada.{marker}@exist.test"
@@ -673,11 +678,66 @@ def test_planning_classifications() -> None:
             [
                 [f"C2 Block {marker}", "", "", "", "", "", "", "", "", ""],
                 ["", "", "", "", "", "", "blank.row@example.test", "", "", ""],
-                [f"C2 Exist {marker}", "", "", "", "", "", f"ada.{marker}@exist.test", "", "", ""],
-                [f"C2 Exist {marker}", "", "", "", "", "", "", "", "", "2145550199"],
-                [f"C2 Exist {marker}", "", "", "", "", "", "", "Alan", "Turing", ""],
-                [f"C2 Exist {marker}", "", "", "", "", "", "", "Alan", "Turing", ""],
-                [f"C2 Exist {marker}", "", "", "", "", "", "", "Last", "Seven", "5550199"],
+                [
+                    f"C2 Exist {marker}",
+                    f"https://exist-{marker}.example.test",
+                    "",
+                    "",
+                    "",
+                    "",
+                    f"ada.{marker}@exist.test",
+                    "",
+                    "",
+                    "",
+                ],
+                [
+                    f"C2 Exist {marker}",
+                    f"https://exist-{marker}.example.test",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "2145550199",
+                ],
+                [
+                    f"C2 Exist {marker}",
+                    f"https://exist-{marker}.example.test",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "Alan",
+                    "Turing",
+                    "",
+                ],
+                [
+                    f"C2 Exist {marker}",
+                    f"https://exist-{marker}.example.test",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "Alan",
+                    "Turing",
+                    "",
+                ],
+                [
+                    f"C2 Exist {marker}",
+                    f"https://exist-{marker}.example.test",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "Last",
+                    "Seven",
+                    "5550199",
+                ],
                 [f"C2 New {marker}", "", "", "", "", "", "", "", "", ""],
                 [f"C2 New {marker}", "", "", "", "", "", f"same.{marker}@new.test", "Sam", "Same", ""],
                 [f"C2 New {marker}", "", "", "", "", "", f"same.{marker}@new.test", "Other", "Person", ""],
@@ -685,7 +745,18 @@ def test_planning_classifications() -> None:
                 [f"C2 NewPhone {marker}", "", "", "", "", "", "", "Pat", "Phone", "5125550101"],
                 [f"C2 NewPhone {marker}", "", "", "", "", "", "", "Pat", "Clone", "5125550101"],
                 [f"C2 Twin {marker}", "", "", "", "", "", "", "", "", ""],
-                [f"C2 Related {marker}", "", "", "", "", "", "", "", "", ""],
+                [
+                    f"C2 Related {marker}",
+                    f"https://related-{marker}.example.test",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                ],
                 [f"C2 Unique {marker}", "https://unique-{0}.example.test".format(marker), "", "", "", "", "", "", "", ""],
                 [long_cell, "", "", "", "", "", "", "", "", ""],
             ],
@@ -1100,9 +1171,9 @@ def test_insufficient_contact_and_begin_immediate() -> None:
         seen = {}
         real_plan = plan_crm_import_batch
 
-        def _wrapped_plan(conn, *, client_id, batch_id):
+        def _wrapped_plan(conn, *, client_id, batch_id, **kwargs):
             seen["query_only"] = int(conn.execute("PRAGMA query_only").fetchone()[0])
-            return real_plan(conn, client_id=client_id, batch_id=batch_id)
+            return real_plan(conn, client_id=client_id, batch_id=batch_id, **kwargs)
 
         import crm_import_plan as plan_mod
 

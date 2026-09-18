@@ -43,3 +43,11 @@ database/imports/
 database/client_documents/
 database/backups/
 database/carmeco_prospects.csv
+
+# Phase backup copies (not covered by *.db.backup*)
+*.db.bak*
+
+# Generated working artifacts and live extracts
+working/
+database/shared_note_history_imports/
+Brown_Industries_Import_Review_Exceptions.csv

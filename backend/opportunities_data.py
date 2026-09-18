@@ -6,6 +6,8 @@ in opportunity payloads. Only client name, milestone type, and date are shown.
 
 from __future__ import annotations
 
+from staff_context import resolve_staff_actor
+
 from datetime import datetime, timedelta
 
 from access import (
@@ -291,7 +293,7 @@ def list_cross_client_opportunities(
     for the selected Target Client. One row per master company.
     """
     cfg = score_config or DEFAULT_SCORE_CONFIG
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
 
@@ -670,7 +672,7 @@ def dismiss_opportunity(body: OpportunityDismissRequest) -> OpportunityActionRes
         raise ValueError(
             f"Invalid dismissal reason. Allowed: {', '.join(sorted(DISMISS_REASONS))}."
         )
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
     require_write_client_id(body.target_client_id, user_id=user.id)
@@ -720,7 +722,7 @@ def mark_opportunity_reviewed(body: OpportunityReviewRequest) -> OpportunityActi
     """Mark opportunity Reviewed for TARGET client only (does not create work)."""
     from access import require_write_client_id
 
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
     require_write_client_id(body.target_client_id, user_id=user.id)
@@ -802,7 +804,7 @@ def add_opportunity_to_target(
     Never duplicates the master companies row.
     Creates a Cross-Client Opportunity work item for the TARGET client only.
     """
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
     from access import require_write_client_id

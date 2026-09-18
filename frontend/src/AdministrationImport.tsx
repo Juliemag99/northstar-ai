@@ -4,15 +4,19 @@ import {
   confirmCrmImport,
   CRM_IMPORT_DRY_RUN_MAX_PAGE,
   dryRunCrmImport,
+  fetchCrmImportHistory,
   fetchCrmImportRows,
   isValidCrmImportPlanFingerprint,
   saveCrmImportMapping,
+  saveCrmImportMatchResolution,
+  saveCrmImportSourceType,
   saveCrmImportStatusResolution,
   uploadCrmImport,
   type CrmImportBatch,
   type CrmImportConfirmResponse,
   type CrmImportDryRunResponse,
   type CrmImportDryRunRow,
+  type CrmImportHistoryItem,
   type CrmImportRow,
 } from './api/crmImport'
 import {
@@ -45,11 +49,15 @@ const PAGE_SIZE = 25
 function clientLabel(
   clientId: number,
   availableClients: AssignedClient[],
+  fallbackName = '',
 ): string {
-  return (
+  const name =
     availableClients.find((c) => c.client_id === clientId)?.client_name ||
-    `Client ${clientId}`
-  )
+    fallbackName.trim()
+  if (clientId > 0 && name) return `${name} (Client ${clientId})`
+  if (name) return name
+  if (clientId > 0) return `Client ${clientId}`
+  return ''
 }
 
 function errorStatus(err: unknown): number | undefined {
@@ -171,7 +179,11 @@ function reasonLabel(code: string): string {
     phone_last7: 'Matching last 7 digits',
     name_exact: 'Exact name',
     name_exists_elsewhere: 'Name exists elsewhere',
-    domain_exact: 'Exact website domain',
+    record_no_exact: 'Exact Record No.',
+    source_identity_exact: 'LeadMaster source identity',
+    merge_redirect: 'Approved company redirect',
+    alias_record_no: 'Alias Record No.',
+    source_identity_bound: 'LeadMaster RN already bound to another company',
     phone: 'Matching phone',
     address_city_state: 'Matching address/city/state',
   }
@@ -186,10 +198,14 @@ function truncateMapped(value: string, max = 48): string {
 
 function planReadyToConfirm(plan: CrmImportDryRunResponse | null): boolean {
   if (!plan) return false
+  const excluded =
+    Number(plan.counts.excluded_skip || 0) + Number(plan.counts.excluded_closed || 0)
+  const blocked = Boolean(plan.validation_summary?.confirm_blocked)
   return (
     plan.counts.needs_review_rows === 0 &&
-    plan.counts.importable_rows === plan.total_rows &&
+    plan.counts.importable_rows + excluded === plan.total_rows &&
     plan.total_rows > 0 &&
+    !blocked &&
     isValidCrmImportPlanFingerprint(plan.plan_fingerprint)
   )
 }
@@ -220,6 +236,7 @@ export default function AdministrationImport({
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [batch, setBatch] = useState<CrmImportBatch | null>(null)
+  const [historyItems, setHistoryItems] = useState<CrmImportHistoryItem[]>([])
   const [pageRows, setPageRows] = useState<CrmImportRow[]>([])
   const [pageOffset, setPageOffset] = useState(0)
   const [pageTotal, setPageTotal] = useState(0)
@@ -241,6 +258,7 @@ export default function AdministrationImport({
     Record<number, { mode: string; status: string }>
   >({})
   const [resolvingRowId, setResolvingRowId] = useState<number | null>(null)
+  const [sourceTypeSaving, setSourceTypeSaving] = useState(false)
   const [resolveError, setResolveError] = useState<string | null>(null)
   const [terminalLocked, setTerminalLocked] = useState(false)
   const [confirmOpen, setConfirmOpen] = useState(false)
@@ -255,8 +273,11 @@ export default function AdministrationImport({
   const canUpload = connectClientId != null && connectClientId > 0
   const previewHeaders = useMemo(() => batch?.headers || [], [batch?.headers])
   const heldFileName = useMemo(() => heldFile?.name || '', [heldFile])
-  const activeClientDisplay =
-    clientName || clientLabel(connectClientId || 0, availableClients)
+  const activeClientDisplay = clientLabel(
+    connectClientId || 0,
+    availableClients,
+    clientName,
+  )
 
   const draftNormalized = useMemo(() => normalizeMapping(draftMapping), [draftMapping])
   const savedNormalized = useMemo(() => normalizeMapping(savedMapping), [savedMapping])
@@ -300,7 +321,12 @@ export default function AdministrationImport({
                 : 'Ready'
 
   const requestActive =
-    busy || mappingSaving || dryRunLoading || confirming || resolvingRowId != null
+    busy ||
+    mappingSaving ||
+    dryRunLoading ||
+    confirming ||
+    resolvingRowId != null ||
+    sourceTypeSaving
 
   const canSaveMapping =
     reusable &&
@@ -366,7 +392,15 @@ export default function AdministrationImport({
     if (Object.keys(saved).length > 0) {
       setDraftMapping(saved)
     } else if (options.suggestIfEmpty && next.reusable) {
-      setDraftMapping(suggestMapping(next.headers || []))
+      const prior = normalizeMapping(next.suggested_mapping || {})
+      if (Object.keys(prior).length > 0) {
+        setDraftMapping(prior)
+        setMessage(
+          'Suggested mapping from a prior import with the same client, source type, and headers. Review the columns and Save Mapping before Dry Run.',
+        )
+      } else {
+        setDraftMapping(suggestMapping(next.headers || []))
+      }
     } else {
       setDraftMapping({})
     }
@@ -664,6 +698,72 @@ export default function AdministrationImport({
     }
   }
 
+  async function loadHistory(clientId: number) {
+    if (clientId <= 0) {
+      setHistoryItems([])
+      return
+    }
+    try {
+      const page = await fetchCrmImportHistory(clientId)
+      setHistoryItems(page.items || [])
+    } catch {
+      setHistoryItems([])
+    }
+  }
+
+  useEffect(() => {
+    void loadHistory(connectClientId || 0)
+  }, [connectClientId])
+
+  async function onSaveSourceType(nextType: string) {
+    if (!batch || connectClientId == null || connectClientId <= 0 || !reusable) return
+    if ((batch.source_type || 'CRM_IMPORT') === nextType) return
+    setSourceTypeSaving(true)
+    setError(null)
+    try {
+      const updated = await saveCrmImportSourceType(
+        connectClientId,
+        batch.batch_id,
+        nextType,
+      )
+      setBatch(updated)
+      applyBatchMapping(updated, { suggestIfEmpty: Object.keys(savedNormalized).length === 0 })
+      setMessage(
+        nextType === 'LEADMASTER'
+          ? 'Source type: LeadMaster. Confirm will write LEADMASTER identities and provenance.'
+          : 'Source type: Other / Generic CRM Import.',
+      )
+    } catch (err) {
+      setError(errorMessage(err, 'Could not save source type.'))
+    } finally {
+      setSourceTypeSaving(false)
+    }
+  }
+
+  async function saveMatchResolution(
+    row: CrmImportDryRunRow,
+    resolutionType: string,
+    extra: { company_id?: number | null; contact_id?: number | null } = {},
+  ) {
+    if (!batch || connectClientId == null || connectClientId <= 0 || !reusable) return
+    setResolvingRowId(row.row_id)
+    setResolveError(null)
+    setDryRunError(null)
+    try {
+      await saveCrmImportMatchResolution(connectClientId, batch.batch_id, row.row_id, {
+        resolution_type: resolutionType,
+        company_id: extra.company_id ?? null,
+        contact_id: extra.contact_id ?? null,
+        clear: false,
+      })
+      await runDryRun(0)
+    } catch (err) {
+      setResolveError(errorMessage(err, 'Could not save match resolution.'))
+    } finally {
+      setResolvingRowId(null)
+    }
+  }
+
   function closeConfirmDialog() {
     if (confirmingRef.current) return
     setConfirmOpen(false)
@@ -840,7 +940,7 @@ export default function AdministrationImport({
             <option value="">Select a client…</option>
             {availableClients.map((c) => (
               <option key={c.client_id} value={c.client_id}>
-                {c.client_name}
+                {clientLabel(c.client_id, availableClients, c.client_name)}
               </option>
             ))}
           </select>
@@ -921,6 +1021,14 @@ export default function AdministrationImport({
             <span>
               Client: <strong>{activeClientDisplay}</strong>
             </span>
+            <span>
+              Source:{' '}
+              <strong>
+                {(batch.source_type || 'CRM_IMPORT') === 'LEADMASTER'
+                  ? 'LeadMaster'
+                  : 'Other / Generic CRM Import'}
+              </strong>
+            </span>
             <span>Mapping: {mappingStatusLabel}</span>
             <span>Dry run: {dryRunStatusLabel}</span>
           </div>
@@ -969,6 +1077,23 @@ export default function AdministrationImport({
                 }}
               />
               Use imported nonblank statuses for existing relationships
+            </label>
+          ) : null}
+          {reusable ? (
+            <label className="setup-field" style={{ maxWidth: '28rem' }}>
+              <span className="setup-field-label">Import source type</span>
+              <select
+                aria-label="Import source type"
+                value={batch.source_type || 'CRM_IMPORT'}
+                disabled={requestActive}
+                onChange={(e) => void onSaveSourceType(e.target.value)}
+              >
+                <option value="CRM_IMPORT">Other / Generic CRM Import</option>
+                <option value="LEADMASTER">LeadMaster</option>
+              </select>
+              <span className="queue-sub">
+                Default is generic. Choose LeadMaster only for a LeadMaster-derived file.
+              </span>
             </label>
           ) : null}
         </div>
@@ -1334,6 +1459,70 @@ export default function AdministrationImport({
           {reusable && dryRun ? (
             <div className="administration-import-dry-run">
               <h3>Dry-run review</h3>
+              {dryRun.validation_summary ? (
+                <dl
+                  className="administration-import-counts"
+                  aria-label="Import validation summary"
+                >
+                  <div>
+                    <dt>Client</dt>
+                    <dd>
+                      {dryRun.validation_summary.client_name || activeClientDisplay}
+                      {dryRun.validation_summary.client_id
+                        ? ` (Client ${dryRun.validation_summary.client_id})`
+                        : ''}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Source type</dt>
+                    <dd>
+                      {dryRun.validation_summary.source_type === 'LEADMASTER'
+                        ? 'LeadMaster'
+                        : 'Other / Generic CRM Import'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Filename</dt>
+                    <dd>{dryRun.validation_summary.original_filename || batch.original_filename}</dd>
+                  </div>
+                  <div>
+                    <dt>Source rows</dt>
+                    <dd>{dryRun.validation_summary.source_row_count}</dd>
+                  </div>
+                  <div>
+                    <dt>Mapped company name</dt>
+                    <dd>{dryRun.validation_summary.mapped_company_name_field || '—'}</dd>
+                  </div>
+                  <div>
+                    <dt>Mapped source RN</dt>
+                    <dd>{dryRun.validation_summary.mapped_source_rn_field || '—'}</dd>
+                  </div>
+                  <div>
+                    <dt>Mapped status</dt>
+                    <dd>{dryRun.validation_summary.mapped_status_field || '—'}</dd>
+                  </div>
+                  <div>
+                    <dt>Mapped notes</dt>
+                    <dd>{dryRun.validation_summary.mapped_notes_field || '—'}</dd>
+                  </div>
+                  <div>
+                    <dt>Unresolved company matches</dt>
+                    <dd>{dryRun.validation_summary.unresolved_company_matches}</dd>
+                  </div>
+                  <div>
+                    <dt>Unresolved contact matches</dt>
+                    <dd>{dryRun.validation_summary.unresolved_contact_matches}</dd>
+                  </div>
+                  <div>
+                    <dt>Status conflicts</dt>
+                    <dd>{dryRun.validation_summary.status_conflicts}</dd>
+                  </div>
+                  <div>
+                    <dt>Invalid rows</dt>
+                    <dd>{dryRun.validation_summary.invalid_rows}</dd>
+                  </div>
+                </dl>
+              ) : null}
               <p className="queue-sub">
                 Counts below cover the complete batch ({dryRun.total_rows} rows). The table shows
                 one page of plan rows ({dryRun.limit} max per page).
@@ -1601,6 +1790,124 @@ export default function AdministrationImport({
                             {possibles.length
                               ? possibles.map((item) => <div key={item}>{item}</div>)
                               : '—'}
+                            {row.company.action === 'possible_company_match' ? (
+                              <div className="administration-import-status-resolve">
+                                <div className="queue-sub">
+                                  Source: RN {row.mapped.external_record_no || '—'} ·{' '}
+                                  {row.mapped.company_name || row.company.name || '—'} ·{' '}
+                                  {[row.mapped.address, row.mapped.city, row.mapped.state]
+                                    .filter(Boolean)
+                                    .join(', ') || '—'}
+                                  {row.mapped.phone ? ` · ${row.mapped.phone}` : ''}
+                                  {row.mapped.website ? ` · ${row.mapped.website}` : ''}
+                                </div>
+                                {row.company.possibles.map((p) => (
+                                  <div key={`co-${p.company_id}`}>
+                                    <div>
+                                      Company {p.company_id}: {p.company_name}
+                                      {p.external_record_no ? ` · RN ${p.external_record_no}` : ''}
+                                      {p.identity_record_nos?.length
+                                        ? ` · identities ${p.identity_record_nos.join(', ')}`
+                                        : ''}
+                                    </div>
+                                    <div className="queue-sub">
+                                      {[p.address, p.city, p.state].filter(Boolean).join(', ') || '—'}
+                                      {p.phone ? ` · ${p.phone}` : ''}
+                                      {p.website ? ` · ${p.website}` : ''}
+                                      {p.reasons?.length ? ` · ${p.reasons.join(', ')}` : ''}
+                                    </div>
+                                    <button
+                                      type="button"
+                                      className="link-btn"
+                                      disabled={requestActive}
+                                      onClick={() =>
+                                        void saveMatchResolution(row, 'use_existing_company', {
+                                          company_id: p.company_id,
+                                        })
+                                      }
+                                    >
+                                      Use existing company {p.company_id}
+                                    </button>
+                                  </div>
+                                ))}
+                                {row.company.can_create_company ? (
+                                  <button
+                                    type="button"
+                                    className="link-btn"
+                                    disabled={requestActive}
+                                    onClick={() =>
+                                      void saveMatchResolution(row, 'create_company')
+                                    }
+                                  >
+                                    Create new company
+                                  </button>
+                                ) : null}
+                                <button
+                                  type="button"
+                                  className="link-btn"
+                                  disabled={requestActive}
+                                  onClick={() => void saveMatchResolution(row, 'skip_row')}
+                                >
+                                  Skip source row
+                                </button>
+                              </div>
+                            ) : null}
+                            {row.contact.action === 'possible_contact_match' ? (
+                              <div className="administration-import-status-resolve">
+                                <div className="queue-sub">
+                                  Source contact: {row.contact.display_name || '—'} ·{' '}
+                                  {row.mapped.company_name || '—'} ·{' '}
+                                  {row.mapped.contact_email || '—'} · {row.mapped.contact_phone || '—'}
+                                </div>
+                                {row.contact.possibles.map((p) => (
+                                  <div key={`ct-${p.contact_id}`}>
+                                    <div>
+                                      Contact {p.contact_id}: {p.display_name}
+                                      {p.company_name ? ` · ${p.company_name}` : ''}
+                                      {p.email ? ` · ${p.email}` : ''}
+                                      {p.phone ? ` · ${p.phone}` : ''}
+                                    </div>
+                                    {p.reasons?.length ? (
+                                      <div className="queue-sub">{p.reasons.join(', ')}</div>
+                                    ) : null}
+                                    <button
+                                      type="button"
+                                      className="link-btn"
+                                      disabled={requestActive}
+                                      onClick={() =>
+                                        void saveMatchResolution(row, 'use_existing_contact', {
+                                          contact_id: p.contact_id,
+                                        })
+                                      }
+                                    >
+                                      Use existing contact {p.contact_id}
+                                    </button>
+                                  </div>
+                                ))}
+                                {row.contact.can_create_contact ? (
+                                  <button
+                                    type="button"
+                                    className="link-btn"
+                                    disabled={requestActive}
+                                    onClick={() =>
+                                      void saveMatchResolution(row, 'create_contact')
+                                    }
+                                  >
+                                    Create new contact
+                                  </button>
+                                ) : null}
+                                <button
+                                  type="button"
+                                  className="link-btn"
+                                  disabled={requestActive}
+                                  onClick={() =>
+                                    void saveMatchResolution(row, 'import_company_only')
+                                  }
+                                >
+                                  Skip contact
+                                </button>
+                              </div>
+                            ) : null}
                           </td>
                           <td>
                             {details.length
@@ -1650,6 +1957,49 @@ export default function AdministrationImport({
         </div>
       ) : null}
 
+      {canUpload ? (
+        <div className="administration-import-history">
+          <h3>Recent imports</h3>
+          {historyItems.length === 0 ? (
+            <p className="queue-sub">No stored import batches for {activeClientDisplay}.</p>
+          ) : (
+            <table className="queue-table">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Filename</th>
+                  <th>Source</th>
+                  <th>Uploaded by</th>
+                  <th>State</th>
+                  <th>Rows</th>
+                  <th>Created / reused</th>
+                </tr>
+              </thead>
+              <tbody>
+                {historyItems.map((item) => (
+                  <tr key={item.batch_id}>
+                    <td>{item.imported_at || item.created_at || '—'}</td>
+                    <td>{item.original_filename || '—'}</td>
+                    <td>
+                      {item.source_type === 'LEADMASTER'
+                        ? 'LeadMaster'
+                        : 'Other / Generic CRM Import'}
+                    </td>
+                    <td>{item.uploaded_by_name || '—'}</td>
+                    <td>{item.status || '—'}</td>
+                    <td>{item.source_row_count}</td>
+                    <td>
+                      {item.created_company_count}/{item.reused_company_count} companies ·{' '}
+                      {item.created_contact_count}/{item.reused_contact_count} contacts
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      ) : null}
+
       {confirmOpen && dryRun ? (
         <div
           className="administration-import-confirm-backdrop"
@@ -1674,6 +2024,14 @@ export default function AdministrationImport({
               fingerprint will be accepted.
             </p>
             <dl className="administration-import-counts" aria-label="Confirm import summary">
+              <div>
+                <dt>Source type</dt>
+                <dd>
+                  {(dryRun.source_type || batch?.source_type) === 'LEADMASTER'
+                    ? 'LeadMaster'
+                    : 'Other / Generic CRM Import'}
+                </dd>
+              </div>
               <div>
                 <dt>Total rows to import</dt>
                 <dd>{dryRun.total_rows}</dd>

@@ -51,6 +51,23 @@ from crm_import_status_resolution import (
     catalog_labels,
     load_batch_status_resolutions,
 )
+from crm_import_match_resolution import (
+    MatchResolution,
+    RESOLUTION_CREATE_COMPANY,
+    RESOLUTION_CREATE_CONTACT,
+    RESOLUTION_IMPORT_COMPANY_ONLY,
+    RESOLUTION_SKIP_ROW,
+    RESOLUTION_USE_EXISTING_COMPANY,
+    RESOLUTION_USE_EXISTING_CONTACT,
+    RESOLUTION_USE_PROPOSED_COMPANY,
+    load_batch_match_resolutions,
+)
+from crm_import_source import (
+    DEFAULT_SOURCE_TYPE,
+    IDENTITY_BOUND_DETAIL,
+    is_leadmaster_source,
+    normalize_source_type,
+)
 from import_brown_industries import digits_phone, domain, norm_addr, norm_name
 from shared_note_history_import import is_closed_status, normalize_record_no
 from models import (
@@ -62,12 +79,15 @@ from models import (
     CrmImportDryRunRelationshipPlan,
     CrmImportDryRunResponse,
     CrmImportDryRunRow,
+    CrmImportValidationSummary,
 )
 
-PLANNER_VERSION = "crm-import-plan-v7"
+PLANNER_VERSION = "crm-import-plan-v11"
 IDENTITY_CRM = "crm"
 IDENTITY_CLIENT_DATA = "client_data"
 EXCLUDED_CLOSED = "excluded_closed"
+EXCLUDED_SKIP = "excluded_skip"
+EXCLUDED_ACTIONS = frozenset({EXCLUDED_CLOSED, EXCLUDED_SKIP})
 MAX_DRY_RUN_PAGE = 100
 IN_CHUNK = 400
 INVALID_PAGING = "Invalid paging."
@@ -173,6 +193,44 @@ class CompanyRec:
     state: str
     record_no: str
     source_row: int | None = None
+    alias_record_nos: tuple[str, ...] = ()
+    alias_norm_names: tuple[str, ...] = ()
+    alias_domains: tuple[str, ...] = ()
+    alias_phones: tuple[str, ...] = ()
+    alias_addrs: tuple[tuple[str, str, str], ...] = ()
+    display_address: str = ""
+    display_city: str = ""
+    display_state: str = ""
+    display_zip: str = ""
+    display_phone: str = ""
+    display_website: str = ""
+    identity_record_nos: tuple[str, ...] = ()
+
+
+@dataclass(slots=True)
+class PackedCompanyPossible:
+    company_id: int
+    name: str
+    record_no: str
+    reasons: list[str]
+    address: str = ""
+    city: str = ""
+    state: str = ""
+    zip: str = ""
+    phone: str = ""
+    website: str = ""
+    identity_record_nos: tuple[str, ...] = ()
+
+
+@dataclass(slots=True)
+class PackedContactPossible:
+    contact_id: int
+    display_name: str
+    reasons: list[str]
+    email: str = ""
+    phone: str = ""
+    company_id: int | None = None
+    company_name: str = ""
 
 
 @dataclass(slots=True)
@@ -252,14 +310,14 @@ class RowDecision:
     company_reasons: list[str]
     company_name: str
     company_created_at: int | None
-    company_possibles: list[tuple[int, str, str, list[str]]]
+    company_possibles: list[PackedCompanyPossible]
     contact_action: str
     contact_id: int | None
     contact_proposed_key: str | None
     contact_reasons: list[str]
     contact_name: str
     contact_created_at: int | None
-    contact_possibles: list[tuple[int, str, list[str]]]
+    contact_possibles: list[PackedContactPossible]
     relationship_action: str
     relationship_id: int | None
     relationship_proposed_key: str | None
@@ -271,8 +329,13 @@ class RowDecision:
     status_resolution_type: str
     status_resolution_updated_at: str
     status_resolution_updated_by_user_id: int | None
+    match_resolution_type: str
+    match_resolution_updated_at: str
+    match_resolution_updated_by_user_id: int | None
     existing_status: str
     mapped: dict[str, str]
+    identity_bound: bool = False
+    can_create_company: bool = True
 
 
 @dataclass
@@ -288,11 +351,17 @@ class ImportPlan:
     stats: dict[str, int] = field(default_factory=dict)
     status_catalog: list[str] = field(default_factory=list)
     use_imported_status_for_existing: bool = False
+    source_type: str = DEFAULT_SOURCE_TYPE
+    original_filename: str = ""
+    mapping: dict[str, str] = field(default_factory=dict)
+    client_name: str = ""
 
 
 def _company_score(reasons: list[str]) -> int:
     return (
         ("record_no_exact" in reasons) * 200
+        + ("source_identity_exact" in reasons) * 250
+        + ("merge_redirect" in reasons) * 220
         + ("domain_exact" in reasons) * 100
         + ("name_exact" in reasons) * 40
         + ("phone" in reasons) * 20
@@ -301,32 +370,87 @@ def _company_score(reasons: list[str]) -> int:
     )
 
 
+def _phones_compatible(left: str, right: str) -> bool:
+    if not left or not right or len(left) < 7 or len(right) < 7:
+        return False
+    return left == right or left.endswith(right[-7:]) or right.endswith(left[-7:])
+
+
+def _alias_record_nos(cand: CompanyRec) -> set[str]:
+    found = {normalize_record_no(rn) for rn in cand.alias_record_nos}
+    found.discard("")
+    return found
+
+
 def _company_reasons(query: CompanyRec, cand: CompanyRec) -> list[str]:
     reasons: list[str] = []
     qrn = normalize_record_no(query.record_no)
     crn = normalize_record_no(cand.record_no)
+    alias_rns = _alias_record_nos(cand)
     if qrn and crn and qrn == crn:
         reasons.append("record_no_exact")
         return reasons
-    if query.domain and cand.domain and query.domain == cand.domain:
+    if qrn and qrn in alias_rns:
+        reasons.append("record_no_exact")
+        reasons.append("alias_record_no")
+        return reasons
+    domains = {cand.domain, *cand.alias_domains}
+    domains.discard("")
+    if query.domain and query.domain in domains:
         reasons.append("domain_exact")
-    if query.norm_name and cand.norm_name and query.norm_name == cand.norm_name:
+    names = {cand.norm_name, *cand.alias_norm_names}
+    names.discard("")
+    if query.norm_name and query.norm_name in names:
         reasons.append("name_exact")
-    if query.phone and cand.phone and len(query.phone) >= 7:
-        cph = cand.phone
-        bph = query.phone
-        if cph == bph or cph.endswith(bph[-7:]) or bph.endswith(cph[-7:]):
-            reasons.append("phone")
+    phones = [p for p in (cand.phone, *cand.alias_phones) if p]
+    if query.phone and any(_phones_compatible(query.phone, phone) for phone in phones):
+        reasons.append("phone")
     if query.addr and query.city and query.state:
-        if cand.addr == query.addr and cand.city == query.city and cand.state == query.state:
+        addrs = {(cand.addr, cand.city, cand.state), *cand.alias_addrs}
+        if (query.addr, query.city, query.state) in addrs:
             reasons.append("address_city_state")
     return reasons
 
 
+def _identity_disagrees(query: CompanyRec, cand: CompanyRec) -> bool:
+    """True when incoming identity fields conflict with a candidate.
+
+    Empty-vs-present is not a conflict. Alias source identity is an alternative
+    to the canonical master, so a plant alias with its own city is not treated
+    as conflicting with HQ. Used so a unique normalized name cannot auto-reuse
+    a stored master (or an in-batch proposed company) when RN, domain, phone,
+    street, city, or state disagree with both the master and its aliases.
+    """
+    qrn = normalize_record_no(query.record_no)
+    crns = {normalize_record_no(cand.record_no), *_alias_record_nos(cand)}
+    crns.discard("")
+    if qrn and crns and qrn not in crns:
+        return True
+    domains = {cand.domain, *cand.alias_domains}
+    domains.discard("")
+    if query.domain and domains and query.domain not in domains:
+        return True
+    phones = [p for p in (cand.phone, *cand.alias_phones) if p]
+    if query.phone and phones and not any(_phones_compatible(query.phone, phone) for phone in phones):
+        return True
+    cities = {cand.city, *(item[1] for item in cand.alias_addrs)}
+    cities.discard("")
+    if query.city and cities and query.city not in cities:
+        return True
+    states = {cand.state, *(item[2] for item in cand.alias_addrs)}
+    states.discard("")
+    if query.state and states and query.state not in states:
+        return True
+    addrs = {cand.addr, *(item[0] for item in cand.alias_addrs)}
+    addrs.discard("")
+    if query.addr and addrs and query.addr not in addrs:
+        return True
+    return False
+
+
 def _classify_company(
+    query: CompanyRec,
     hits: list[tuple[CompanyRec, list[str]]],
-    *,
-    allow_name_only: bool = True,
 ) -> tuple[str, CompanyRec | None, list[str], list[tuple[CompanyRec, list[str]]]]:
     high: list[tuple[CompanyRec, list[str]]] = []
     possible: list[tuple[CompanyRec, list[str]]] = []
@@ -340,7 +464,9 @@ def _classify_company(
         ):
             high.append((cand, reasons))
         elif "name_exact" in reasons and len(reasons) == 1:
-            if not allow_name_only:
+            if _identity_disagrees(query, cand) or cand.company_id is not None:
+                # Stored masters never auto-reuse on name alone. In-batch proposed
+                # companies also stay possible when identity fields disagree.
                 possible.append((cand, reasons))
                 continue
             name_only = [item for item in hits if "name_exact" in item[1]]
@@ -552,6 +678,9 @@ def _empty_decision(staged: StagedPlanRow, validity: str, detail: str) -> RowDec
         status_resolution_type="",
         status_resolution_updated_at="",
         status_resolution_updated_by_user_id=None,
+        match_resolution_type="",
+        match_resolution_updated_at="",
+        match_resolution_updated_by_user_id=None,
         existing_status="",
         mapped=dict(staged.mapped),
     )
@@ -559,8 +688,8 @@ def _empty_decision(staged: StagedPlanRow, validity: str, detail: str) -> RowDec
 
 def _pack_company_possibles(
     items: list[tuple[CompanyRec, list[str]]],
-) -> list[tuple[int, str, str, list[str]]]:
-    packed: list[tuple[int, str, str, list[str]]] = []
+) -> list[PackedCompanyPossible]:
+    packed: list[PackedCompanyPossible] = []
     seen: set[int] = set()
     ordered = sorted(
         [(c, r) for c, r in items if c.company_id is not None],
@@ -571,7 +700,21 @@ def _pack_company_possibles(
         if cid in seen:
             continue
         seen.add(cid)
-        packed.append((cid, cand.name, cand.record_no, list(reasons)))
+        packed.append(
+            PackedCompanyPossible(
+                company_id=cid,
+                name=cand.name,
+                record_no=cand.record_no,
+                reasons=list(reasons),
+                address=cand.display_address or cand.addr,
+                city=cand.display_city or cand.city,
+                state=cand.display_state or cand.state,
+                zip=cand.display_zip,
+                phone=cand.display_phone or cand.phone,
+                website=cand.display_website or cand.domain,
+                identity_record_nos=tuple(cand.identity_record_nos),
+            )
+        )
     return packed
 
 
@@ -580,7 +723,6 @@ def _match_company(
     db_companies: list[CompanyRec],
     proposed: list[CompanyRec],
     *,
-    allow_name_only: bool = True,
     record_no_exclusive: bool = False,
 ) -> tuple[str, CompanyRec | None, list[str], list[tuple[CompanyRec, list[str]]]]:
     qrn = normalize_record_no(query.record_no)
@@ -589,8 +731,10 @@ def _match_company(
         for cand in (*db_companies, *proposed):
             if normalize_record_no(cand.record_no) == qrn:
                 exact.append((cand, ["record_no_exact"]))
+            elif qrn in _alias_record_nos(cand):
+                exact.append((cand, ["record_no_exact", "alias_record_no"]))
         if exact:
-            return _classify_company(exact, allow_name_only=allow_name_only)
+            return _classify_company(query, exact)
         if record_no_exclusive:
             return "create_company", None, [], []
     hits: list[tuple[CompanyRec, list[str]]] = []
@@ -598,7 +742,7 @@ def _match_company(
         reasons = _company_reasons(query, cand)
         if reasons:
             hits.append((cand, reasons))
-    return _classify_company(hits, allow_name_only=allow_name_only)
+    return _classify_company(query, hits)
 
 
 def _counts_from_rows(rows: list[RowDecision]) -> dict[str, int]:
@@ -631,10 +775,11 @@ def _counts_from_rows(rows: list[RowDecision]) -> dict[str, int]:
         "importable_rows": 0,
         "needs_review_rows": 0,
         "excluded_closed": 0,
+        "excluded_skip": 0,
     }
     for row in rows:
-        if row.company_action == EXCLUDED_CLOSED:
-            counts["excluded_closed"] += 1
+        if row.company_action in EXCLUDED_ACTIONS:
+            counts[row.company_action] += 1
             continue
         if row.validity == "blocking_error":
             counts["blocking_error"] += 1
@@ -696,6 +841,7 @@ def _fingerprint_payload(
     staged: list[StagedPlanRow],
     decisions: list[RowDecision],
     use_imported_status_for_existing: bool = False,
+    source_type: str = DEFAULT_SOURCE_TYPE,
 ) -> dict[str, Any]:
     return {
         "schema": PLANNER_VERSION,
@@ -708,6 +854,7 @@ def _fingerprint_payload(
         "status": status,
         "expires_at": expires_at,
         "use_imported_status_for_existing": bool(use_imported_status_for_existing),
+        "source_type": source_type,
         "total_rows": len(staged),
         "staged_rows": [
             {
@@ -727,16 +874,16 @@ def _fingerprint_payload(
                 "company_proposed_key": d.company_proposed_key,
                 "company_reasons": list(d.company_reasons),
                 "company_possible": [
-                    {"company_id": cid, "reasons": list(reasons)}
-                    for cid, _name, _rn, reasons in d.company_possibles
+                    {"company_id": item.company_id, "reasons": list(item.reasons)}
+                    for item in d.company_possibles
                 ],
                 "contact_action": d.contact_action,
                 "contact_id": d.contact_id,
                 "contact_proposed_key": d.contact_proposed_key,
                 "contact_reasons": list(d.contact_reasons),
                 "contact_possible": [
-                    {"contact_id": cid, "reasons": list(reasons)}
-                    for cid, _name, reasons in d.contact_possibles
+                    {"contact_id": item.contact_id, "reasons": list(item.reasons)}
+                    for item in d.contact_possibles
                 ],
                 "relationship_action": d.relationship_action,
                 "relationship_id": d.relationship_id,
@@ -749,6 +896,10 @@ def _fingerprint_payload(
                 "status_resolution_type": d.status_resolution_type,
                 "status_resolution_updated_at": d.status_resolution_updated_at,
                 "status_resolution_updated_by_user_id": d.status_resolution_updated_by_user_id,
+                "match_resolution_type": d.match_resolution_type,
+                "match_resolution_updated_at": d.match_resolution_updated_at,
+                "match_resolution_updated_by_user_id": d.match_resolution_updated_by_user_id,
+                "identity_bound": bool(d.identity_bound),
                 "normalized_state": (
                     ""
                     if d.validity_detail == INVALID_STATE_DETAIL
@@ -767,6 +918,86 @@ def _fingerprint_payload(
 def _chunked_values(values: list[Any], size: int = IN_CHUNK) -> Iterable[list[Any]]:
     for i in range(0, len(values), size):
         yield values[i : i + size]
+
+
+def _table_exists(conn, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+        (name,),
+    ).fetchone()
+    return row is not None
+
+
+def _resolve_canonical_company_id(conn, company_id: int) -> int:
+    cid = int(company_id)
+    if cid <= 0:
+        return cid
+    try:
+        from company_merges import resolve_company_id
+
+        return int(resolve_company_id(conn, cid))
+    except Exception:
+        return cid
+
+
+def _load_source_identity_map(
+    conn,
+    *,
+    client_id: int,
+    source_type: str,
+    record_nos: set[str],
+) -> dict[str, int]:
+    if not is_leadmaster_source(source_type) or not record_nos:
+        return {}
+    if not _table_exists(conn, "company_source_identities"):
+        return {}
+    found: dict[str, int] = {}
+    values = sorted(rn for rn in record_nos if rn)
+    for chunk in _chunked_values(values):
+        placeholders = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            f"""
+            SELECT source_record_no, company_id
+            FROM company_source_identities
+            WHERE source_system = 'LEADMASTER'
+              AND source_record_no IN ({placeholders})
+              AND COALESCE(client_id, 0) = COALESCE(?, 0)
+            """,
+            (*chunk, int(client_id)),
+        ).fetchall()
+        for raw in rows:
+            rn = normalize_record_no(raw["source_record_no"])
+            if not rn or rn in found:
+                continue
+            found[rn] = _resolve_canonical_company_id(conn, int(raw["company_id"]))
+    return found
+
+
+def _attach_source_identities(conn, companies: list[CompanyRec], client_id: int) -> None:
+    ids = [int(c.company_id) for c in companies if c.company_id is not None]
+    if not ids or not _table_exists(conn, "company_source_identities"):
+        return
+    by_company: dict[int, list[str]] = {cid: [] for cid in ids}
+    for chunk in _chunked(sorted(set(ids))):
+        placeholders = ",".join("?" * len(chunk))
+        for raw in conn.execute(
+            f"""
+            SELECT company_id, source_record_no
+            FROM company_source_identities
+            WHERE company_id IN ({placeholders})
+              AND source_system = 'LEADMASTER'
+              AND COALESCE(client_id, 0) = COALESCE(?, 0)
+            """,
+            (*chunk, int(client_id)),
+        ):
+            cid = int(raw["company_id"])
+            rn = normalize_record_no(raw["source_record_no"])
+            if rn and rn not in by_company.setdefault(cid, []):
+                by_company[cid].append(rn)
+    for cand in companies:
+        if cand.company_id is None:
+            continue
+        cand.identity_record_nos = tuple(by_company.get(int(cand.company_id), []))
 
 
 def _collect_identity_company_ids(
@@ -835,7 +1066,13 @@ def _collect_identity_company_ids(
     return found
 
 
-def _load_matching_companies(conn, staged: list[StagedPlanRow]) -> list[CompanyRec]:
+def _load_matching_companies(
+    conn,
+    staged: list[StagedPlanRow],
+    *,
+    client_id: int,
+    source_type: str,
+) -> tuple[list[CompanyRec], dict[str, int]]:
     from crm_identity_keys import require_company_identity_ready
 
     require_company_identity_ready(conn)
@@ -857,8 +1094,17 @@ def _load_matching_companies(conn, staged: list[StagedPlanRow]) -> list[CompanyR
     addr_keys = {
         (a, c, s) for (a, c, s) in addr_keys if a and c and s
     }
-    if not (domains or names or last7 or addr_keys or record_nos or phones):
-        return []
+    from company_aliases import collect_alias_company_ids
+
+    identity_map = _load_source_identity_map(
+        conn,
+        client_id=client_id,
+        source_type=source_type,
+        record_nos=record_nos,
+    )
+
+    if not (domains or names or last7 or addr_keys or record_nos or phones or identity_map):
+        return [], identity_map
 
     company_ids = _collect_identity_company_ids(
         conn,
@@ -869,8 +1115,14 @@ def _load_matching_companies(conn, staged: list[StagedPlanRow]) -> list[CompanyR
         last7=last7,
         addr_keys=addr_keys,
     )
+    company_ids |= collect_alias_company_ids(
+        conn,
+        record_nos=record_nos,
+        names=names,
+    )
+    company_ids |= set(identity_map.values())
     if not company_ids:
-        return []
+        return [], identity_map
 
     kept: list[CompanyRec] = []
     for chunk in _chunked(sorted(company_ids)):
@@ -880,6 +1132,12 @@ def _load_matching_companies(conn, staged: list[StagedPlanRow]) -> list[CompanyR
             SELECT
                 c.id,
                 c.company_name,
+                COALESCE(c.address, '') AS address,
+                COALESCE(c.city, '') AS city,
+                COALESCE(c.state, '') AS state,
+                COALESCE(c.zip, '') AS zip,
+                COALESCE(c.website, '') AS website,
+                COALESCE(c.legacy_phone, '') AS legacy_phone,
                 k.record_no,
                 k.domain,
                 k.norm_name,
@@ -905,9 +1163,35 @@ def _load_matching_companies(conn, staged: list[StagedPlanRow]) -> list[CompanyR
                     city=_blank(raw["city_norm"]),
                     state=_blank(raw["state_norm"]),
                     record_no=_blank(raw["record_no"]),
+                    display_address=_blank(raw["address"]),
+                    display_city=_blank(raw["city"]),
+                    display_state=_blank(raw["state"]),
+                    display_zip=_blank(raw["zip"]),
+                    display_phone=_blank(raw["legacy_phone"]),
+                    display_website=_blank(raw["website"]),
                 )
             )
-    return kept
+    _attach_company_aliases(conn, kept)
+    _attach_source_identities(conn, kept, client_id)
+    return kept, identity_map
+
+
+def _attach_company_aliases(conn, companies: list[CompanyRec]) -> None:
+    from company_aliases import alias_match_fields, load_aliases_by_company
+
+    ids = [int(c.company_id) for c in companies if c.company_id is not None]
+    if not ids:
+        return
+    by_company = load_aliases_by_company(conn, ids)
+    for cand in companies:
+        if cand.company_id is None:
+            continue
+        fields = alias_match_fields(by_company.get(int(cand.company_id), []))
+        cand.alias_record_nos = fields["record_nos"]
+        cand.alias_norm_names = fields["norm_names"]
+        cand.alias_domains = fields["domains"]
+        cand.alias_phones = fields["phones"]
+        cand.alias_addrs = fields["addrs"]
 
 
 def _load_relationships(conn, client_id: int) -> dict[int, RelationshipRec]:
@@ -928,14 +1212,6 @@ def _load_relationships(conn, client_id: int) -> dict[int, RelationshipRec]:
             notes="" if raw["notes"] is None else str(raw["notes"]),
         )
     return found
-
-
-def _table_exists(conn, name: str) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
-        (name,),
-    ).fetchone()
-    return row is not None
 
 
 def _load_contacts_for_companies(
@@ -1065,7 +1341,12 @@ def plan_crm_import_batch(
     guard. A future confirm may call this inside BEGIN IMMEDIATE and then write.
 
     identity_mode:
-      - crm: existing Company & contact import behavior
+      - crm: never auto-reuse a stored master on normalized name alone;
+        name plus domain/phone/address+city/state, an exact record number,
+        or an exact alias record number may still auto-reuse. Alias name
+        plus corroborating alias/master identity may reuse; alias name
+        alone does not. Unique in-batch proposed names still group
+        contacts when identity fields do not disagree.
       - client_data: LeadMaster Record No. first; never reuse on name alone;
         when Record No. present and unmatched → create (no fuzzy fallback)
     exclude_closed: Closed status rows are excluded for the selected client
@@ -1074,7 +1355,6 @@ def plan_crm_import_batch(
       statuses update existing relationships for this client (default False).
     """
     client_data_mode = identity_mode == IDENTITY_CLIENT_DATA
-    allow_name_only = not client_data_mode
     record_no_exclusive = client_data_mode
     use_imported_for_existing = bool(use_imported_status_for_existing)
     if not conn.in_transaction:
@@ -1090,6 +1370,9 @@ def plan_crm_import_batch(
     ).fetchone()
     if batch is None:
         raise LookupError("Import batch not found.")
+    from leadmaster_refresh_staging import refuse_refresh_as_initial_import
+
+    refuse_refresh_as_initial_import(batch)
 
     status = _row_get(batch, "status")
     if status != STATUS_PREVIEWED:
@@ -1106,6 +1389,18 @@ def plan_crm_import_batch(
     mapping_updated_by = _row_get_opt_int(batch, "mapping_updated_by_user_id")
     file_sha256 = _row_get(batch, "sha256")
     expires_at = _row_get(batch, "expires_at")
+    try:
+        source_type = normalize_source_type(_row_get(batch, "source_type"))
+    except ValueError:
+        source_type = DEFAULT_SOURCE_TYPE
+    original_filename = _row_get(batch, "original_filename")
+    client_name = ""
+    client_row = conn.execute(
+        "SELECT name FROM clients WHERE id = ? LIMIT 1",
+        (int(client_id),),
+    ).fetchone()
+    if client_row is not None:
+        client_name = _blank(client_row["name"] if "name" in client_row.keys() else client_row[0])
 
     staged_raw = conn.execute(
         """
@@ -1124,18 +1419,37 @@ def plan_crm_import_batch(
 
     # Fail closed before any classify: incomplete keys would look like creates.
     require_company_identity_ready(conn)
-    db_companies = _load_matching_companies(conn, staged)
+    db_companies, identity_map = _load_matching_companies(
+        conn,
+        staged,
+        client_id=int(client_id),
+        source_type=source_type,
+    )
     relationships = _load_relationships(conn, client_id)
     status_catalog = load_client_status_catalog(conn, client_id)
     resolutions = load_batch_status_resolutions(conn, client_id, batch_id)
+    match_resolutions = load_batch_match_resolutions(conn, client_id, batch_id)
     staged_names = {row.person_norm for row in staged if row.person_norm}
     name_elsewhere = _load_name_elsewhere(conn, staged_names)
 
     proposed_companies: list[CompanyRec] = []
     decisions: list[RowDecision] = []
     for row in staged:
+        match_res = match_resolutions.get(int(row.row_id))
         if row.has_blocking_error:
             decisions.append(_empty_decision(row, "blocking_error", BLOCKING_ERROR))
+            continue
+        if match_res is not None and match_res.resolution_type == RESOLUTION_SKIP_ROW:
+            decision = _empty_decision(row, "ok", "")
+            decision.company_name = row.company_name
+            decision.company_action = EXCLUDED_SKIP
+            decision.contact_action = EXCLUDED_SKIP
+            decision.relationship_action = EXCLUDED_SKIP
+            decision.status_action = EXCLUDED_SKIP
+            decision.notes_action = EXCLUDED_SKIP
+            _stamp_match_resolution(decision, match_res)
+            decision.mapped = dict(row.mapped)
+            decisions.append(decision)
             continue
         if not row.company_name:
             decisions.append(_empty_decision(row, "invalid_mapping_data", BLANK_COMPANY_NAME))
@@ -1162,48 +1476,187 @@ def plan_crm_import_batch(
             decisions.append(decision)
             continue
         query = _query_company(row.mapped)
+        qrn = normalize_record_no(query.record_no)
+        bound_id = identity_map.get(qrn) if qrn else None
+        identity_bound = bound_id is not None
         action, matched, reasons, extras = _match_company(
             query,
             db_companies,
             proposed_companies,
-            allow_name_only=allow_name_only,
             record_no_exclusive=record_no_exclusive,
         )
+        if identity_bound:
+            ident_cand = next(
+                (c for c in db_companies if int(c.company_id or 0) == int(bound_id)),
+                None,
+            )
+            if ident_cand is None:
+                ident_cand = CompanyRec(
+                    company_id=int(bound_id),
+                    proposed_key=None,
+                    name="",
+                    norm_name="",
+                    domain="",
+                    phone="",
+                    addr="",
+                    city="",
+                    state="",
+                    record_no=qrn,
+                )
+            action = "use_existing_company"
+            matched = ident_cand
+            reasons = ["source_identity_exact"]
+            extras = [(ident_cand, list(reasons)), *extras]
         decision = _empty_decision(row, "ok", "")
         decision.company_name = row.company_name
         decision.company_reasons = list(reasons)
-        if action == "possible_company_match":
-            decision.company_action = "possible_company_match"
-            decision.company_possibles = _pack_company_possibles(extras)
-            decision.contact_action = "deferred"
-            decision.relationship_action = "deferred"
-            decisions.append(decision)
-            continue
-        if action == "use_existing_company" and matched is not None:
-            decision.company_action = "use_existing_company"
-            decision.company_id = matched.company_id
-            decision.company_proposed_key = matched.proposed_key
-            decision.company_created_at = matched.source_row
-            decision.company_possibles = _pack_company_possibles(extras)
-        else:
-            key = _proposed_key("company", row.source_row_number, row.row_id)
-            created = CompanyRec(
-                company_id=None,
-                proposed_key=key,
-                name=row.company_name,
-                norm_name=query.norm_name,
-                domain=query.domain,
-                phone=query.phone,
-                addr=query.addr,
-                city=query.city,
-                state=query.state,
-                record_no=query.record_no,
-                source_row=row.source_row_number,
-            )
-            proposed_companies.append(created)
-            decision.company_action = "create_company"
-            decision.company_proposed_key = key
-            decision.company_created_at = row.source_row_number
+        decision.company_possibles = _pack_company_possibles(extras)
+        decision.identity_bound = identity_bound
+        decision.can_create_company = not identity_bound
+
+        resolved_company = False
+        if match_res is not None:
+            if match_res.resolution_type == RESOLUTION_USE_EXISTING_COMPANY:
+                cid = int(match_res.company_id or 0)
+                if identity_bound and cid != int(bound_id):
+                    decision.company_action = "possible_company_match"
+                    decision.contact_action = "deferred"
+                    decision.relationship_action = "deferred"
+                    decision.company_reasons = [
+                        "source_identity_bound",
+                        IDENTITY_BOUND_DETAIL,
+                    ]
+                    decision.can_create_company = False
+                    _stamp_match_resolution(decision, match_res)
+                    decisions.append(decision)
+                    continue
+                possible_ids = {p.company_id for p in decision.company_possibles}
+                in_db = any(
+                    c.company_id == cid for c in db_companies if c.company_id is not None
+                )
+                allowed = cid > 0 and (
+                    (possible_ids and cid in possible_ids)
+                    or (not possible_ids and in_db)
+                    or (action != "possible_company_match" and in_db)
+                    or bool(
+                        conn.execute(
+                            "SELECT 1 FROM companies WHERE id = ? LIMIT 1",
+                            (cid,),
+                        ).fetchone()
+                    )
+                )
+                if not allowed:
+                    decision.company_action = "possible_company_match"
+                    decision.contact_action = "deferred"
+                    decision.relationship_action = "deferred"
+                    _stamp_match_resolution(decision, match_res)
+                    decisions.append(decision)
+                    continue
+                decision.company_action = "use_existing_company"
+                decision.company_id = cid
+                decision.company_proposed_key = None
+                resolved_company = True
+            elif match_res.resolution_type == RESOLUTION_CREATE_COMPANY:
+                if identity_bound:
+                    decision.company_action = "possible_company_match"
+                    decision.contact_action = "deferred"
+                    decision.relationship_action = "deferred"
+                    decision.company_reasons = [
+                        "source_identity_bound",
+                        IDENTITY_BOUND_DETAIL,
+                    ]
+                    decision.can_create_company = False
+                    _stamp_match_resolution(decision, match_res)
+                    decisions.append(decision)
+                    continue
+                key = _proposed_key("company", row.source_row_number, row.row_id)
+                created = CompanyRec(
+                    company_id=None,
+                    proposed_key=key,
+                    name=row.company_name,
+                    norm_name=query.norm_name,
+                    domain=query.domain,
+                    phone=query.phone,
+                    addr=query.addr,
+                    city=query.city,
+                    state=query.state,
+                    record_no=query.record_no,
+                    source_row=row.source_row_number,
+                )
+                proposed_companies.append(created)
+                decision.company_action = "create_company"
+                decision.company_proposed_key = key
+                decision.company_created_at = row.source_row_number
+                decision.company_id = None
+                resolved_company = True
+            elif match_res.resolution_type == RESOLUTION_USE_PROPOSED_COMPANY:
+                if identity_bound:
+                    decision.company_action = "possible_company_match"
+                    decision.contact_action = "deferred"
+                    decision.relationship_action = "deferred"
+                    decision.can_create_company = False
+                    _stamp_match_resolution(decision, match_res)
+                    decisions.append(decision)
+                    continue
+                key = _blank(match_res.company_proposed_key)
+                prior = next((c for c in proposed_companies if c.proposed_key == key), None)
+                if not key or prior is None:
+                    decision.company_action = "possible_company_match"
+                    decision.contact_action = "deferred"
+                    decision.relationship_action = "deferred"
+                    _stamp_match_resolution(decision, match_res)
+                    decisions.append(decision)
+                    continue
+                decision.company_action = "use_existing_company"
+                decision.company_id = None
+                decision.company_proposed_key = key
+                decision.company_created_at = prior.source_row
+                resolved_company = True
+            if resolved_company:
+                _stamp_match_resolution(decision, match_res)
+
+        if not resolved_company:
+            if action == "possible_company_match":
+                decision.company_action = "possible_company_match"
+                decision.contact_action = "deferred"
+                decision.relationship_action = "deferred"
+                if match_res is not None:
+                    _stamp_match_resolution(decision, match_res)
+                decisions.append(decision)
+                continue
+            if action == "use_existing_company" and matched is not None:
+                decision.company_action = "use_existing_company"
+                decision.company_id = matched.company_id
+                decision.company_proposed_key = matched.proposed_key
+                decision.company_created_at = matched.source_row
+            else:
+                if identity_bound:
+                    decision.company_action = "possible_company_match"
+                    decision.contact_action = "deferred"
+                    decision.relationship_action = "deferred"
+                    decision.can_create_company = False
+                    decisions.append(decision)
+                    continue
+                key = _proposed_key("company", row.source_row_number, row.row_id)
+                created = CompanyRec(
+                    company_id=None,
+                    proposed_key=key,
+                    name=row.company_name,
+                    norm_name=query.norm_name,
+                    domain=query.domain,
+                    phone=query.phone,
+                    addr=query.addr,
+                    city=query.city,
+                    state=query.state,
+                    record_no=query.record_no,
+                    source_row=row.source_row_number,
+                )
+                proposed_companies.append(created)
+                decision.company_action = "create_company"
+                decision.company_proposed_key = key
+                decision.company_created_at = row.source_row_number
+            if match_res is not None:
+                _stamp_match_resolution(decision, match_res)
         decisions.append(decision)
 
     needed_company_ids = sorted(
@@ -1222,12 +1675,13 @@ def plan_crm_import_batch(
         if (
             decision.validity != "ok"
             or decision.company_action
-            in {"possible_company_match", EXCLUDED_CLOSED}
+            in {"possible_company_match", *EXCLUDED_ACTIONS}
         ):
             continue
         company_key = _company_ref(decision.company_id, decision.company_proposed_key)
         if not company_key:
             continue
+        match_res = match_resolutions.get(int(staged_row.row_id))
         _plan_contact(
             staged_row,
             decision,
@@ -1238,6 +1692,7 @@ def plan_crm_import_batch(
             phone_keys=phone_keys,
             proposed_contacts=proposed_contacts,
             name_elsewhere=name_elsewhere,
+            match_resolution=match_res,
         )
         _plan_relationship(
             staged_row,
@@ -1264,6 +1719,7 @@ def plan_crm_import_batch(
                 staged=staged,
                 decisions=decisions,
                 use_imported_status_for_existing=use_imported_for_existing,
+                source_type=source_type,
             )
         ).encode("utf-8")
     ).hexdigest()
@@ -1285,7 +1741,17 @@ def plan_crm_import_batch(
         },
         status_catalog=catalog_labels(status_catalog),
         use_imported_status_for_existing=use_imported_for_existing,
+        source_type=source_type,
+        original_filename=original_filename,
+        mapping=dict(mapping),
+        client_name=client_name,
     )
+
+
+def _stamp_match_resolution(decision: RowDecision, resolution: MatchResolution) -> None:
+    decision.match_resolution_type = resolution.resolution_type
+    decision.match_resolution_updated_at = resolution.updated_at
+    decision.match_resolution_updated_by_user_id = resolution.updated_by_user_id
 
 
 def _plan_contact(
@@ -1297,7 +1763,64 @@ def _plan_contact(
     phone_keys: dict[int, list[tuple[str, str]]],
     proposed_contacts: list[ContactRec],
     name_elsewhere: dict[str, set[int]],
+    match_resolution: MatchResolution | None = None,
 ) -> None:
+    if match_resolution is not None and match_resolution.resolution_type == RESOLUTION_IMPORT_COMPANY_ONLY:
+        decision.contact_action = "no_contact_data"
+        decision.contact_id = None
+        decision.contact_proposed_key = None
+        decision.contact_possibles = []
+        decision.contact_reasons = ["import_company_only"]
+        _stamp_match_resolution(decision, match_resolution)
+        return
+
+    if match_resolution is not None and match_resolution.resolution_type == RESOLUTION_CREATE_CONTACT:
+        if not staged.has_any_contact_field or not staged.can_create_contact:
+            decision.contact_action = INSUFFICIENT_CONTACT_DATA
+            decision.contact_reasons = [CONTACT_NEEDS_NAME_OR_EMAIL]
+            _stamp_match_resolution(decision, match_resolution)
+            return
+        key = _proposed_key("contact", staged.source_row_number, staged.row_id)
+        created = ContactRec(
+            contact_id=None,
+            proposed_key=key,
+            company_id=decision.company_id,
+            company_key=company_key,
+            display_name=staged.contact_full or staged.email_norm,
+            norm_name=staged.person_norm,
+            email=staged.email_norm,
+            nanp10=staged.nanp10,
+            last7="",
+            source_row=staged.source_row_number,
+        )
+        proposed_contacts.append(created)
+        decision.contact_action = "create_contact"
+        decision.contact_proposed_key = key
+        decision.contact_created_at = staged.source_row_number
+        decision.contact_name = created.display_name
+        decision.contact_reasons = ["match_resolution"]
+        _stamp_match_resolution(decision, match_resolution)
+        return
+
+    if (
+        match_resolution is not None
+        and match_resolution.resolution_type == RESOLUTION_USE_EXISTING_CONTACT
+        and match_resolution.contact_id is not None
+    ):
+        chosen_id = int(match_resolution.contact_id)
+        chosen = next((c for c in db_contacts if int(c.contact_id or 0) == chosen_id), None)
+        if chosen is None:
+            decision.contact_action = "possible_contact_match"
+            decision.contact_reasons = ["unsafe_contact_move"]
+            _stamp_match_resolution(decision, match_resolution)
+            return
+        decision.contact_action = "use_existing_contact"
+        decision.contact_id = chosen_id
+        decision.contact_name = chosen.display_name or staged.contact_full
+        decision.contact_reasons = ["match_resolution"]
+        _stamp_match_resolution(decision, match_resolution)
+        return
+
     if not staged.has_any_contact_field:
         decision.contact_action = "no_contact_data"
         return
@@ -1314,6 +1837,8 @@ def _plan_contact(
                 decision.contact_created_at = rec.source_row
                 decision.contact_name = rec.display_name or staged.contact_full
                 decision.contact_reasons = ["email_exact"]
+                if match_resolution is not None:
+                    _stamp_match_resolution(decision, match_resolution)
                 return
 
     if staged.nanp10:
@@ -1324,6 +1849,8 @@ def _plan_contact(
                 decision.contact_id = rec.contact_id
                 decision.contact_reasons = ["phone_exact"]
                 decision.contact_name = rec.display_name or staged.contact_full
+                if match_resolution is not None:
+                    _stamp_match_resolution(decision, match_resolution)
                 return
         for rec in proposed_here:
             if rec.nanp10 and rec.nanp10 == staged.nanp10:
@@ -1332,6 +1859,8 @@ def _plan_contact(
                 decision.contact_created_at = rec.source_row
                 decision.contact_reasons = ["phone_exact"]
                 decision.contact_name = rec.display_name or staged.contact_full
+                if match_resolution is not None:
+                    _stamp_match_resolution(decision, match_resolution)
                 return
 
     possibles_map: dict[str, tuple[ContactRec, list[str]]] = {}
@@ -1368,16 +1897,55 @@ def _plan_contact(
 
     possibles = list(possibles_map.values())
 
+    if match_resolution is not None and match_resolution.contact_id is not None:
+        chosen_id = int(match_resolution.contact_id)
+        chosen = next((c for c in db_contacts if int(c.contact_id or 0) == chosen_id), None)
+        if chosen is not None:
+            decision.contact_action = "use_existing_contact"
+            decision.contact_id = chosen_id
+            decision.contact_name = chosen.display_name or staged.contact_full
+            decision.contact_reasons = ["match_resolution"]
+            _stamp_match_resolution(decision, match_resolution)
+            return
+
     if possibles:
         db_poss = sorted(
             [(c, r) for c, r in possibles if c.contact_id is not None],
             key=lambda item: int(item[0].contact_id or 0),
         )
         proposed_poss = [item for item in possibles if item[0].contact_id is None]
-        decision.contact_action = "possible_contact_match"
         decision.contact_possibles = [
-            (int(c.contact_id or 0), c.display_name, list(r)) for c, r in db_poss
+            PackedContactPossible(
+                contact_id=int(c.contact_id or 0),
+                display_name=c.display_name,
+                reasons=list(r),
+                email=c.email,
+                phone=c.nanp10,
+                company_id=c.company_id,
+                company_name=decision.company_name,
+            )
+            for c, r in db_poss
         ]
+        if (
+            match_resolution is not None
+            and match_resolution.resolution_type == RESOLUTION_USE_EXISTING_CONTACT
+            and match_resolution.contact_id is not None
+        ):
+            chosen_id = int(match_resolution.contact_id)
+            chosen = next((c for c, _r in db_poss if int(c.contact_id or 0) == chosen_id), None)
+            if chosen is None:
+                chosen = next(
+                    (c for c in db_contacts if int(c.contact_id or 0) == chosen_id),
+                    None,
+                )
+            if chosen is not None:
+                decision.contact_action = "use_existing_contact"
+                decision.contact_id = chosen_id
+                decision.contact_name = chosen.display_name or staged.contact_full
+                decision.contact_reasons = ["match_resolution"]
+                _stamp_match_resolution(decision, match_resolution)
+                return
+        decision.contact_action = "possible_contact_match"
         if db_poss:
             decision.contact_reasons = list(db_poss[0][1])
             decision.contact_name = db_poss[0][0].display_name
@@ -1388,12 +1956,24 @@ def _plan_contact(
         if _name_exists_elsewhere(staged.person_norm, decision.company_id, name_elsewhere):
             if "name_exists_elsewhere" not in decision.contact_reasons:
                 decision.contact_reasons = [*decision.contact_reasons, "name_exists_elsewhere"]
+        if match_resolution is not None:
+            _stamp_match_resolution(decision, match_resolution)
         return
 
     if not staged.can_create_contact:
+        if (
+            match_resolution is not None
+            and match_resolution.resolution_type == RESOLUTION_IMPORT_COMPANY_ONLY
+        ):
+            decision.contact_action = "no_contact_data"
+            decision.contact_reasons = ["import_company_only"]
+            _stamp_match_resolution(decision, match_resolution)
+            return
         decision.contact_action = INSUFFICIENT_CONTACT_DATA
         decision.contact_reasons = [CONTACT_NEEDS_NAME_OR_EMAIL]
         decision.contact_name = staged.contact_full or staged.contact_title or staged.contact_phone
+        if match_resolution is not None:
+            _stamp_match_resolution(decision, match_resolution)
         return
 
     key = _proposed_key("contact", staged.source_row_number, staged.row_id)
@@ -1416,7 +1996,8 @@ def _plan_contact(
     decision.contact_name = created.display_name
     if _name_exists_elsewhere(staged.person_norm, decision.company_id, name_elsewhere):
         decision.contact_reasons = ["name_exists_elsewhere"]
-
+    if match_resolution is not None:
+        _stamp_match_resolution(decision, match_resolution)
 
 def _plan_relationship(
     staged: StagedPlanRow,
@@ -1529,13 +2110,23 @@ def _row_to_api(row: RowDecision) -> CrmImportDryRunRow:
             name=row.company_name if row.company_action != "none" else "",
             possibles=[
                 CrmImportDryRunCompanyPossible(
-                    company_id=cid,
-                    company_name=name,
-                    external_record_no=record_no,
-                    reasons=list(reasons),
+                    company_id=item.company_id,
+                    company_name=item.name,
+                    external_record_no=item.record_no,
+                    address=item.address,
+                    city=item.city,
+                    state=item.state,
+                    zip=item.zip,
+                    phone=item.phone,
+                    website=item.website,
+                    identity_record_nos=list(item.identity_record_nos),
+                    reasons=list(item.reasons),
                 )
-                for cid, name, record_no, reasons in row.company_possibles[:5]
+                for item in row.company_possibles[:5]
             ],
+            can_create_company=bool(row.can_create_company)
+            and row.company_action == "possible_company_match"
+            and not row.identity_bound,
         ),
         contact=CrmImportDryRunContactPlan(
             action=row.contact_action,
@@ -1544,13 +2135,18 @@ def _row_to_api(row: RowDecision) -> CrmImportDryRunRow:
             proposed_key=row.contact_proposed_key,
             created_at_source_row=row.contact_created_at,
             display_name=row.contact_name if row.contact_action not in {"none", "no_contact_data"} else "",
+            can_create_contact=row.contact_action == "possible_contact_match",
             possibles=[
                 CrmImportDryRunContactPossible(
-                    contact_id=cid,
-                    display_name=name,
-                    reasons=list(reasons),
+                    contact_id=item.contact_id,
+                    display_name=item.display_name,
+                    email=item.email,
+                    phone=item.phone,
+                    company_id=item.company_id,
+                    company_name=item.company_name,
+                    reasons=list(item.reasons),
                 )
-                for cid, name, reasons in row.contact_possibles[:5]
+                for item in row.contact_possibles[:5]
             ],
         ),
         relationship=CrmImportDryRunRelationshipPlan(
@@ -1572,6 +2168,46 @@ def _row_to_api(row: RowDecision) -> CrmImportDryRunRow:
     )
 
 
+def _validation_summary(plan: ImportPlan) -> CrmImportValidationSummary:
+    counts = plan.counts
+    excluded = int(counts.get("excluded_skip") or 0) + int(counts.get("excluded_closed") or 0)
+    invalid_rows = int(counts.get("blocking_error") or 0) + int(
+        counts.get("invalid_mapping_data") or 0
+    )
+    unresolved_company = int(counts.get("possible_company_match") or 0)
+    unresolved_contact = int(counts.get("possible_contact_match") or 0) + int(
+        counts.get("insufficient_contact_data") or 0
+    )
+    status_conflicts = int(counts.get("status_conflict") or 0) + int(
+        counts.get("invalid_status") or 0
+    )
+    confirm_blocked = (
+        int(counts.get("needs_review_rows") or 0) != 0
+        or int(counts.get("importable_rows") or 0) + excluded != int(plan.total_rows)
+        or unresolved_company > 0
+        or unresolved_contact > 0
+        or status_conflicts > 0
+        or invalid_rows > 0
+    )
+    mapping = plan.mapping or {}
+    return CrmImportValidationSummary(
+        client_id=int(plan.client_id),
+        client_name=plan.client_name,
+        source_type=plan.source_type,
+        original_filename=plan.original_filename,
+        source_row_count=int(plan.total_rows),
+        mapped_company_name_field=_blank(mapping.get("company_name")),
+        mapped_source_rn_field=_blank(mapping.get("external_record_no")),
+        mapped_status_field=_blank(mapping.get("relationship_status")),
+        mapped_notes_field=_blank(mapping.get("relationship_notes")),
+        unresolved_company_matches=unresolved_company,
+        unresolved_contact_matches=unresolved_contact,
+        status_conflicts=status_conflicts,
+        invalid_rows=invalid_rows,
+        confirm_blocked=confirm_blocked,
+    )
+
+
 def _paginate(plan: ImportPlan, offset: int, limit: int) -> CrmImportDryRunResponse:
     sliced = plan.rows[offset : offset + limit]
     return CrmImportDryRunResponse(
@@ -1587,6 +2223,10 @@ def _paginate(plan: ImportPlan, offset: int, limit: int) -> CrmImportDryRunRespo
         counts=CrmImportDryRunCounts(**plan.counts),
         rows=[_row_to_api(row) for row in sliced],
         status_catalog=list(plan.status_catalog or []),
+        source_type=plan.source_type,
+        original_filename=plan.original_filename,
+        mapped_fields=dict(plan.mapping or {}),
+        validation_summary=_validation_summary(plan),
     )
 
 

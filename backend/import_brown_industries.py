@@ -124,7 +124,11 @@ def domain(value: str) -> str:
 
 
 def digits_phone(value: str) -> str:
-    d = re.sub(r"\D", "", value or "")
+    from contact_phone import split_phone_extension
+
+    main, ext = split_phone_extension(value or "")
+    source = main if ext else (value or "")
+    d = re.sub(r"\D", "", source)
     return d[-10:] if len(d) >= 10 else d
 
 

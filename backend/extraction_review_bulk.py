@@ -6,6 +6,8 @@ Never writes Client Setup / CRM / Client Contacts.
 
 from __future__ import annotations
 
+from staff_context import resolve_staff_actor
+
 import json
 import re
 from typing import Any
@@ -643,7 +645,7 @@ def classify_pending_proposals_for_review(
     """Classify all Pending proposals for smart filters (read-only)."""
     from client_knowledge_data import list_extraction_proposals
 
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     pending = list_extraction_proposals(
@@ -668,7 +670,7 @@ def preview_bulk_resolve(
     """Preview which selected proposals are READY to resolve. No writes."""
     from client_knowledge_data import list_extraction_proposals
 
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     if not user_can_edit_client_setup(user.id, client_id) and not getattr(
@@ -728,7 +730,7 @@ def bulk_resolve_eligible_proposals(
     from client_knowledge_data import resolve_extraction_proposal
     from models import ClientExtractionResolveRequest
 
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     if not user_can_edit_client_setup(user.id, client_id):
@@ -785,7 +787,7 @@ def bulk_reject_proposals(
     """Reject selected Pending proposals with a required category. No Setup/CRM writes."""
     from client_knowledge_data import _now
 
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     if not user_can_edit_client_setup(user.id, client_id):

@@ -8,6 +8,8 @@ Status and work queue are separate:
 
 from __future__ import annotations
 
+from staff_context import resolve_staff_actor
+
 from datetime import date, datetime
 from typing import Literal
 
@@ -20,6 +22,7 @@ from access import (
     user_can_access_client,
 )
 from appointments_data import count_hot_prospects, is_hot_prospect_status
+from data_steward import sql_active_ccr, sql_active_company
 from db import DB_PATH, get_connection
 from models import (
     DashboardFollowUpItem,
@@ -380,7 +383,7 @@ def list_due_work_items(
                 )
 
         ccr_rows = conn.execute(
-            """
+            f"""
             SELECT
                 ccr.id AS relationship_id,
                 ccr.client_id,
@@ -396,6 +399,8 @@ def list_due_work_items(
             JOIN companies co ON co.id = ccr.company_id
             LEFT JOIN users u ON u.id = ccr.assigned_user_id
             WHERE ccr.client_id = ?
+              AND {sql_active_ccr(conn)}
+              AND {sql_active_company(conn)}
               AND ccr.follow_up_date IS NOT NULL
               AND TRIM(ccr.follow_up_date) != ''
               AND substr(ccr.follow_up_date, 1, 10) <= ?
@@ -713,6 +718,11 @@ def list_dashboard_follow_ups(*, client_id: int) -> DashboardFollowUpsResponse:
 
 
 def work_queue_summary(*, client: str = "Carmeco", client_id: int | None = None) -> WorkQueueSummary:
+    from access import user_can_access_client
+
+    user = resolve_staff_actor()
+    if user is None:
+        raise PermissionError("User not found.")
     calls = list_due_work_items(kind="call", client=client, client_id=client_id)
     follow_ups = list_due_work_items(kind="follow_up", client=client, client_id=client_id)
     new_count = 0
@@ -720,6 +730,8 @@ def work_queue_summary(*, client: str = "Carmeco", client_id: int | None = None)
         with get_connection() as conn:
             focus_id = _resolve_client_id(conn, client=client, client_id=client_id)
             if focus_id is not None:
+                if not user_can_access_client(user.id, int(focus_id)) and not user.is_administrator:
+                    raise PermissionError("Not authorized for this client.")
                 row = conn.execute(
                     """
                     SELECT COUNT(*) AS n
@@ -951,7 +963,10 @@ def _ccr_keys_matching(
         f"""
         SELECT ccr.client_id, ccr.company_id
         FROM client_company_relationships ccr
+        JOIN companies co ON co.id = ccr.company_id
         WHERE ccr.client_id IN ({placeholders})
+          AND {sql_active_ccr(conn)}
+          AND {sql_active_company(conn)}
           AND ({status_sql})
         """,
         [*client_ids, *status_params],
@@ -1000,7 +1015,7 @@ def list_work_queue(
         page_limit, page_offset = _normalize_work_queue_page(limit, offset)
     else:
         page_limit, page_offset = 0, 0
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
 
@@ -1905,7 +1920,7 @@ def complete_work_queue_item(body: WorkQueueCompleteRequest) -> dict:
     """Mark a queue source complete without deleting company history."""
     from access import require_write_client_id
 
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
     require_write_client_id(body.client_id, user_id=user.id)
@@ -2008,7 +2023,7 @@ def complete_follow_up_task(body: FollowUpTaskCompleteRequest) -> FollowUpTaskAc
         body = FollowUpTaskCompleteRequest.model_validate(body)
     from access import require_write_client_id
 
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
     client_id = require_write_client_id(body.client_id, user_id=user.id)
@@ -2120,7 +2135,7 @@ def reschedule_follow_up_task(body: FollowUpTaskRescheduleRequest) -> FollowUpTa
         body = FollowUpTaskRescheduleRequest.model_validate(body)
     from access import require_write_client_id
 
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
     client_id = require_write_client_id(body.client_id, user_id=user.id)
@@ -2375,7 +2390,7 @@ def reschedule_follow_up_task(body: FollowUpTaskRescheduleRequest) -> FollowUpTa
 
 
 def clients_for_work_queue(user_id: int | None = None) -> list[dict]:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         return []
     return [
@@ -2404,7 +2419,7 @@ def log_work_queue_call(body: WorkQueueLogCallRequest) -> WorkQueueLogCallResult
     from client_workspace_data import update_relationship_status
     from models import ActivityCreateRequest
 
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
     from access import require_write_client_id

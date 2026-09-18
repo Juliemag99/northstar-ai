@@ -12,6 +12,8 @@ Flow:
 
 from __future__ import annotations
 
+from staff_context import resolve_staff_actor
+
 import json
 import re
 from datetime import datetime, timezone
@@ -2274,7 +2276,7 @@ def start_company_research(
     )
 
     ensure_client_setup_schema()
-    user = get_default_user() if user_id is None else None
+    user = resolve_staff_actor(user_id)
     if user_id is not None:
         from access import get_user_by_id
 
@@ -3114,7 +3116,7 @@ def _assemble_response(
 
 def get_research_run(run_id: int, *, user_id: int | None = None) -> ResearchCompanyResponse:
     ensure_research_schema()
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
     visible_ids = resolve_visibility_client_ids(user.id)
@@ -3300,7 +3302,7 @@ def get_latest_research(
 ) -> ResearchCompanyResponse:
     """Return latest stored research or start clarification response."""
     ensure_research_schema()
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
     with get_connection() as conn:
@@ -3333,7 +3335,7 @@ def approve_proposed_update(
     body: ResearchApproveRequest, *, user_id: int | None = None
 ) -> dict[str, Any]:
     ensure_research_schema()
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
     approved_by = _blank(body.approved_by) or _blank(user.full_name) or "NorthStar User"
@@ -3453,7 +3455,7 @@ def reject_proposed_update(
     body: ResearchRejectRequest, *, user_id: int | None = None
 ) -> dict[str, Any]:
     ensure_research_schema()
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
     rejected_by = _blank(body.rejected_by) or _blank(user.full_name) or "NorthStar User"

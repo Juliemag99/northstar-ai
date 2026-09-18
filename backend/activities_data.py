@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from staff_context import resolve_staff_actor
+
 from datetime import date, datetime
 
 from db import DB_PATH, get_connection
@@ -85,6 +87,19 @@ def _resolve_client_for_write(conn, client_id: object):
     return conn.execute("SELECT * FROM clients WHERE id = ?", (cid,)).fetchone()
 
 
+def _require_read_client(conn, client_name: str = "Carmeco", client_id: int | None = None):
+    from access import user_can_access_client
+
+    client_row = _resolve_client(conn, client_name, client_id)
+    if client_row is None:
+        return None
+    actor = resolve_staff_actor()
+    if actor is not None:
+        if not user_can_access_client(int(actor.id), int(client_row["id"])) and not actor.is_administrator:
+            raise PermissionError("Not authorized for this client.")
+    return client_row
+
+
 def _resolve_client(conn, client_name: str = "Carmeco", client_id: int | None = None):
     """Read helper. Writes must use _resolve_client_for_write / require_write_client_id."""
     if client_id is not None:
@@ -160,6 +175,11 @@ def _now_iso() -> str:
 
 
 def _resolve_user_id(conn, body: ActivityCreateRequest) -> int | None:
+    from staff_context import resolve_staff_actor
+
+    actor = resolve_staff_actor()
+    if actor is not None:
+        return int(actor.id)
     if body.user_id is not None:
         row = conn.execute(
             "SELECT id, full_name FROM users WHERE id = ? AND active = 1",
@@ -169,7 +189,7 @@ def _resolve_user_id(conn, body: ActivityCreateRequest) -> int | None:
             raise ValueError("user_id not found or inactive.")
         return int(row["id"])
 
-    # Prefer matching created_by / assigned_user display name, else default Julie
+    # Unenforced/no-session path: match created_by / assigned_user, else Julie
     for name in (body.created_by, body.assigned_user, "Julie Magnani"):
         key = name.strip()
         if not key:
@@ -282,9 +302,14 @@ def create_activity(body: ActivityCreateRequest) -> Activity:
                 raise ValueError("contact_id does not belong to this company.")
 
         user_id = _resolve_user_id(conn, body)
-        created_by = body.created_by.strip() or "Julie Magnani"
+        actor = resolve_staff_actor()
+        created_by = (
+            actor.full_name.strip()
+            if actor is not None and actor.full_name.strip()
+            else (body.created_by.strip() or "Julie Magnani")
+        )
         assigned_user = body.assigned_user.strip() or created_by
-        if user_id is not None:
+        if user_id is not None and actor is None:
             user_row = conn.execute(
                 "SELECT full_name FROM users WHERE id = ?",
                 (user_id,),
@@ -348,7 +373,7 @@ def list_activities_for_company(
         return []
 
     with get_connection() as conn:
-        client_row = _resolve_client(conn, client, client_id)
+        client_row = _require_read_client(conn, client, client_id)
         if client_row is None:
             return []
         rel = _resolve_company_relationship(
@@ -373,7 +398,7 @@ def list_activities_due_today(*, client: str = "Carmeco") -> list[Activity]:
         return []
     start, end = _today_bounds()
     with get_connection() as conn:
-        client_row = _resolve_client(conn, client)
+        client_row = _require_read_client(conn, client)
         if client_row is None:
             return []
         rows = conn.execute(
@@ -398,7 +423,7 @@ def list_overdue_follow_ups(*, client: str = "Carmeco") -> list[Activity]:
         return []
     start, _ = _today_bounds()
     with get_connection() as conn:
-        client_row = _resolve_client(conn, client)
+        client_row = _require_read_client(conn, client)
         if client_row is None:
             return []
         rows = conn.execute(
@@ -422,7 +447,7 @@ def list_upcoming_follow_ups(*, client: str = "Carmeco") -> list[Activity]:
         return []
     _, end = _today_bounds()
     with get_connection() as conn:
-        client_row = _resolve_client(conn, client)
+        client_row = _require_read_client(conn, client)
         if client_row is None:
             return []
         rows = conn.execute(
@@ -483,7 +508,7 @@ def list_client_activities(
     cid = int(client_id)
     if cid <= 0:
         raise ValueError("Active Client is required.")
-    user = get_default_user()
+    user = resolve_staff_actor()
     if user is None:
         raise PermissionError("User not found.")
     if not user_can_access_client(user.id, cid) and not user.is_administrator:

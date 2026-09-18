@@ -74,6 +74,7 @@ _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("password_updated_at", "TEXT NOT NULL DEFAULT ''"),
         ("failed_login_count", "INTEGER NOT NULL DEFAULT 0"),
         ("locked_until", "TEXT NOT NULL DEFAULT ''"),
+        ("staff_role", "TEXT NOT NULL DEFAULT ''"),
     ],
     "client_company_relationships": [
         ("assigned_user_id", "INTEGER"),
@@ -84,6 +85,7 @@ _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("updated_at", "TEXT NOT NULL DEFAULT ''"),
         ("is_hot", "INTEGER NOT NULL DEFAULT 0"),
         ("external_record_no", "TEXT NOT NULL DEFAULT ''"),
+        ("location_id", "INTEGER"),
     ],
     "activities": [
         ("user_id", "INTEGER"),
@@ -106,6 +108,8 @@ _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("legacy_title", "TEXT NOT NULL DEFAULT ''"),
         ("legacy_alt_phone", "TEXT NOT NULL DEFAULT ''"),
         ("legacy_mobile", "TEXT NOT NULL DEFAULT ''"),
+        ("legacy_phone_extension", "TEXT"),
+        ("legacy_alt_phone_extension", "TEXT"),
         ("legacy_email", "TEXT NOT NULL DEFAULT ''"),
         ("zoominfo_company_id", "TEXT NOT NULL DEFAULT ''"),
         ("source", "TEXT NOT NULL DEFAULT ''"),
@@ -114,8 +118,11 @@ _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "contacts": [
         ("first_name", "TEXT NOT NULL DEFAULT ''"),
         ("last_name", "TEXT NOT NULL DEFAULT ''"),
+        ("phone_extension", "TEXT"),
+        ("alt_phone_extension", "TEXT"),
         ("linkedin_url", "TEXT NOT NULL DEFAULT ''"),
         ("location", "TEXT NOT NULL DEFAULT ''"),
+        ("location_id", "INTEGER"),
         ("zoominfo_contact_id", "TEXT NOT NULL DEFAULT ''"),
         ("source", "TEXT NOT NULL DEFAULT ''"),
         ("source_updated_at", "TEXT NOT NULL DEFAULT ''"),
@@ -159,6 +166,12 @@ _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("usage_json", "TEXT NOT NULL DEFAULT ''"),
         ("citations_json", "TEXT NOT NULL DEFAULT ''"),
         ("error_message", "TEXT NOT NULL DEFAULT ''"),
+    ],
+    "company_shared_history_events": [
+        ("location_id", "INTEGER"),
+    ],
+    "client_sales_events": [
+        ("location_id", "INTEGER"),
     ],
 }
 
@@ -274,6 +287,28 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
+PHONE_EXTENSION_COLUMNS = (
+    ("companies", "legacy_phone_extension", "TEXT"),
+    ("companies", "legacy_alt_phone_extension", "TEXT"),
+    ("contacts", "phone_extension", "TEXT"),
+    ("contacts", "alt_phone_extension", "TEXT"),
+)
+
+
+def ensure_phone_extension_columns(conn: sqlite3.Connection) -> list[str]:
+    """Idempotently add structured phone-extension columns. Does not rewrite values."""
+    added: list[str] = []
+    for table, name, declaration in PHONE_EXTENSION_COLUMNS:
+        if not _table_exists(conn, table):
+            continue
+        existing = _table_columns(conn, table)
+        if name in existing:
+            continue
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+        added.append(f"{table}.{name}")
+    return added
+
+
 def migrate_schema(conn: sqlite3.Connection) -> None:
     """Add missing columns/indexes on existing databases without wiping data."""
     for table, columns in _COLUMN_MIGRATIONS.items():
@@ -284,6 +319,7 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
             if name in existing:
                 continue
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+    ensure_phone_extension_columns(conn)
 
     # Indexes that CREATE INDEX IF NOT EXISTS may not have run on older DBs
     conn.execute(
@@ -433,10 +469,28 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
 
         # Indexed CRM import matching keys. Does not rewrite master display values.
         ensure_crm_identity_key_schema(conn)
+        from company_aliases import ensure_company_alias_schema
+
+        ensure_company_alias_schema(conn)
+        from company_locations import ensure_company_location_schema
+
+        ensure_company_location_schema(conn)
+        from company_merges import ensure_company_merge_schema
+
+        ensure_company_merge_schema(conn)
     elif _table_exists(conn, "companies"):
         from crm_identity_keys import ensure_crm_identity_key_schema
 
         ensure_crm_identity_key_schema(conn)
+        from company_aliases import ensure_company_alias_schema
+
+        ensure_company_alias_schema(conn)
+        from company_locations import ensure_company_location_schema
+
+        ensure_company_location_schema(conn)
+        from company_merges import ensure_company_merge_schema
+
+        ensure_company_merge_schema(conn)
     from auth_sessions import ensure_staff_auth_schema
 
     ensure_staff_auth_schema(conn)

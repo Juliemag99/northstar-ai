@@ -307,8 +307,11 @@ def test_me_session_states() -> None:
         none_payload = none_resp.json()
         if none_payload.get("authenticated") is not False:
             _fail("Unauthenticated /me should set authenticated false.")
-        if str((none_payload.get("user") or {}).get("email") or "").lower() != DEFAULT_USER_EMAIL:
-            _fail("/me without a session should return Julie.")
+        if none_payload.get("user") is not None:
+            _fail("/me without a session must not include a staff identity.")
+        leaked = json.dumps(none_payload).lower()
+        if "juliem@n-star.us" in leaked or "julie magnani" in leaked:
+            _fail("Unauthenticated /me leaked Julie's identity.")
         if none_payload.get("csrf_token"):
             _fail("Unauthenticated /me should not return a CSRF token.")
         _assert_no_secrets(none_payload)
@@ -542,6 +545,11 @@ def test_enforcement_fail_safe() -> None:
         me = testdb.http_json("GET", "/api/auth/me")
         if me[0] != 200 or me[1].get("authenticated") is not False:
             _fail("Unauthenticated /me must still work when enforcement is on.")
+        if me[1].get("user") is not None:
+            _fail("Enforced unauthenticated /me must not include a staff identity.")
+        leaked = json.dumps(me[1]).lower()
+        if "juliem@n-star.us" in leaked or "julie magnani" in leaked:
+            _fail("Enforced unauthenticated /me leaked Julie's identity.")
         if me[1].get("auth_enforced") is not True:
             _fail("/me should report auth_enforced true when fail-safe is active.")
         if me[1].get("auth_available") is not True:

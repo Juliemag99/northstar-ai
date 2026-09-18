@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL DEFAULT '',
     password_updated_at TEXT NOT NULL DEFAULT '',
     failed_login_count INTEGER NOT NULL DEFAULT 0,
-    locked_until TEXT NOT NULL DEFAULT ''
+    locked_until TEXT NOT NULL DEFAULT '',
+    staff_role TEXT NOT NULL DEFAULT ''
 );
 
 -- Many-to-many: a user may work for many clients; a client may have many users
@@ -58,6 +59,8 @@ CREATE TABLE IF NOT EXISTS companies (
     legacy_phone TEXT NOT NULL DEFAULT '',
     legacy_alt_phone TEXT NOT NULL DEFAULT '',
     legacy_mobile TEXT NOT NULL DEFAULT '',
+    legacy_phone_extension TEXT,
+    legacy_alt_phone_extension TEXT,
     legacy_email TEXT NOT NULL DEFAULT '',
     sales_volume_range TEXT NOT NULL DEFAULT '',
     location_sales_volume_range TEXT NOT NULL DEFAULT '',
@@ -78,6 +81,46 @@ CREATE TABLE IF NOT EXISTS companies (
     source_updated_at TEXT NOT NULL DEFAULT ''
 );
 
+-- Physical plants / HQs / offices. Does not replace companies (canonical org).
+-- Source RNs live on company_source_identities, not on this table.
+CREATE TABLE IF NOT EXISTS company_locations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL,
+    location_name TEXT NOT NULL DEFAULT '',
+    location_type TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (location_type IN (
+            'headquarters', 'plant', 'office', 'branch',
+            'warehouse', 'facility', 'unknown'
+        )),
+    address TEXT NOT NULL DEFAULT '',
+    city TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT '',
+    zip TEXT NOT NULL DEFAULT '',
+    country TEXT NOT NULL DEFAULT 'US',
+    phone TEXT NOT NULL DEFAULT '',
+    phone_extension TEXT NOT NULL DEFAULT '',
+    alt_phone TEXT NOT NULL DEFAULT '',
+    alt_phone_extension TEXT NOT NULL DEFAULT '',
+    website TEXT NOT NULL DEFAULT '',
+    is_headquarters INTEGER NOT NULL DEFAULT 0,
+    is_primary INTEGER NOT NULL DEFAULT 0,
+    source_system TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_company_locations_company
+    ON company_locations(company_id);
+CREATE INDEX IF NOT EXISTS idx_company_locations_city_state
+    ON company_locations(city, state, zip)
+    WHERE TRIM(city) != '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_company_locations_one_hq
+    ON company_locations(company_id)
+    WHERE is_headquarters = 1;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_company_locations_one_primary
+    ON company_locations(company_id)
+    WHERE is_primary = 1;
+
 CREATE TABLE IF NOT EXISTS contacts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     company_id INTEGER NOT NULL,
@@ -87,15 +130,19 @@ CREATE TABLE IF NOT EXISTS contacts (
     title TEXT NOT NULL DEFAULT '',
     phone TEXT NOT NULL DEFAULT '',
     alt_phone TEXT NOT NULL DEFAULT '',
+    phone_extension TEXT,
+    alt_phone_extension TEXT,
     email TEXT NOT NULL DEFAULT '',
     source_row_index INTEGER NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     linkedin_url TEXT NOT NULL DEFAULT '',
     location TEXT NOT NULL DEFAULT '',
+    location_id INTEGER,
     zoominfo_contact_id TEXT NOT NULL DEFAULT '',
     source TEXT NOT NULL DEFAULT '',
     source_updated_at TEXT NOT NULL DEFAULT '',
-    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE,
+    FOREIGN KEY (location_id) REFERENCES company_locations(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS client_company_relationships (
@@ -113,12 +160,14 @@ CREATE TABLE IF NOT EXISTS client_company_relationships (
     follow_up_date TEXT,
     notes TEXT NOT NULL DEFAULT '',
     is_hot INTEGER NOT NULL DEFAULT 0,
+    location_id INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (client_id, company_id),
     FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE,
     FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE,
-    FOREIGN KEY (assigned_user_id) REFERENCES users(id) ON DELETE SET NULL
+    FOREIGN KEY (assigned_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (location_id) REFERENCES company_locations(id) ON DELETE SET NULL
 );
 
 -- Per-client operational workflow for a shared master contact.
@@ -210,6 +259,182 @@ CREATE INDEX IF NOT EXISTS idx_company_identity_addr
     ON company_identity_keys(addr_norm, city_norm, state_norm)
     WHERE addr_norm != '';
 
+-- Original source company names / record numbers / addresses. Does not replace
+-- companies.company_name. No FK on source_batch_id (import batches are deleted).
+CREATE TABLE IF NOT EXISTS company_aliases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL,
+    alias_name TEXT NOT NULL,
+    alias_norm TEXT NOT NULL,
+    source_system TEXT NOT NULL DEFAULT '',
+    source_record_no TEXT NOT NULL DEFAULT '',
+    client_id INTEGER,
+    source_batch_id INTEGER,
+    source_row INTEGER,
+    source_address TEXT NOT NULL DEFAULT '',
+    source_city TEXT NOT NULL DEFAULT '',
+    source_state TEXT NOT NULL DEFAULT '',
+    source_zip TEXT NOT NULL DEFAULT '',
+    source_phone TEXT NOT NULL DEFAULT '',
+    source_website TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_by_user_id INTEGER,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE,
+    FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE SET NULL,
+    FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_company_aliases_idempotent
+    ON company_aliases (
+        company_id,
+        COALESCE(client_id, 0),
+        source_system,
+        source_record_no,
+        alias_norm
+    );
+CREATE INDEX IF NOT EXISTS idx_company_aliases_company
+    ON company_aliases(company_id);
+CREATE INDEX IF NOT EXISTS idx_company_aliases_record_no
+    ON company_aliases(source_record_no)
+    WHERE source_record_no != '';
+CREATE INDEX IF NOT EXISTS idx_company_aliases_norm
+    ON company_aliases(alias_norm)
+    WHERE alias_norm != '';
+
+-- Durable source RNs. Not companies.external_record_no. Not CCR RNs.
+-- UNIQUE (source_system, source_record_no, COALESCE(client_id, 0)) so NULL
+-- client scope cannot create duplicate identities.
+CREATE TABLE IF NOT EXISTS company_source_identities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL,
+    location_id INTEGER,
+    client_id INTEGER,
+    source_system TEXT NOT NULL,
+    source_record_no TEXT NOT NULL,
+    source_company_name TEXT NOT NULL DEFAULT '',
+    source_address TEXT NOT NULL DEFAULT '',
+    source_city TEXT NOT NULL DEFAULT '',
+    source_state TEXT NOT NULL DEFAULT '',
+    source_zip TEXT NOT NULL DEFAULT '',
+    source_phone TEXT NOT NULL DEFAULT '',
+    source_website TEXT NOT NULL DEFAULT '',
+    source_batch_id INTEGER,
+    source_row INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_by_user_id INTEGER,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE,
+    FOREIGN KEY (location_id) REFERENCES company_locations(id) ON DELETE SET NULL,
+    FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE SET NULL,
+    FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_company_source_identities_idempotent
+    ON company_source_identities (
+        source_system,
+        source_record_no,
+        COALESCE(client_id, 0)
+    );
+CREATE INDEX IF NOT EXISTS idx_company_source_identities_company
+    ON company_source_identities(company_id);
+CREATE INDEX IF NOT EXISTS idx_company_source_identities_location
+    ON company_source_identities(location_id)
+    WHERE location_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_company_source_identities_client
+    ON company_source_identities(client_id)
+    WHERE client_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_company_source_identities_rn
+    ON company_source_identities(source_system, source_record_no);
+
+-- Permanent company-ID redirect after a consolidation merge.
+-- source_company_id has NO FK so the losing row may be deleted later.
+-- survivor_company_id FK requires the surviving company row to remain.
+-- Empty in Phase 5E. No live merge is performed here.
+CREATE TABLE IF NOT EXISTS company_merge_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_company_id INTEGER NOT NULL,
+    survivor_company_id INTEGER NOT NULL,
+    merged_at TEXT NOT NULL DEFAULT (datetime('now')),
+    merged_by_user_id INTEGER,
+    reason TEXT NOT NULL DEFAULT '',
+    operation_id TEXT NOT NULL DEFAULT '',
+    source_company_name TEXT NOT NULL DEFAULT '',
+    source_external_record_no TEXT NOT NULL DEFAULT '',
+    survivor_company_name TEXT NOT NULL DEFAULT '',
+    survivor_external_record_no TEXT NOT NULL DEFAULT '',
+    summary_json TEXT NOT NULL DEFAULT '',
+    CHECK (source_company_id != survivor_company_id),
+    FOREIGN KEY (survivor_company_id) REFERENCES companies(id),
+    FOREIGN KEY (merged_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_company_merge_history_source
+    ON company_merge_history(source_company_id);
+CREATE INDEX IF NOT EXISTS idx_company_merge_history_survivor
+    ON company_merge_history(survivor_company_id);
+CREATE INDEX IF NOT EXISTS idx_company_merge_history_merged_at
+    ON company_merge_history(merged_at);
+
+-- One-time merge execution approval. Empty unless an admin records a pending
+-- authorization. Live execute_company_merge requires a matching pending row.
+-- source/survivor have no FK so a consumed approval can outlive a retired source.
+CREATE TABLE IF NOT EXISTS merge_execution_approvals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_company_id INTEGER NOT NULL,
+    survivor_company_id INTEGER NOT NULL,
+    plan_fingerprint TEXT NOT NULL,
+    approved_resolution_json TEXT NOT NULL DEFAULT '',
+    approved_by_user_id INTEGER,
+    approved_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT,
+    execution_status TEXT NOT NULL DEFAULT 'pending',
+    executed_at TEXT,
+    executed_by_user_id INTEGER,
+    company_merge_history_id INTEGER,
+    failure_reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    CHECK (source_company_id != survivor_company_id),
+    CHECK (execution_status IN (
+        'pending','executing','executed','failed','expired','superseded'
+    )),
+    FOREIGN KEY (approved_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (executed_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_merge_approvals_one_open
+    ON merge_execution_approvals(source_company_id, survivor_company_id)
+    WHERE execution_status IN ('pending', 'executing');
+CREATE INDEX IF NOT EXISTS idx_merge_approvals_fingerprint
+    ON merge_execution_approvals(plan_fingerprint);
+CREATE INDEX IF NOT EXISTS idx_merge_approvals_status
+    ON merge_execution_approvals(execution_status);
+
+-- Permanent contact-ID redirect after duplicate-contact consolidation during
+-- a company merge. source_contact_id has NO FK so the losing contact may be
+-- deleted later. survivor_contact_id FK requires the surviving contact row.
+-- Empty in Phase 5E. No live contact merge is performed here.
+CREATE TABLE IF NOT EXISTS contact_merge_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_contact_id INTEGER NOT NULL,
+    survivor_contact_id INTEGER NOT NULL,
+    source_company_id INTEGER,
+    survivor_company_id INTEGER,
+    merged_at TEXT NOT NULL DEFAULT (datetime('now')),
+    merged_by_user_id INTEGER,
+    reason TEXT NOT NULL DEFAULT '',
+    operation_id TEXT NOT NULL DEFAULT '',
+    source_contact_name TEXT NOT NULL DEFAULT '',
+    source_external_record_no TEXT NOT NULL DEFAULT '',
+    survivor_contact_name TEXT NOT NULL DEFAULT '',
+    survivor_external_record_no TEXT NOT NULL DEFAULT '',
+    summary_json TEXT NOT NULL DEFAULT '',
+    CHECK (source_contact_id != survivor_contact_id),
+    FOREIGN KEY (survivor_contact_id) REFERENCES contacts(id),
+    FOREIGN KEY (survivor_company_id) REFERENCES companies(id),
+    FOREIGN KEY (merged_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_contact_merge_history_source
+    ON contact_merge_history(source_contact_id);
+CREATE INDEX IF NOT EXISTS idx_contact_merge_history_survivor
+    ON contact_merge_history(survivor_contact_id);
+CREATE INDEX IF NOT EXISTS idx_contact_merge_history_survivor_company
+    ON contact_merge_history(survivor_company_id);
+
 CREATE TABLE IF NOT EXISTS contact_person_keys (
     contact_id INTEGER PRIMARY KEY,
     company_id INTEGER NOT NULL,
@@ -229,6 +454,9 @@ CREATE INDEX IF NOT EXISTS idx_contacts_last_first_nocase
     ON contacts(last_name COLLATE NOCASE, first_name COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS idx_contacts_external_record_no
     ON contacts(external_record_no);
+CREATE INDEX IF NOT EXISTS idx_contacts_location_id
+    ON contacts(location_id)
+    WHERE location_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_companies_zoominfo_id
     ON companies(zoominfo_company_id) WHERE TRIM(zoominfo_company_id) != '';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_zoominfo_id
@@ -284,6 +512,9 @@ CREATE INDEX IF NOT EXISTS idx_ccr_client_company
     ON client_company_relationships(client_id, company_id);
 CREATE INDEX IF NOT EXISTS idx_ccr_client_record_no
     ON client_company_relationships(client_id, external_record_no);
+CREATE INDEX IF NOT EXISTS idx_client_company_relationships_location_id
+    ON client_company_relationships(location_id)
+    WHERE location_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_legacy_notes_company
     ON legacy_notes(company_id);
 
@@ -307,7 +538,9 @@ CREATE TABLE IF NOT EXISTS company_shared_history_events (
     imported_at TEXT NOT NULL DEFAULT '',
     imported_by_user_id INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+    location_id INTEGER,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE,
+    FOREIGN KEY (location_id) REFERENCES company_locations(id) ON DELETE SET NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_company_shared_history_idempotency
     ON company_shared_history_events(company_id, event_hash);
@@ -315,6 +548,9 @@ CREATE INDEX IF NOT EXISTS idx_company_shared_history_company
     ON company_shared_history_events(company_id, event_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_company_shared_history_record_no
     ON company_shared_history_events(external_record_no);
+CREATE INDEX IF NOT EXISTS idx_company_shared_history_events_location_id
+    ON company_shared_history_events(location_id)
+    WHERE location_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS shared_note_history_import_batches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

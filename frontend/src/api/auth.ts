@@ -2,6 +2,12 @@ import { apiFetch, clearCsrfToken, setCsrfToken } from './http'
 
 export const GENERIC_LOGIN_ERROR = 'Invalid email or password.'
 
+export type AssignedClient = {
+  client_id: number
+  client_name: string
+  client_code: string
+}
+
 export type StaffUser = {
   id: number
   email: string
@@ -10,6 +16,9 @@ export type StaffUser = {
   is_internal_northstar: boolean
   active: boolean
   created_at: string
+  staff_role?: string
+  permissions?: string[]
+  clients?: AssignedClient[]
 }
 
 export type AuthSnapshot = {
@@ -38,6 +47,23 @@ function parseUser(value: unknown): StaffUser | null {
   const raw = asRecord(value)
   const id = Number(raw.id)
   if (!Number.isFinite(id) || id <= 0) return null
+  const permissions = Array.isArray(raw.permissions)
+    ? raw.permissions.map((item) => String(item))
+    : []
+  const clients = Array.isArray(raw.clients)
+    ? raw.clients
+        .map((item) => {
+          const rec = asRecord(item)
+          const clientId = Number(rec.client_id)
+          if (!Number.isFinite(clientId) || clientId <= 0) return null
+          return {
+            client_id: clientId,
+            client_name: String(rec.client_name ?? rec.name ?? ''),
+            client_code: String(rec.client_code ?? rec.code ?? ''),
+          }
+        })
+        .filter((item): item is AssignedClient => item != null)
+    : []
   return {
     id,
     email: String(raw.email ?? ''),
@@ -46,6 +72,9 @@ function parseUser(value: unknown): StaffUser | null {
     is_internal_northstar: Boolean(raw.is_internal_northstar),
     active: raw.active !== false,
     created_at: String(raw.created_at ?? ''),
+    staff_role: String(raw.staff_role ?? ''),
+    permissions,
+    clients,
   }
 }
 

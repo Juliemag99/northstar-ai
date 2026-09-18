@@ -976,10 +976,11 @@ def test_confirm_needs_review_refusals() -> None:
         _insert_contact(company_id, rn, first="Alan", last="Turing")
         bid = _upload_batch(
             session,
-            ["Company", "First", "Last"],
-            [[cname, "Alan", "Turing"]],
+            ["Company", "Record No.", "First", "Last"],
+            [[cname, rn, "Alan", "Turing"]],
             {
                 "company_name": "Company",
+                "external_record_no": "Record No.",
                 "contact_first_name": "First",
                 "contact_last_name": "Last",
             },
@@ -1007,10 +1008,11 @@ def test_confirm_needs_review_refusals() -> None:
         _insert_contact(company_id, rn, first="Last", last="Seven", phone="4695550199")
         bid = _upload_batch(
             session,
-            ["Company", "First", "Last", "Phone"],
-            [[cname, "Last", "Seven", "5550199"]],
+            ["Company", "Record No.", "First", "Last", "Phone"],
+            [[cname, rn, "Last", "Seven", "5550199"]],
             {
                 "company_name": "Company",
+                "external_record_no": "Record No.",
                 "contact_first_name": "First",
                 "contact_last_name": "Last",
                 "contact_phone": "Phone",
@@ -1459,6 +1461,50 @@ def test_confirm_happy_paths_audit_and_phone() -> None:
         session.close()
 
 
+def test_confirm_splits_recognized_phone_extension() -> None:
+    session = _session()
+    try:
+        bid = _upload_batch(
+            session,
+            ["Company", "CFirst", "CLast", "CPhone", "Email"],
+            [["ImportExt3D", "Ada", "Extension", "515-555-1212 ext 44", "ada.ext@example.test"]],
+            {
+                "company_name": "Company",
+                "contact_first_name": "CFirst",
+                "contact_last_name": "CLast",
+                "contact_phone": "CPhone",
+                "contact_email": "Email",
+            },
+        )
+        fp = _dry_run_fingerprint(session, bid)
+        resp = _confirm(session, bid, fp=fp)
+        if resp.status_code != 200:
+            _fail(f"Confirm failed: {resp.status_code} {resp.text}")
+        with get_connection() as conn:
+            contact = conn.execute(
+                """
+                SELECT c.id, c.phone, c.phone_extension
+                FROM contacts c
+                JOIN companies co ON co.id = c.company_id
+                WHERE co.company_name = 'ImportExt3D'
+                """
+            ).fetchone()
+            if contact is None:
+                _fail("Expected imported contact.")
+            if contact["phone"] != "(515) 555-1212":
+                _fail(f"Expected split main phone, got {contact['phone']!r}")
+            if str(contact["phone_extension"] or "") != "44":
+                _fail(f"Expected extension 44, got {contact['phone_extension']!r}")
+            keys = conn.execute(
+                "SELECT nanp10 FROM contact_phone_keys WHERE contact_id = ? AND slot = 'phone'",
+                (int(contact["id"]),),
+            ).fetchone()
+            if keys is None or keys["nanp10"] != "5155551212":
+                _fail("contact phone key must be main-number only")
+    finally:
+        session.close()
+
+
 def test_confirm_atomicity_fault_injection_full_freeze() -> None:
     session = _session()
     try:
@@ -1639,6 +1685,7 @@ def main() -> int:
     test_confirm_needs_review_refusals()
     test_confirm_proposed_key_and_ownership_invariants()
     test_confirm_happy_paths_audit_and_phone()
+    test_confirm_splits_recognized_phone_extension()
     test_confirm_atomicity_fault_injection_full_freeze()
     test_confirm_idempotency_and_concurrency()
     test_confirm_reuse_and_ns_numbers()

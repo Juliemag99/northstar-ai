@@ -16,6 +16,9 @@ import { useAuth } from './auth/useAuth'
 import { staffCanAdminister } from './auth/staffCanAdminister'
 import AdministrationImport from './AdministrationImport'
 import AdministrationClientDataImport from './AdministrationClientDataImport'
+import AdministrationMasterDataExport from './AdministrationMasterDataExport'
+import AdministrationLeadmasterRefresh from './AdministrationLeadmasterRefresh'
+import AdministrationDataSteward from './AdministrationDataSteward'
 
 type AssignedClient = {
   client_id: number
@@ -81,7 +84,10 @@ export default function Administration({
     null,
   )
   const loadGen = useRef(0)
-  const [adminTab, setAdminTab] = useState<'email' | 'import' | 'client-data-import'>('email')
+  const [adminTab, setAdminTab] = useState<
+    'email' | 'import' | 'client-data-import' | 'data-management'
+  >('email')
+  const [dataMgmtTab, setDataMgmtTab] = useState<'export' | 'leadmaster-refresh' | 'master-data'>('export')
 
   const allMyClients = activeClientId == null || activeClientId <= 0
   const connectClientId = allMyClients ? scopedClientId : activeClientId
@@ -261,6 +267,19 @@ export default function Administration({
         >
           Client Data Import
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={adminTab === 'data-management'}
+          className={
+            adminTab === 'data-management'
+              ? 'setup-campaign-tab setup-campaign-tab--active'
+              : 'setup-campaign-tab'
+          }
+          onClick={() => setAdminTab('data-management')}
+        >
+          Data Management
+        </button>
       </div>
 
       {adminTab === 'import' ? (
@@ -283,6 +302,64 @@ export default function Administration({
           onScopedClientId={setScopedClientId}
           clientName={scopedClientName}
         />
+      ) : null}
+
+      {adminTab === 'data-management' ? (
+        <div>
+          <div className="setup-campaign-tabs" role="tablist" aria-label="Data Management">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={dataMgmtTab === 'export'}
+              className={
+                dataMgmtTab === 'export'
+                  ? 'setup-campaign-tab setup-campaign-tab--active'
+                  : 'setup-campaign-tab'
+              }
+              onClick={() => setDataMgmtTab('export')}
+            >
+              Master Data Export
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={dataMgmtTab === 'master-data'}
+              className={
+                dataMgmtTab === 'master-data'
+                  ? 'setup-campaign-tab setup-campaign-tab--active'
+                  : 'setup-campaign-tab'
+              }
+              onClick={() => setDataMgmtTab('master-data')}
+            >
+              Master Data
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={dataMgmtTab === 'leadmaster-refresh'}
+              className={
+                dataMgmtTab === 'leadmaster-refresh'
+                  ? 'setup-campaign-tab setup-campaign-tab--active'
+                  : 'setup-campaign-tab'
+              }
+              onClick={() => setDataMgmtTab('leadmaster-refresh')}
+            >
+              LeadMaster Refresh
+            </button>
+          </div>
+          {dataMgmtTab === 'export' ? <AdministrationMasterDataExport /> : null}
+          {dataMgmtTab === 'master-data' ? <AdministrationDataSteward /> : null}
+          {dataMgmtTab === 'leadmaster-refresh' ? (
+            <AdministrationLeadmasterRefresh
+              allMyClients={allMyClients}
+              connectClientId={canConnect ? connectClientId : 0}
+              scopedClientId={scopedClientId}
+              availableClients={availableClients}
+              onScopedClientId={setScopedClientId}
+              clientName={scopedClientName}
+            />
+          ) : null}
+        </div>
       ) : null}
 
       {adminTab === 'email' ? (

@@ -73,6 +73,23 @@ describe('AuthProvider session check', () => {
     expect(await screen.findByText('CRM content')).toBeTruthy()
   })
 
+  it('preserves optional CRM when unenforced /me returns user null', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse(200, {
+          authenticated: false,
+          user: null,
+          csrf_token: '',
+          auth_available: true,
+          auth_enforced: false,
+        }),
+      ),
+    )
+    renderApp()
+    expect(await screen.findByText('CRM content')).toBeTruthy()
+  })
+
   it('retries /me from the fail-closed screen', async () => {
     const fetchMock = vi
       .fn()

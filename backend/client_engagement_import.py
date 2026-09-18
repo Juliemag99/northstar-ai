@@ -6,8 +6,11 @@ Never auto-creates companies/contacts unless user chooses Create New on a row.
 
 from __future__ import annotations
 
+from staff_context import resolve_staff_actor
+
 import hashlib
 import json
+import os
 import re
 import uuid
 from datetime import datetime, timezone
@@ -15,6 +18,26 @@ from pathlib import Path
 from typing import Any
 
 from access import get_default_user, get_user_by_id, user_can_access_client
+from client_engagement_appt_grid import (
+    already_imported_by_fingerprint,
+    already_imported_by_provenance,
+    appointment_grid_fingerprint,
+    build_delta_caller_notes,
+    classify_already_imported,
+    classify_appointment_narrative,
+    classify_event_type,
+    classify_field_vs_history,
+    compose_forecast_quoted_won_block,
+    corroborate_year_from_history,
+    is_footer_or_total_row,
+    match_company_for_appt_grid,
+    match_contact_for_appt_grid,
+    merge_sales_notes_with_fqw,
+    norm_text,
+    parse_datetime_text,
+    propose_row_action,
+    row_blocks_confirm,
+)
 from client_setup_data import user_can_edit_client_setup
 from db import DATABASE_DIR, get_connection
 from models import (
@@ -248,6 +271,7 @@ def ensure_engagement_import_schema(conn=None) -> None:
                 imported_by_user_id INTEGER,
                 imported_by_name TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT '',
+                location_id INTEGER,
                 FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE
             );
 
@@ -260,6 +284,9 @@ def ensure_engagement_import_schema(conn=None) -> None:
             CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_events_fingerprint
                 ON client_sales_events(client_id, source_row_fingerprint)
                 WHERE source_row_fingerprint <> '';
+            CREATE INDEX IF NOT EXISTS idx_client_sales_events_location_id
+                ON client_sales_events(location_id)
+                WHERE location_id IS NOT NULL;
             """
         )
         if owns:
@@ -280,10 +307,73 @@ def _require_edit(user_id: int, client_id: int) -> None:
         raise PermissionError("Not authorized to import for this client.")
 
 
+def _documents_root() -> Path:
+    """Keep Appointment Grid test uploads off the live client_documents tree."""
+    test_db = os.environ.get("NORTHSTAR_TEST_DB", "").strip()
+    if test_db:
+        return Path(test_db + ".docs")
+    return DOCUMENTS_ROOT
+
+
 def _client_dir(client_id: int) -> Path:
-    path = DOCUMENTS_ROOT / str(int(client_id))
+    path = _documents_root() / str(int(client_id))
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _document_file_sha256(conn, client_id: int, document_id: int | None) -> str:
+    if not document_id:
+        return ""
+    drow = conn.execute(
+        """
+        SELECT stored_filename FROM client_documents
+        WHERE id = ? AND client_id = ?
+        """,
+        (int(document_id), int(client_id)),
+    ).fetchone()
+    stored = _blank(drow["stored_filename"]) if drow else ""
+    if not stored:
+        return ""
+    path = _documents_root() / str(int(client_id)) / stored
+    if not path.is_file():
+        return ""
+    return hashlib.sha256(path.read_bytes()).hexdigest().lower()
+
+
+def _same_source_document_ids(
+    conn, client_id: int, document_id: int | None, document_sha256: str
+) -> set[int]:
+    """Document ids for this client that share identity with the current file.
+
+    Identity is document_id and/or immutable SHA-256 of stored bytes.
+    Never includes another client's documents.
+    """
+    ids: set[int] = set()
+    if document_id:
+        ids.add(int(document_id))
+    sha = _blank(document_sha256).lower()
+    if not sha:
+        return ids
+    rows = conn.execute(
+        """
+        SELECT DISTINCT source_document_id AS id
+        FROM client_sales_events
+        WHERE client_id = ? AND source_document_id IS NOT NULL
+        """,
+        (int(client_id),),
+    ).fetchall()
+    cache: dict[int, str] = {}
+    if document_id:
+        cache[int(document_id)] = sha
+    for row in rows:
+        did = int(row["id"])
+        if did in ids:
+            continue
+        if did not in cache:
+            cache[did] = _document_file_sha256(conn, client_id, did)
+        if cache[did] == sha:
+            ids.add(did)
+    return ids
 
 
 def _detect_sheet_type(sheet_name: str, headers: list[str], rows: list[list[str]]) -> str:
@@ -335,8 +425,15 @@ def _parse_workbook(path: Path) -> list[dict[str, Any]]:
                 raw_rows.pop()
             headers = raw_rows[0] if raw_rows else []
             data = raw_rows[1:] if len(raw_rows) > 1 else []
-            # drop empty data rows
-            data = [r for r in data if any(_blank(c) for c in r)]
+            # drop empty data rows and Appointment Grid footer/total rows
+            filtered: list[list[str]] = []
+            for r in data:
+                if not any(_blank(c) for c in r):
+                    continue
+                if is_footer_or_total_row(headers, r):
+                    continue
+                filtered.append(r)
+            data = filtered
             sheets.append(
                 {
                     "sheet_name": name,
@@ -374,84 +471,27 @@ def _split_city_state_zip(value: str) -> tuple[str, str, str]:
     return t, "", ""
 
 
-def _parse_datetime_text(text: str) -> dict[str, Any]:
-    raw = _blank(text)
-    out = {
-        "source_date_time_text": raw,
-        "event_date": "",
-        "event_time": "",
-        "timezone": "",
-        "meeting_type": "",
-        "datetime_needs_review": 0,
-    }
-    if not raw:
-        return out
-    low = raw.lower()
-    if re.search(r"\b(fyi|send e-?mail|send information)\b", low):
-        out["meeting_type"] = ""
-        out["datetime_needs_review"] = 0
-        return out
-    if "google meet" in low:
-        out["meeting_type"] = "Google Meet"
-    elif "microsoft teams" in low or "teams meeting" in low:
-        out["meeting_type"] = "Microsoft Teams"
-    elif "site visit" in low:
-        out["meeting_type"] = "Site Visit"
-    elif "phone" in low:
-        out["meeting_type"] = "Phone"
-    tz = re.search(r"\b(CDT|CST|EDT|EST|MDT|MST|PDT|PST)\b", raw, re.I)
-    if tz:
-        out["timezone"] = tz.group(1).upper()
-    # e.g. Friday, April 17th at 10:00AM CDT  (year optional / often missing)
-    m = re.search(
-        r"(?i)(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})(?:st|nd|rd|th)?(?:[,\s]+(\d{4}))?\s+at\s+(\d{1,2}:\d{2}\s*[AP]M)",
-        raw,
-    )
-    if m:
-        month, day, year, tim = m.group(1), m.group(2), m.group(3), m.group(4)
-        # Workbook notes use 2026 dates in caller notes; default year 2026 if absent
-        year = year or "2026"
-        try:
-            dt = datetime.strptime(f"{month} {day} {year} {tim.upper().replace(' ', '')}", "%B %d %Y %I:%M%p")
-            out["event_date"] = dt.strftime("%Y-%m-%d")
-            out["event_time"] = dt.strftime("%H:%M")
-        except ValueError:
-            out["datetime_needs_review"] = 1
-    else:
-        # If looks like a schedule sentence but unparsed
-        if re.search(r"(?i)(monday|tuesday|wednesday|thursday|friday|saturday|sunday|at\s+\d)", raw):
-            out["datetime_needs_review"] = 1
-    return out
+def _parse_datetime_text(
+    text: str, *, corroborated_year: int | None = None
+) -> dict[str, Any]:
+    """Delegate to Phase 3A safe parser (no invented year)."""
+    return parse_datetime_text(text, corroborated_year=corroborated_year)
 
 
 def _classify_event(sheet_type: str, date_time_text: str) -> str:
     st = _blank(sheet_type)
-    text = _blank(date_time_text)
-    low = text.lower()
-    if st in {"Send Information", "Engagement"}:
-        return "Send Information"
     if st == "Quote":
         return "Quote"
     if st == "Purchase Order":
         return "Purchase Order"
     if st == "WebLead":
         return "WebLead"
-    if st == "Appointments":
-        if re.search(r"(?i)^\s*rfq\s*$", text) or re.search(r"(?i)\brfq\b", text) and len(text) <= 12:
-            return "RFQ"
-        if re.search(r"(?i)\breschedul", text):
-            return "Appointment Rescheduled"
-        if re.search(r"(?i)completed|held|met with", text):
-            return "Appointment Completed"
-        if text:
-            return "Appointment Scheduled"
-        return "Other"
-    if re.search(r"(?i)\bfyi\b|send e-?mail", low):
-        return "Send Information"
-    return "Other"
+    return classify_event_type(sheet_type, date_time_text)
 
 
 def _fingerprint(parts: dict[str, str]) -> str:
+    """Legacy helper retained for non-grid callers; Appointment Grid uses
+    appointment_grid_fingerprint() instead."""
     payload = "|".join(
         [
             _norm_name(parts.get("client", "")),
@@ -520,100 +560,11 @@ def _normalize_outcome(value: str) -> str:
 def _match_company(
     conn, client_id: int, record_no: str, company_name: str, phone: str, address: str, city: str
 ) -> tuple[str, int | None, int | None, str, str]:
-    """Return status, company_id, relationship_id, display_name, record_no."""
-    rn = _blank(record_no)
-    if rn:
-        row = conn.execute(
-            """
-            SELECT ccr.id AS relationship_id, c.id AS company_id, c.company_name, ccr.external_record_no
-            FROM client_company_relationships ccr
-            JOIN companies c ON c.id = ccr.company_id
-            WHERE ccr.client_id = ? AND trim(ccr.external_record_no) = ?
-            LIMIT 1
-            """,
-            (client_id, rn),
-        ).fetchone()
-        if row:
-            return (
-                "MATCHED",
-                int(row["company_id"]),
-                int(row["relationship_id"]),
-                _blank(row["company_name"]),
-                _blank(row["external_record_no"]),
-            )
-        # Record exists on another client or master only → CONFLICT / POSSIBLE
-        other = conn.execute(
-            """
-            SELECT ccr.client_id, c.id AS company_id, c.company_name, ccr.external_record_no, ccr.id AS relationship_id
-            FROM client_company_relationships ccr
-            JOIN companies c ON c.id = ccr.company_id
-            WHERE trim(ccr.external_record_no) = ?
-            LIMIT 1
-            """,
-            (rn,),
-        ).fetchone()
-        if other:
-            return (
-                "CONFLICT",
-                int(other["company_id"]),
-                None,
-                _blank(other["company_name"]),
-                _blank(other["external_record_no"]),
-            )
-        master = conn.execute(
-            "SELECT id, company_name, external_record_no FROM companies WHERE trim(external_record_no)=? LIMIT 1",
-            (rn,),
-        ).fetchone()
-        if master:
-            return (
-                "POSSIBLE MATCH",
-                int(master["id"]),
-                None,
-                _blank(master["company_name"]),
-                _blank(master["external_record_no"]),
-            )
-
-    norm = _norm_name(company_name)
-    if not norm:
-        return "NEW", None, None, company_name, rn
-
-    rows = conn.execute(
-        """
-        SELECT ccr.id AS relationship_id, c.id AS company_id, c.company_name, ccr.external_record_no,
-               c.address, c.city, c.state, c.website
-        FROM client_company_relationships ccr
-        JOIN companies c ON c.id = ccr.company_id
-        WHERE ccr.client_id = ?
-        """,
-        (client_id,),
-    ).fetchall()
-    exact = []
-    partial = []
-    for r in rows:
-        cn = _norm_name(r["company_name"])
-        if cn == norm:
-            exact.append(r)
-        elif norm and (norm in cn or cn in norm):
-            partial.append(r)
-    if len(exact) == 1:
-        r = exact[0]
-        return (
-            "MATCHED",
-            int(r["company_id"]),
-            int(r["relationship_id"]),
-            _blank(r["company_name"]),
-            _blank(r["external_record_no"]),
-        )
-    if exact or partial:
-        r = (exact or partial)[0]
-        return (
-            "POSSIBLE MATCH",
-            int(r["company_id"]),
-            int(r["relationship_id"]),
-            _blank(r["company_name"]),
-            _blank(r["external_record_no"]),
-        )
-    return "NEW", None, None, company_name, rn
+    """Appointment-grid-safe company match (foreign RN ignored; never overwrite RN)."""
+    status, company_id, rel_id, name, brown_rn, _flags = match_company_for_appt_grid(
+        conn, client_id, record_no, company_name
+    )
+    return status, company_id, rel_id, name, brown_rn
 
 
 def _match_contact(
@@ -624,72 +575,51 @@ def _match_contact(
     phone: str,
     title: str,
 ) -> tuple[str, int | None, str]:
-    if company_id is None:
-        return "NEW", None, contact_name
-    em = _blank(email).lower()
-    if em:
-        row = conn.execute(
-            """
-            SELECT id, first_name, last_name FROM contacts
-            WHERE company_id = ? AND lower(trim(email)) = ?
-            LIMIT 1
-            """,
-            (company_id, em),
-        ).fetchone()
-        if row:
-            return (
-                "MATCHED",
-                int(row["id"]),
-                f"{_blank(row['first_name'])} {_blank(row['last_name'])}".strip(),
-            )
-    ph = _digits(phone)
-    if len(ph) >= 7:
-        for r in conn.execute(
-            "SELECT id, first_name, last_name, phone, alt_phone FROM contacts WHERE company_id = ?",
-            (company_id,),
-        ).fetchall():
-            for field in ("phone", "alt_phone"):
-                digits = _digits(r[field])
-                if digits and (digits.endswith(ph[-7:]) or ph.endswith(digits[-7:])):
-                    return (
-                        "MATCHED",
-                        int(r["id"]),
-                        f"{_blank(r['first_name'])} {_blank(r['last_name'])}".strip(),
-                    )
-    norm = _norm_name(contact_name)
-    possibles = []
-    if norm:
-        for r in conn.execute(
-            "SELECT id, first_name, last_name, title FROM contacts WHERE company_id = ?",
-            (company_id,),
-        ).fetchall():
-            full = _norm_name(f"{r['first_name']} {r['last_name']}")
-            if full == norm:
-                return (
-                    "MATCHED",
-                    int(r["id"]),
-                    f"{_blank(r['first_name'])} {_blank(r['last_name'])}".strip(),
-                )
-            if full and (norm in full or full in norm):
-                possibles.append(r)
-            elif title and _norm_name(title) and _norm_name(title) == _norm_name(r["title"]):
-                if norm.split() and norm.split()[0] in full:
-                    possibles.append(r)
-    if len(possibles) == 1:
-        r = possibles[0]
-        return (
-            "POSSIBLE MATCH",
-            int(r["id"]),
-            f"{_blank(r['first_name'])} {_blank(r['last_name'])}".strip(),
-        )
-    if possibles:
-        r = possibles[0]
-        return (
-            "POSSIBLE MATCH",
-            int(r["id"]),
-            f"{_blank(r['first_name'])} {_blank(r['last_name'])}".strip(),
-        )
-    return "NEW", None, contact_name
+    status, contact_id, display, _cands, _note = match_contact_for_appt_grid(
+        conn, company_id, email, contact_name, phone, title
+    )
+    return status, contact_id, display
+
+
+def _load_company_history_notes(conn, client_id: int, company_id: int | None) -> list[dict[str, Any]]:
+    if not company_id:
+        return []
+    rows = conn.execute(
+        """
+        SELECT h.id, h.event_at, h.event_type, h.note_text
+        FROM company_shared_history_events h
+        JOIN client_company_relationships ccr ON ccr.company_id = h.company_id
+        WHERE ccr.client_id = ? AND h.company_id = ?
+        """,
+        (client_id, int(company_id)),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _header_value(raw: dict[str, Any], *names: str) -> str:
+    for n in names:
+        for k, v in raw.items():
+            if _blank(k).lower().rstrip() == n.lower():
+                return _blank(v)
+    return ""
+
+
+def _corroborated_year_from_mapped(mapped: dict[str, str]) -> int | None:
+    """Optional deterministic year from mapped review resolution only.
+
+    Accepts mapped['_corroborated_year'] when an upstream review process set it.
+    Does not invent years from clock or defaults.
+    """
+    raw = mapped.get("_corroborated_year") or mapped.get("corroborated_year") or ""
+    if not _blank(raw):
+        return None
+    try:
+        y = int(str(raw).strip())
+    except ValueError:
+        return None
+    if 1990 <= y <= 2100:
+        return y
+    return None
 
 
 def _client_name(conn, client_id: int) -> str:
@@ -704,7 +634,7 @@ def start_engagement_import(
     content: bytes,
     user_id: int | None = None,
 ) -> EngagementImportBatchView:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -826,7 +756,7 @@ def start_engagement_import(
 def get_engagement_import_batch(
     client_id: int, batch_id: int, *, user_id: int | None = None
 ) -> EngagementImportBatchView:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)
@@ -880,7 +810,7 @@ def update_sheet_classifications(
     *,
     user_id: int | None = None,
 ) -> EngagementImportBatchView:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -922,7 +852,7 @@ def map_engagement_import(
     user_id: int | None = None,
 ) -> EngagementImportPreview:
     """Map columns, match companies/contacts, classify events — preview only."""
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -963,6 +893,12 @@ def map_engagement_import(
             (batch_id, client_id),
         ).fetchall()
 
+        batch_document_id = int(b["document_id"]) if b["document_id"] else None
+        doc_sha = _document_file_sha256(conn, client_id, batch_document_id)
+        same_document_ids = _same_source_document_ids(
+            conn, client_id, batch_document_id, doc_sha
+        )
+
         preview_rows: list[EngagementImportRowView] = []
         for r in rows:
             sh = sheet_map.get(int(r["sheet_id"]))
@@ -989,28 +925,24 @@ def map_engagement_import(
                 mapping = json.loads(sh["column_mapping_json"] or "{}")
             except Exception:
                 mapping = {}
-            mapped: dict[str, str] = {}
+            mapped: dict[str, Any] = {}
             for target, header in mapping.items():
                 mapped[target] = _blank(raw.get(header, ""))
+            # Unmapped Forecast / QUOTED / WON (header trailing-space tolerant)
+            forecast = _header_value(raw, "Forecast")
+            quoted_label = _header_value(raw, "QUOTED", "Quoted")
+            won_val = _header_value(raw, "WON", "Won")
+            mapped["forecast"] = forecast
+            mapped["quoted_label"] = quoted_label
+            mapped["won"] = won_val
 
-            dt = _parse_datetime_text(mapped.get("appointment_date_time", ""))
-            event_type = _classify_event(sheet_type, mapped.get("appointment_date_time", ""))
-            client_val = mapped.get("northstar_client", "")
-            if client_val and _norm_client(client_val) != _norm_client(expected_client):
-                client_validation = "MISMATCH"
-            else:
-                client_validation = "OK"
-
-            c_status, company_id, rel_id, c_name, c_rn = _match_company(
+            c_status, company_id, rel_id, c_name, c_rn, co_flags = match_company_for_appt_grid(
                 conn,
                 client_id,
                 mapped.get("external_record_no", ""),
                 mapped.get("company", ""),
-                mapped.get("phone", ""),
-                mapped.get("address", ""),
-                mapped.get("city_state_zip", ""),
             )
-            t_status, contact_id, t_name = _match_contact(
+            t_status, contact_id, t_name, _cands, contact_note = match_contact_for_appt_grid(
                 conn,
                 company_id,
                 mapped.get("email", ""),
@@ -1018,55 +950,185 @@ def map_engagement_import(
                 mapped.get("phone", ""),
                 mapped.get("title", ""),
             )
+            hist = _load_company_history_notes(conn, client_id, company_id)
+            # Deterministic year resolution: mapped override OR unique history/caller corroboration
+            corroborated_year = _corroborated_year_from_mapped(mapped)
+            year_evidence = ""
+            if corroborated_year is None:
+                corroborated_year, year_evidence = corroborate_year_from_history(
+                    appointment_date_time=mapped.get("appointment_date_time", ""),
+                    caller_notes=mapped.get("caller_notes", ""),
+                    history_events=hist,
+                )
+            else:
+                year_evidence = "mapped_review_resolution"
+            if corroborated_year is not None:
+                mapped["_corroborated_year"] = str(corroborated_year)
+                mapped["_year_evidence"] = year_evidence
+            dt = _parse_datetime_text(
+                mapped.get("appointment_date_time", ""),
+                corroborated_year=corroborated_year,
+            )
+            event_type = _classify_event(sheet_type, mapped.get("appointment_date_time", ""))
+            client_val = mapped.get("northstar_client", "")
+            if client_val and _norm_client(client_val) != _norm_client(expected_client):
+                client_validation = "MISMATCH"
+            else:
+                client_validation = "OK"
+
             rev_uid, rev_review = _match_rev_spec(conn, mapped.get("revenue_specialist", ""))
             amount, src_amt, quote_sig = _parse_money(mapped.get("dollars_quoted", ""))
             outcome_n = _normalize_outcome(mapped.get("outcome", ""))
-            thread_key = f"{client_id}:{_blank(mapped.get('external_record_no')) or _norm_name(mapped.get('company',''))}:{_norm_name(mapped.get('contact',''))}"
-            fp = _fingerprint(
-                {
-                    "client": expected_client,
-                    "sheet": _blank(sh["sheet_name"]),
-                    "record_no": mapped.get("external_record_no", ""),
-                    "contact": mapped.get("contact", ""),
-                    "email": mapped.get("email", ""),
-                    "datetime": mapped.get("appointment_date_time", ""),
-                    "caller_notes": mapped.get("caller_notes", ""),
-                    "sales_notes": mapped.get("sales_notes", ""),
-                    "event_type": event_type,
-                }
-            )
-            dup = ""
-            existing = conn.execute(
-                """
-                SELECT id FROM client_sales_events
-                WHERE client_id = ? AND source_row_fingerprint = ?
-                LIMIT 1
-                """,
-                (client_id, fp),
-            ).fetchone()
-            if existing:
-                dup = "DUPLICATE — ALREADY IMPORTED"
 
-            flags: list[str] = []
+            hist_blob = norm_text("\n".join(_blank(h.get("note_text")) for h in hist))
+            narr_class, narr_why = classify_appointment_narrative(
+                event_type=event_type,
+                contact_name=mapped.get("contact", ""),
+                caller_notes=mapped.get("caller_notes", ""),
+                appointment_date_time=mapped.get("appointment_date_time", ""),
+                resolved_date=dt.get("event_date") or "",
+                history_events=hist,
+            )
+            field_classes = {
+                "appointment_narrative": narr_class,
+                "appointment_date_time": (
+                    "AMBIGUOUS"
+                    if dt.get("datetime_needs_review")
+                    and event_type.startswith("Appointment")
+                    else classify_field_vs_history(
+                        dt.get("event_date") or mapped.get("appointment_date_time", ""),
+                        hist_blob,
+                    )
+                ),
+                "appointment_grade": classify_field_vs_history(
+                    mapped.get("appointment_grade", ""), hist_blob
+                ),
+                "caller_notes": classify_field_vs_history(
+                    mapped.get("caller_notes", ""), hist_blob
+                ),
+                "sales_notes": classify_field_vs_history(
+                    mapped.get("sales_notes", ""), hist_blob
+                ),
+                "dollars_quoted": classify_field_vs_history(
+                    mapped.get("dollars_quoted", ""), hist_blob
+                ),
+                "outcome": classify_field_vs_history(mapped.get("outcome", ""), hist_blob),
+                "forecast": classify_field_vs_history(forecast, hist_blob),
+                "quoted_label": classify_field_vs_history(quoted_label, hist_blob),
+                "won": classify_field_vs_history(won_val, hist_blob),
+                "revenue_specialist": classify_field_vs_history(
+                    mapped.get("revenue_specialist", ""), hist_blob
+                ),
+            }
+            proposed_action, action_reason = propose_row_action(
+                field_classes,
+                company_status=c_status,
+                contact_status=t_status,
+                datetime_needs_review=bool(dt.get("datetime_needs_review")),
+                event_type=event_type,
+            )
+            fqw_block = compose_forecast_quoted_won_block(
+                forecast=forecast, quoted=quoted_label, won=won_val
+            )
+            composed_sales = merge_sales_notes_with_fqw(
+                mapped.get("sales_notes", ""), fqw_block
+            )
+            caller_for_event = build_delta_caller_notes(
+                narrative_class=narr_class,
+                caller_notes=mapped.get("caller_notes", ""),
+            )
+            mapped["_field_classes"] = json.dumps(field_classes, ensure_ascii=False)
+            mapped["_proposed_action"] = proposed_action
+            mapped["_action_reason"] = action_reason
+            mapped["_composed_sales_notes"] = composed_sales
+            mapped["_caller_notes_for_event"] = caller_for_event
+            mapped["_narrative_why"] = narr_why
+
+            thread_key = (
+                f"{client_id}:"
+                f"{_blank(c_rn) or _blank(mapped.get('external_record_no')) or _norm_name(mapped.get('company',''))}:"
+                f"{_norm_name(mapped.get('contact',''))}"
+            )
+            fp = appointment_grid_fingerprint(
+                client_id=client_id,
+                source_document_sha256=doc_sha,
+                source_sheet=_blank(sh["sheet_name"]),
+                source_row=int(r["source_row_number"] or 0),
+                source_rn=mapped.get("external_record_no", ""),
+                company_name=mapped.get("company", ""),
+                contact_name=mapped.get("contact", ""),
+                email=mapped.get("email", ""),
+                event_type=event_type,
+                event_date=dt.get("event_date") or "",
+                source_datetime_text=mapped.get("appointment_date_time", ""),
+                grade=mapped.get("appointment_grade", ""),
+                dollars_quoted=str(mapped.get("dollars_quoted", "")),
+                outcome=mapped.get("outcome", ""),
+                forecast=forecast,
+                quoted_label=quoted_label,
+                won=won_val,
+            )
+            fp_event_id = already_imported_by_fingerprint(conn, client_id, fp)
+            prov_event_id = already_imported_by_provenance(
+                conn,
+                client_id=client_id,
+                source_sheet=_blank(sh["sheet_name"]),
+                source_row=int(r["source_row_number"] or 0),
+                same_document_ids=same_document_ids,
+            )
+            dup, dup_kind, dup_event_id = classify_already_imported(
+                fingerprint_event_id=fp_event_id,
+                provenance_event_id=prov_event_id,
+            )
+            mapped["_duplicate_kind"] = dup_kind
+            if dup_event_id:
+                mapped["_already_imported_event_id"] = str(dup_event_id)
+
+            flags: list[str] = list(co_flags)
+            if contact_note and t_status == "REVIEW":
+                flags.append(contact_note)
             if client_validation == "MISMATCH":
                 flags.append("Client mismatch")
             if dt["datetime_needs_review"]:
                 flags.append("Date/Time Needs Review")
             if rev_review:
                 flags.append("Rev Spec Needs Review")
-            if c_status in {"POSSIBLE MATCH", "CONFLICT", "NEW"}:
+            if c_status in {"POSSIBLE MATCH", "CONFLICT", "NEW", "REVIEW"}:
                 flags.append(f"Company {c_status}")
-            if t_status in {"POSSIBLE MATCH", "NEW"}:
+            if t_status in {"POSSIBLE MATCH", "NEW", "REVIEW"}:
                 flags.append(f"Contact {t_status}")
             if quote_sig:
                 flags.append("Potential Quote Signal")
+            if proposed_action:
+                flags.append(f"Plan:{proposed_action}")
             if dup:
                 flags.append(dup)
 
+            import_status = "duplicate" if dup else (
+                "skipped" if proposed_action in {"SKIP", "SKIP_FULL_DUPLICATE"} else "previewed"
+            )
+            blocks = row_blocks_confirm(
+                proposed_action=proposed_action,
+                company_status=c_status,
+                contact_status=t_status,
+                datetime_needs_review=bool(dt.get("datetime_needs_review")),
+                event_type=event_type,
+                client_validation=client_validation,
+                import_status=import_status,
+            )
             selected = 1
-            if client_validation == "MISMATCH" or dup or sheet_type == "Ignore":
+            if (
+                client_validation == "MISMATCH"
+                or dup
+                or sheet_type == "Ignore"
+                or proposed_action in {"SKIP", "SKIP_FULL_DUPLICATE"}
+            ):
                 selected = 0
-            needs_review = 1 if flags and not dup else 0
+            if blocks:
+                selected = 0
+            # Already-imported rows never block a rerun. Informational flags stay
+            # on the row for diagnostics.
+            needs_review = 0 if dup else (1 if blocks else 0)
 
             conn.execute(
                 """
@@ -1099,7 +1161,8 @@ def map_engagement_import(
                     company_id,
                     rel_id,
                     c_name or mapped.get("company", ""),
-                    c_rn or mapped.get("external_record_no", ""),
+                    # Always Brown RN when matched — never write grid RN over Brown identity
+                    c_rn,
                     t_status,
                     contact_id,
                     t_name or mapped.get("contact", ""),
@@ -1116,7 +1179,7 @@ def map_engagement_import(
                     thread_key,
                     fp,
                     dup,
-                    "duplicate" if dup else "previewed",
+                    import_status,
                     selected,
                     needs_review,
                     json.dumps(flags),
@@ -1222,7 +1285,7 @@ def get_engagement_import_preview(
     user_id: int | None = None,
     filter_status: str | None = None,
 ) -> EngagementImportPreview:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)
@@ -1278,13 +1341,15 @@ def confirm_engagement_import(
     *,
     user_id: int | None = None,
 ) -> EngagementImportBatchView:
-    """Write selected non-duplicate rows into client_sales_events only.
+    """Write selected non-duplicate rows into client_sales_events, then project
+    company-level Quote milestones from structured quote evidence.
 
     Does NOT create companies/contacts unless body.create_new_ids explicitly lists rows
     (Phase 3 default: empty — skip NEW company/contact creation).
     Does NOT change statuses or overwrite legacy notes.
+    Does NOT invent Purchase Order milestones from Won/PO narrative.
     """
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_edit(user.id, client_id)
@@ -1304,6 +1369,12 @@ def confirm_engagement_import(
         if _blank(b["status"]) == "imported":
             return get_engagement_import_batch(client_id, batch_id, user_id=user.id)
 
+        batch_document_id = int(b["document_id"]) if b["document_id"] else None
+        doc_sha = _document_file_sha256(conn, client_id, batch_document_id)
+        same_document_ids = _same_source_document_ids(
+            conn, client_id, batch_document_id, doc_sha
+        )
+
         selected_ids = set(int(x) for x in (body.row_ids or []))
         create_new = set(int(x) for x in (body.create_new_ids or []))
         rows = conn.execute(
@@ -1315,6 +1386,50 @@ def confirm_engagement_import(
             (batch_id, client_id),
         ).fetchall()
 
+        # REVIEW gate: never silently drop unresolved critical rows
+        blocking: list[int] = []
+        for r in rows:
+            d = dict(r)
+            if _blank(d.get("sheet_type")) == "Ignore":
+                continue
+            if _blank(d.get("import_status")) in {"ignored", "skipped", "duplicate"}:
+                continue
+            if _blank(d.get("duplicate_status")):
+                continue
+            try:
+                mapped_chk = json.loads(d.get("mapped_json") or "{}")
+            except Exception:
+                mapped_chk = {}
+            action = _blank(mapped_chk.get("_proposed_action"))
+            if action in {"SKIP", "SKIP_FULL_DUPLICATE"}:
+                continue
+            if row_blocks_confirm(
+                proposed_action=action
+                or ("REVIEW" if int(d.get("needs_review") or 0) else "CREATE_STRUCTURED_EVENT"),
+                company_status=_blank(d.get("company_match_status")),
+                contact_status=_blank(d.get("contact_match_status")),
+                datetime_needs_review=bool(d.get("datetime_needs_review")),
+                event_type=_blank(d.get("event_type")),
+                import_status=_blank(d.get("import_status")),
+                client_validation=_blank(d.get("client_validation")),
+            ) or int(d.get("needs_review") or 0):
+                blocking.append(int(d["id"]))
+        if blocking:
+            raise ValueError(
+                f"Cannot confirm engagement import: {len(blocking)} row(s) require REVIEW "
+                f"(ids={blocking[:20]}{'…' if len(blocking) > 20 else ''}). "
+                "Resolve company/contact/date issues or mark those rows skipped first."
+            )
+
+        # Snapshot relationship RNs — confirm must never overwrite external_record_no
+        rn_before = {
+            int(x["id"]): _blank(x["external_record_no"])
+            for x in conn.execute(
+                "SELECT id, external_record_no FROM client_company_relationships WHERE client_id = ?",
+                (client_id,),
+            ).fetchall()
+        }
+
         imported = 0
         for r in rows:
             d = dict(r)
@@ -1323,6 +1438,8 @@ def confirm_engagement_import(
             if _blank(d.get("duplicate_status")):
                 continue
             if _blank(d.get("client_validation")) == "MISMATCH":
+                continue
+            if _blank(d.get("import_status")) in {"skipped", "ignored"}:
                 continue
             rid = int(d["id"])
             if selected_ids and rid not in selected_ids:
@@ -1336,23 +1453,34 @@ def confirm_engagement_import(
                 # Still allow event with null contact if company matched
                 if d.get("company_match_status") != "MATCHED":
                     continue
+            if d.get("company_match_status") not in {"MATCHED"} and rid not in create_new:
+                continue
 
             fp = _blank(d.get("source_row_fingerprint"))
-            if fp:
-                exists = conn.execute(
-                    """
-                    SELECT id FROM client_sales_events
-                    WHERE client_id = ? AND source_row_fingerprint = ?
-                    """,
-                    (client_id, fp),
-                ).fetchone()
-                if exists:
-                    continue
+            fp_event_id = already_imported_by_fingerprint(conn, client_id, fp)
+            prov_event_id = already_imported_by_provenance(
+                conn,
+                client_id=client_id,
+                source_sheet=_blank(d.get("sheet_name")),
+                source_row=int(d.get("source_row_number") or 0),
+                same_document_ids=same_document_ids,
+            )
+            if fp_event_id or prov_event_id:
+                continue
 
             try:
                 mapped = json.loads(d.get("mapped_json") or "{}")
             except Exception:
                 mapped = {}
+
+            sales_notes = _blank(mapped.get("_composed_sales_notes")) or _blank(
+                mapped.get("sales_notes")
+            )
+            caller_notes = (
+                mapped.get("_caller_notes_for_event")
+                if "_caller_notes_for_event" in mapped
+                else mapped.get("caller_notes")
+            )
 
             cur = conn.execute(
                 """
@@ -1402,8 +1530,8 @@ def confirm_engagement_import(
                     _blank(mapped.get("email")),
                     _blank(mapped.get("address")),
                     _blank(mapped.get("city_state_zip")),
-                    _blank(mapped.get("caller_notes")),
-                    _blank(mapped.get("sales_notes")),
+                    _blank(caller_notes),
+                    _blank(sales_notes),
                     _blank(d.get("source_appointment_grade")),
                     _blank(d.get("source_rev_spec_text")),
                     d.get("rev_spec_user_id"),
@@ -1417,7 +1545,7 @@ def confirm_engagement_import(
                     _blank(d.get("sheet_name")),
                     int(d.get("source_row_number") or 0),
                     _blank(b["filename"]),
-                    _blank(mapped.get("external_record_no")) or _blank(d.get("company_record_no")),
+                    _blank(d.get("company_record_no")) or _blank(mapped.get("external_record_no")),
                     fp,
                     now,
                     user.id,
@@ -1470,6 +1598,30 @@ def confirm_engagement_import(
             """,
             (now, user_name, f"Imported {imported} events", batch_id, client_id),
         )
+        rn_after = {
+            int(x["id"]): _blank(x["external_record_no"])
+            for x in conn.execute(
+                "SELECT id, external_record_no FROM client_company_relationships WHERE client_id = ?",
+                (client_id,),
+            ).fetchall()
+        }
+        if rn_before != rn_after:
+            raise RuntimeError(
+                "Safety abort: engagement confirm attempted to change "
+                "client_company_relationships.external_record_no"
+            )
+
+        # Project company-level Quote milestones from structured quote evidence.
+        # Does not change relationship status; does not invent Purchase Orders.
+        from engagement_quote_milestones import project_quote_milestones_for_batch
+
+        project_quote_milestones_for_batch(
+            conn,
+            client_id,
+            batch_id,
+            created_by=user_name or "engagement_import",
+        )
+
         conn.commit()
     return get_engagement_import_batch(client_id, batch_id, user_id=user.id)
 
@@ -1490,7 +1642,7 @@ def list_sales_events(
     contact_name: str | None = None,
     limit: int = 200,
 ) -> list[SalesEventView]:
-    user = get_user_by_id(user_id) if user_id is not None else get_default_user()
+    user = resolve_staff_actor(user_id)
     if user is None:
         raise PermissionError("User not found.")
     _require_access(user.id, client_id)
