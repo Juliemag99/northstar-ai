@@ -19,6 +19,7 @@ import AdministrationClientDataImport from './AdministrationClientDataImport'
 import AdministrationMasterDataExport from './AdministrationMasterDataExport'
 import AdministrationLeadmasterRefresh from './AdministrationLeadmasterRefresh'
 import AdministrationDataSteward from './AdministrationDataSteward'
+import AdministrationResearchImport from './AdministrationResearchImport'
 
 type AssignedClient = {
   client_id: number
@@ -85,7 +86,7 @@ export default function Administration({
   )
   const loadGen = useRef(0)
   const [adminTab, setAdminTab] = useState<
-    'email' | 'import' | 'client-data-import' | 'data-management'
+    'email' | 'import' | 'client-data-import' | 'research-import' | 'data-management'
   >('email')
   const [dataMgmtTab, setDataMgmtTab] = useState<'export' | 'leadmaster-refresh' | 'master-data'>('export')
 
@@ -270,6 +271,19 @@ export default function Administration({
         <button
           type="button"
           role="tab"
+          aria-selected={adminTab === 'research-import'}
+          className={
+            adminTab === 'research-import'
+              ? 'setup-campaign-tab setup-campaign-tab--active'
+              : 'setup-campaign-tab'
+          }
+          onClick={() => setAdminTab('research-import')}
+        >
+          Research & Custom Prospect Import
+        </button>
+        <button
+          type="button"
+          role="tab"
           aria-selected={adminTab === 'data-management'}
           className={
             adminTab === 'data-management'
@@ -295,6 +309,17 @@ export default function Administration({
 
       {adminTab === 'client-data-import' ? (
         <AdministrationClientDataImport
+          allMyClients={allMyClients}
+          connectClientId={canConnect ? connectClientId : 0}
+          scopedClientId={scopedClientId}
+          availableClients={availableClients}
+          onScopedClientId={setScopedClientId}
+          clientName={scopedClientName}
+        />
+      ) : null}
+
+      {adminTab === 'research-import' ? (
+        <AdministrationResearchImport
           allMyClients={allMyClients}
           connectClientId={canConnect ? connectClientId : 0}
           scopedClientId={scopedClientId}

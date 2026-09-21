@@ -355,6 +355,16 @@ from crm_identity_keys import IdentityKeysNotReady
 from crm_import_confirm import confirm_admin_crm_import_batch
 from crm_import_status_resolution import save_crm_import_status_resolution
 from crm_import_match_resolution import save_crm_import_match_resolution_http
+from research_import import confirm_research_import, dry_run_research_import
+from research_import_plan import CLIENT_MISSING, CLIENT_REQUIRED as RESEARCH_CLIENT_REQUIRED
+from research_import_staging import (
+    BatchNotReusable as ResearchBatchNotReusable,
+    save_contact_resolution as save_research_contact_resolution,
+    save_mapping as save_research_import_mapping,
+    save_master_resolution as save_research_master_resolution,
+    save_match_resolution as save_research_match_resolution,
+    upload_research_import,
+)
 from leadmaster_refresh_http import (
     confirm_refresh,
     preview_refresh,
@@ -3402,6 +3412,193 @@ def confirm_admin_crm_import_api(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Unexpected failure.") from exc
+
+
+@app.post("/api/clients/{client_id}/admin/research-imports")
+async def upload_admin_research_import_api(
+    client_id: int,
+    request: Request,
+    file: UploadFile = File(...),
+    worksheet: str = Form(default=""),
+    research_method: str = Form(default=""),
+    research_date: str = Form(default=""),
+    batch_name: str = Form(default=""),
+    source_type: str = Form(default="CHATGPT_DEEP_RESEARCH"),
+    source_label: str = Form(default=""),
+    source_supplied_by: str = Form(default=""),
+):
+    actor = _require_admin_client(request, client_id)
+    content = await file.read(MAX_FILE_BYTES + 1)
+    if len(content) > MAX_FILE_BYTES:
+        raise HTTPException(status_code=400, detail="This file is too large to upload.")
+    try:
+        return upload_research_import(
+            client_id=client_id,
+            actor=actor,
+            filename=file.filename or "upload.csv",
+            content=content,
+            worksheet=worksheet or "",
+            research_method=research_method or "",
+            research_date=research_date or "",
+            batch_name=batch_name or "",
+            source_type=source_type or "",
+            source_label=source_label or "",
+            source_supplied_by=source_supplied_by or "",
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/clients/{client_id}/admin/research-imports/{batch_id}/mapping")
+def save_admin_research_import_mapping_api(
+    client_id: int,
+    batch_id: int,
+    body: dict,
+    request: Request,
+):
+    actor = _require_admin_client(request, client_id)
+    try:
+        return save_research_import_mapping(
+            client_id,
+            batch_id,
+            actor=actor,
+            mapping=body.get("mapping") or {},
+            research_method=str(body.get("research_method") or ""),
+            research_date=str(body.get("research_date") or ""),
+            batch_name=str(body.get("batch_name") or ""),
+            source_type=str(body.get("source_type") or ""),
+            source_label=str(body.get("source_label") or ""),
+            source_supplied_by=str(body.get("source_supplied_by") or ""),
+            mapping_template_id=(int(body["mapping_template_id"]) if body.get("mapping_template_id") else None),
+            save_as_template=str(body.get("save_as_template") or ""),
+        )
+    except ResearchBatchNotReusable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/clients/{client_id}/admin/research-imports/{batch_id}/match-resolution")
+def save_admin_research_match_resolution_api(
+    client_id: int,
+    batch_id: int,
+    body: dict,
+    request: Request,
+):
+    actor = _require_admin_client(request, client_id)
+    try:
+        return save_research_match_resolution(
+            client_id,
+            batch_id,
+            actor=actor,
+            staged_row_id=int(body.get("staged_row_id") or 0),
+            resolution_type=str(body.get("resolution_type") or ""),
+            company_id=(int(body["company_id"]) if body.get("company_id") else None),
+        )
+    except ResearchBatchNotReusable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/clients/{client_id}/admin/research-imports/{batch_id}/master-resolution")
+def save_admin_research_master_resolution_api(
+    client_id: int,
+    batch_id: int,
+    body: dict,
+    request: Request,
+):
+    actor = _require_admin_client(request, client_id)
+    try:
+        return save_research_master_resolution(
+            client_id,
+            batch_id,
+            actor=actor,
+            staged_row_id=int(body.get("staged_row_id") or 0),
+            field=str(body.get("field") or ""),
+            resolution_type=str(body.get("resolution_type") or ""),
+        )
+    except ResearchBatchNotReusable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/clients/{client_id}/admin/research-imports/{batch_id}/contact-resolution")
+def save_admin_research_contact_resolution_api(
+    client_id: int,
+    batch_id: int,
+    body: dict,
+    request: Request,
+):
+    actor = _require_admin_client(request, client_id)
+    try:
+        return save_research_contact_resolution(
+            client_id,
+            batch_id,
+            actor=actor,
+            staged_row_id=int(body.get("staged_row_id") or 0),
+            resolution_type=str(body.get("resolution_type") or ""),
+            contact_id=(int(body["contact_id"]) if body.get("contact_id") else None),
+        )
+    except ResearchBatchNotReusable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/clients/{client_id}/admin/research-imports/{batch_id}/dry-run")
+def dry_run_admin_research_import_api(
+    client_id: int,
+    batch_id: int,
+    request: Request,
+    offset: int = 0,
+    limit: int = 25,
+):
+    _require_admin_client(request, client_id)
+    try:
+        return dry_run_research_import(client_id, batch_id, offset=offset, limit=limit)
+    except ResearchBatchNotReusable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/clients/{client_id}/admin/research-imports/{batch_id}/confirm")
+def confirm_admin_research_import_api(
+    client_id: int,
+    batch_id: int,
+    body: dict,
+    request: Request,
+):
+    actor = _require_admin_client(request, client_id)
+    try:
+        return confirm_research_import(
+            client_id=client_id,
+            batch_id=batch_id,
+            plan_fingerprint=str(body.get("plan_fingerprint") or ""),
+            actor=actor,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ResearchBatchNotReusable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post(

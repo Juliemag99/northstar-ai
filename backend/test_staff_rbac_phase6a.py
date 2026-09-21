@@ -289,6 +289,31 @@ def test_admin_http_blocked_for_specialist() -> None:
     if upload.status_code != 403:
         _fail(f"CRM import upload must be 403 for specialist, got {upload.status_code}")
 
+    research = http.post(
+        f"/api/clients/{allowed}/admin/research-imports",
+        headers={CSRF_HEADER: csrf},
+        files={"file": ("x.csv", b"Company Name\nAcme", "text/csv")},
+    )
+    if research.status_code != 403:
+        _fail(f"research import upload must be 403 for specialist, got {research.status_code}")
+    if research.json().get("detail") != ADMIN_REQUIRED_DETAIL:
+        _fail("research import 403 detail was not generic.")
+    for suffix in (
+        "mapping",
+        "match-resolution",
+        "master-resolution",
+        "contact-resolution",
+        "dry-run",
+        "confirm",
+    ):
+        blocked = http.post(
+            f"/api/clients/{allowed}/admin/research-imports/1/{suffix}",
+            headers={CSRF_HEADER: csrf},
+            json={},
+        )
+        if blocked.status_code != 403:
+            _fail(f"research import {suffix} must be 403, got {blocked.status_code}")
+
     anon = TestClient(app)
     missing = anon.get("/api/admin/master-data-export")
     if missing.status_code != 401:

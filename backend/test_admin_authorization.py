@@ -28,6 +28,7 @@ from auth_passwords import hash_password
 from auth_sessions import hash_session_token, revoke_staff_session
 from client_email_accounts_data import ensure_client_email_accounts_schema
 from db import get_connection
+from staff_rbac import REVOPS_SPECIALIST, ensure_staff_role_schema
 from cryptography.fernet import Fernet
 from email_oauth_credentials import consume_oauth_state, ensure_email_oauth_credentials_schema
 from gmail_oauth import complete_google_callback
@@ -91,17 +92,32 @@ def _client_ids() -> tuple[int, int]:
     return int(rows[0]["id"]), int(rows[1]["id"])
 
 
-def _create_user(*, email: str, password: str, administrator: int = 0, active: int = 1) -> int:
+def _create_user(
+    *,
+    email: str,
+    password: str,
+    administrator: int = 0,
+    active: int = 1,
+    staff_role: str = "",
+) -> int:
     digest = hash_password(password, email=email)
     with get_connection() as conn:
+        ensure_staff_role_schema(conn)
         conn.execute(
             """
             INSERT INTO users (
                 email, full_name, is_administrator, is_internal_northstar, active,
-                password_hash, failed_login_count, locked_until
-            ) VALUES (?, ?, ?, 1, ?, ?, 0, '')
+                password_hash, failed_login_count, locked_until, staff_role
+            ) VALUES (?, ?, ?, 1, ?, ?, 0, '', ?)
             """,
-            (email, "Admin Auth Test User", int(administrator), int(active), digest),
+            (
+                email,
+                "Admin Auth Test User",
+                int(administrator),
+                int(active),
+                digest,
+                staff_role,
+            ),
         )
         user_id = int(
             conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()["id"]
@@ -284,7 +300,9 @@ def test_unauthenticated_email_routes_are_401_when_enforcement_off() -> None:
 def test_non_admin_cannot_use_google_admin_routes() -> None:
     password = _secret_password()
     email = f"rep.{secrets.token_hex(4)}@example.test"
-    user_id = _create_user(email=email, password=password, administrator=0)
+    user_id = _create_user(
+        email=email, password=password, administrator=0, staff_role=REVOPS_SPECIALIST
+    )
     assigned_id, _other_id = _client_ids()
     _assign(user_id, assigned_id, role="staff")
     http = _client()
@@ -315,10 +333,34 @@ def test_non_admin_cannot_use_google_admin_routes() -> None:
         _delete_user(user_id)
 
 
+def test_assigned_without_staff_role_cannot_use_crm_email() -> None:
+    """Empty staff_role is not a CRM grant even when a client assignment exists."""
+    password = _secret_password()
+    email = f"norole.{secrets.token_hex(4)}@example.test"
+    user_id = _create_user(email=email, password=password, administrator=0, staff_role="")
+    assigned_id, _other_id = _client_ids()
+    _assign(user_id, assigned_id, role="staff")
+    http = _client()
+    try:
+        login = _login(http, email, password)
+        if login.status_code != 200:
+            _fail(f"Role-less login failed: {login.status_code}")
+        listed = http.get(LIST_ACCOUNTS.format(client_id=assigned_id))
+        if listed.status_code != 403:
+            _fail(
+                f"Assigned user with empty staff_role must be 403, got {listed.status_code}."
+            )
+        _assert_no_secrets(listed.json())
+    finally:
+        _delete_user(user_id)
+
+
 def test_assigned_non_admin_can_list_preview_and_send() -> None:
     password = _secret_password()
     email = f"rep.{secrets.token_hex(4)}@example.test"
-    user_id = _create_user(email=email, password=password, administrator=0)
+    user_id = _create_user(
+        email=email, password=password, administrator=0, staff_role=REVOPS_SPECIALIST
+    )
     assigned_id, other_id = _client_ids()
     _assign(user_id, assigned_id, role="staff")
     account_id = _insert_google_account(
@@ -399,7 +441,9 @@ def test_assigned_non_admin_can_list_preview_and_send() -> None:
 def test_setup_editor_can_manage_only_authorized_client() -> None:
     password = _secret_password()
     email = f"ops.{secrets.token_hex(4)}@example.test"
-    user_id = _create_user(email=email, password=password, administrator=0)
+    user_id = _create_user(
+        email=email, password=password, administrator=0, staff_role=REVOPS_SPECIALIST
+    )
     assigned_id, other_id = _client_ids()
     _assign(user_id, assigned_id, role="rev_ops")
     http = _client()
@@ -468,7 +512,9 @@ def test_setup_editor_can_manage_only_authorized_client() -> None:
 def test_assigned_without_setup_cannot_manage_configuration() -> None:
     password = _secret_password()
     email = f"staff.{secrets.token_hex(4)}@example.test"
-    user_id = _create_user(email=email, password=password, administrator=0)
+    user_id = _create_user(
+        email=email, password=password, administrator=0, staff_role=REVOPS_SPECIALIST
+    )
     assigned_id, _other_id = _client_ids()
     _assign(user_id, assigned_id, role="staff")
     account_id = _insert_google_account(
@@ -528,7 +574,9 @@ def test_assigned_without_setup_cannot_manage_configuration() -> None:
 def test_spoofed_identity_fields_do_not_bypass() -> None:
     password = _secret_password()
     email = f"rep.{secrets.token_hex(4)}@example.test"
-    user_id = _create_user(email=email, password=password, administrator=0)
+    user_id = _create_user(
+        email=email, password=password, administrator=0, staff_role=REVOPS_SPECIALIST
+    )
     assigned_id, other_id = _client_ids()
     _assign(user_id, assigned_id, role="staff")
     http = _client()
@@ -831,6 +879,7 @@ def test_oauth_callback_state_rules() -> None:
 def main() -> int:
     test_unauthenticated_email_routes_are_401_when_enforcement_off()
     test_non_admin_cannot_use_google_admin_routes()
+    test_assigned_without_staff_role_cannot_use_crm_email()
     test_assigned_non_admin_can_list_preview_and_send()
     test_setup_editor_can_manage_only_authorized_client()
     test_assigned_without_setup_cannot_manage_configuration()

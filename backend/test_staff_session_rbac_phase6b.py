@@ -249,6 +249,20 @@ def test_admin_still_blocked_for_specialist() -> None:
     )
     if upload.status_code != 403:
         _fail(f"import {upload.status_code}")
+    research = http.post(
+        f"/api/clients/{carmeco}/admin/research-imports",
+        headers={CSRF_HEADER: csrf},
+        files={"file": ("x.csv", b"Company Name\nAcme", "text/csv")},
+    )
+    if research.status_code != 403:
+        _fail(f"research import {research.status_code}")
+    confirm = http.post(
+        f"/api/clients/{carmeco}/admin/research-imports/1/confirm",
+        headers={CSRF_HEADER: csrf},
+        json={"plan_fingerprint": "x"},
+    )
+    if confirm.status_code != 403:
+        _fail(f"research import confirm {confirm.status_code}")
 
 
 def test_manager_two_clients_and_workflow_attribution() -> None:
