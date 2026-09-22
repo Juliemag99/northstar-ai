@@ -134,7 +134,21 @@ function preview(overrides: Record<string, unknown> = {}) {
       master_fill_blank: 0,
       master_accept_incoming: 0,
       master_keep_existing: 1,
+      aliases_created: 1,
+      aliases_deduped: 0,
+      identities_created: 1,
+      identities_deduped: 0,
     },
+    lineage: [
+      {
+        source_row: 2,
+        row_id: 1,
+        company_name: 'Greenheck',
+        matched_company_id: 88,
+        alias: { action: 'CREATE', alias_name: 'Greenheck', alias_norm: 'greenheck' },
+        source_identity: { action: 'CREATE', source_record_no: '9:1', source_system: 'RESEARCH_IMPORT' },
+      },
+    ],
     blocking: true,
     blocking_reasons: ['AMBIGUOUS'],
     default_status: 'New',
@@ -252,6 +266,10 @@ describe('Administration Research & Custom Prospect Import', () => {
     expect(screen.getByText(/Live confirmation not enabled/)).toBeTruthy()
     expect((screen.getByRole('button', { name: 'Confirm (live confirmation not enabled)' }) as HTMLButtonElement).disabled).toBe(true)
     expect(screen.getByText(/Workflow fields will NOT be written/)).toBeTruthy()
+    expect(screen.getByText(/Source lineage — aliases/)).toBeTruthy()
+    expect(screen.getByText(/Source lineage — source identities/)).toBeTruthy()
+    expect(screen.getAllByText(/create 1 \/ reuse 0/).length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByText(/Aliases & Source Identities/)).toBeTruthy()
     expect(screen.getByText(/Same-batch research conflicts/)).toBeTruthy()
     expect(screen.getByRole('button', { name: 'USE_EXISTING: Greenheck Fan' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'CREATE_NEW' })).toBeTruthy()

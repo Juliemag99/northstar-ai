@@ -1,6 +1,9 @@
-"""Research import batch staging. Isolated DB tables, or in-memory on live.
+"""Research import batch staging.
 
-Never writes companies, CCRs, notes, or provenance. Live schema is not created.
+Never writes companies, CCRs, notes, research results, or confirm provenance.
+After live schema activation, staging uses research_import_* tables.
+Before those tables exist, live falls back to in-memory so preview cannot
+create schema by accident.
 """
 from __future__ import annotations
 
@@ -39,6 +42,7 @@ from research_import_schema import (
     LiveResearchSchemaForbidden,
     ensure_research_import_schema,
     is_production_db,
+    schema_installed,
 )
 from research_import_policy import (
     RES_CREATE_CONTACT,
@@ -71,7 +75,8 @@ def _require_client(conn, client_id: int) -> None:
 
 
 def _use_memory(conn) -> bool:
-    return is_production_db(conn)
+    """Use memory only on live databases that do not yet have RI staging tables."""
+    return is_production_db(conn) and not schema_installed(conn)
 
 
 def _next_memory_id() -> int:
@@ -97,7 +102,7 @@ def _get_memory(client_id: int, batch_id: int, *, allow_confirmed: bool = False)
 
 
 def list_attribute_definitions(conn) -> list[dict[str, str]]:
-    if is_production_db(conn):
+    if is_production_db(conn) and not schema_installed(conn):
         return []
     try:
         ensure_research_import_schema(conn)
@@ -677,7 +682,7 @@ def save_contact_resolution(
 
 
 def suggest_mapping_template(conn, *, client_id: int, source_type: str, headers: list[str]) -> dict[str, Any]:
-    if is_production_db(conn):
+    if is_production_db(conn) and not schema_installed(conn):
         return {}
     ensure_research_import_schema(conn)
     sig = header_signature(headers)

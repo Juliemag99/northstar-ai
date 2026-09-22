@@ -23,15 +23,13 @@ from import_brown_industries import norm_name
 from models import NorthStarUser
 from research_import_contacts import note_already_present
 from research_import_mapping import blank, parse_typed_value
+from research_import_live_confirm import assert_confirm_permitted
 from research_import_plan import (
     CLASS_INVALID,
     CLASS_NEW,
     CLASS_NEW_LOCATION,
     CONFIRM_BLOCKED,
-    PRODUCTION_CONFIRM_DISABLED,
     STALE_FINGERPRINT,
-    confirm_enabled,
-    is_production_db,
     location_tuple,
     plan_fingerprint,
     plan_research_rows,
@@ -91,7 +89,15 @@ EMPTY_RESULT = {
     "rows_blocked": 0,
     "workflow_fields_written": 0,
     "master_proposals_applied": 0,
+    "aliases_created": 0,
+    "aliases_deduped": 0,
+    "identities_created": 0,
+    "identities_deduped": 0,
 }
+
+
+def _sqlite_wrote(conn) -> bool:
+    return int(conn.execute("SELECT changes()").fetchone()[0]) > 0
 
 
 @contextmanager
@@ -117,13 +123,13 @@ def apply_research_import_confirm(
     expected_fingerprint: str,
     actor: NorthStarUser | None,
 ) -> dict[str, Any]:
-    if is_production_db(conn):
-        raise PermissionError(PRODUCTION_CONFIRM_DISABLED)
-    if not confirm_enabled(conn):
-        raise PermissionError(
-            "Research Prospect Import confirm is disabled unless "
-            "NORTHSTAR_ALLOW_RESEARCH_IMPORT_CONFIRM=1 on an isolated database."
-        )
+    assert_confirm_permitted(
+        conn,
+        client_id=int(client_id),
+        batch_id=int(batch_id),
+        expected_fingerprint=expected_fingerprint,
+        actor=actor,
+    )
     ensure_research_import_schema(conn)
     batch = load_batch(conn, client_id, batch_id, allow_confirmed=True)
     if blank(batch.get("status")) == "confirmed":
@@ -143,6 +149,7 @@ def apply_research_import_confirm(
         contact_resolutions=batch.get("contact_resolutions") or {},
         mapping=batch.get("mapping") or {},
         raw_rows=batch.get("rows") or [],
+        batch_id=int(batch_id),
     )
     options = fingerprint_options_from_batch(batch)
     options["planned_contract"] = planned_contract_slice(planned)
@@ -510,6 +517,10 @@ def _confirm_row(
             row.source_row_number,
         ),
     )
+    if _sqlite_wrote(conn):
+        counts["identities_created"] += 1
+    else:
+        counts["identities_deduped"] += 1
     if blank(row.mapped.get("company_name")):
         conn.execute(
             """
@@ -527,6 +538,10 @@ def _confirm_row(
                 row.source_row_number,
             ),
         )
+        if _sqlite_wrote(conn):
+            counts["aliases_created"] += 1
+        else:
+            counts["aliases_deduped"] += 1
     del reused_company
 
 

@@ -1,7 +1,8 @@
--- Research Prospect Import (RI-2) isolated schema.
--- DO NOT execute from db.migrate_schema / live northstar.db.
--- Applied only via research_import_schema.ensure_research_import_schema()
--- on isolated/test databases.
+-- Research Prospect Import schema.
+-- DO NOT execute from db.migrate_schema.
+-- Isolated/test: research_import_schema.ensure_research_import_schema().
+-- Live northstar.db first install: NORTHSTAR_ALLOW_RESEARCH_IMPORT_SCHEMA=1 only.
+-- That flag does not authorize production confirm. Additive CREATE IF NOT EXISTS only.
 
 CREATE TABLE IF NOT EXISTS research_import_batches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

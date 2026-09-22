@@ -6,12 +6,10 @@ from typing import Any
 from db import get_connection
 from models import NorthStarUser
 from research_import_mapping import ignored_headers, validate_mapping
+from research_import_live_confirm import assert_confirm_permitted
 from research_import_plan import (
-    ISOLATED_CONFIRM_DISABLED,
-    PRODUCTION_CONFIRM_DISABLED,
     PLANNER_VERSION,
     aggregate_counts,
-    confirm_enabled,
     forecast_confirm,
     is_production_db,
     is_production_path,
@@ -52,6 +50,7 @@ def dry_run_research_import(
             contact_resolutions=batch.get("contact_resolutions") or {},
             mapping=batch.get("mapping") or {},
             raw_rows=batch.get("rows") or [],
+            batch_id=int(batch_id),
         )
         caveat = batch.get("batch_caveat") or ""
         options = fingerprint_options_from_batch(batch)
@@ -79,12 +78,17 @@ def dry_run_research_import(
             except Exception:
                 pass
         page = planned[max(offset, 0) : max(offset, 0) + max(limit, 1)]
+        forecast = forecast_confirm(planned)
+        lineage = forecast.pop("lineage", [])
+        write_summary = forecast.pop("write_summary", [])
         return {
             "batch": public_batch(conn, batch),
             "planner_version": PLANNER_VERSION,
             "plan_fingerprint": fingerprint,
             "counts": counts,
-            "forecast": forecast_confirm(planned),
+            "forecast": forecast,
+            "lineage": lineage,
+            "write_summary": write_summary,
             "batch_caveat": caveat,
             "prior_research_file": batch.get("prior_research_file") or "",
             "ignored_headers": ignored_headers(batch.get("mapping") or {}, batch.get("headers") or []),
@@ -123,10 +127,13 @@ def confirm_research_import(
     actor: NorthStarUser | None,
 ) -> dict[str, Any]:
     with get_connection() as conn:
-        if is_production_db(conn) or is_production_path():
-            raise PermissionError(PRODUCTION_CONFIRM_DISABLED)
-        if not confirm_enabled(conn):
-            raise PermissionError(ISOLATED_CONFIRM_DISABLED)
+        assert_confirm_permitted(
+            conn,
+            client_id=int(client_id),
+            batch_id=int(batch_id),
+            expected_fingerprint=plan_fingerprint,
+            actor=actor,
+        )
         from research_import_confirm import apply_research_import_confirm
 
         return apply_research_import_confirm(

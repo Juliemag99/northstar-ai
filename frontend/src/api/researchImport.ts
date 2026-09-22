@@ -149,7 +149,49 @@ export type ResearchPlanRow = {
   same_batch_row_ids?: number[]
   same_batch_conflicts?: Array<Record<string, unknown>>
   research_anchor?: boolean
+  lineage?: {
+    source_row?: number
+    row_id?: number
+    company_name?: string
+    matched_company_id?: number | null
+    client_id?: number
+    batch_id?: number
+    source_system?: string
+    alias?: {
+      action?: string
+      alias_name?: string
+      alias_norm?: string
+      source_system?: string
+      source_record_no?: string
+      client_id?: number
+      batch_id?: number
+      source_row?: number
+      company_id?: number | null
+      master_field_change?: boolean
+    }
+    source_identity?: {
+      action?: string
+      source_system?: string
+      source_record_no?: string
+      client_id?: number
+      batch_id?: number
+      source_row?: number
+      company_id?: number | null
+      master_field_change?: boolean
+    }
+  }
 }
+
+export type ResearchWriteSummaryItem = {
+  category: string
+  action: string
+  count: number
+  section?: string
+  master_field_change?: boolean
+  line?: string
+}
+
+export type ResearchLineageItem = NonNullable<ResearchPlanRow['lineage']>
 
 export type ResearchDryRun = {
   batch: ResearchImportBatch
@@ -169,6 +211,8 @@ export type ResearchDryRun = {
   rows: ResearchPlanRow[]
   ignored_headers?: string[]
   workflow_fields_will_write?: number
+  lineage?: ResearchLineageItem[]
+  write_summary?: ResearchWriteSummaryItem[]
   contract?: {
     workflow_writes?: number
     production_confirm?: boolean

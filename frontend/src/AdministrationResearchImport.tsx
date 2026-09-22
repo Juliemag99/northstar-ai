@@ -529,7 +529,33 @@ export default function AdministrationResearchImport({
             <li>Attributes to version: {preview.forecast?.attributes_created ?? counts.custom_attribute_values ?? 0}</li>
             <li>Master fields accepted/preserved: FILL {preview.forecast?.master_fill_blank ?? 0} / ACCEPT {preview.forecast?.master_accept_incoming ?? 0} / KEEP {preview.forecast?.master_keep_existing ?? 0}</li>
             <li>Workflow fields will NOT be written: {preview.workflow_fields_will_write ?? 0}</li>
+            <li>
+              Source lineage — aliases (not master-field changes): create{' '}
+              {preview.forecast?.aliases_created ?? 0} / reuse {preview.forecast?.aliases_deduped ?? 0}
+            </li>
+            <li>
+              Source lineage — source identities: create {preview.forecast?.identities_created ?? 0} / reuse{' '}
+              {preview.forecast?.identities_deduped ?? 0}
+            </li>
           </ul>
+          {(preview.lineage?.length || preview.write_summary?.some((item) => item.section === 'Source Lineage')) ? (
+            <details>
+              <summary>Aliases &amp; Source Identities (lineage, not master-field changes)</summary>
+              <p>Confirming this batch will add these RESEARCH_IMPORT lineage records. They do not update master company fields.</p>
+              <ul>
+                {(preview.lineage || preview.rows.map((row) => row.lineage).filter(Boolean)).map((item, index) => (
+                  <li key={`${item?.row_id || index}-${item?.source_identity?.source_record_no || index}`}>
+                    Row {item?.source_row}: {item?.company_name || 'unnamed'}
+                    {item?.matched_company_id ? ` (company ${item.matched_company_id})` : ''} — alias{' '}
+                    {item?.alias?.action || 'SKIP'}
+                    {item?.alias?.alias_norm ? ` “${item.alias.alias_norm}”` : ''} / identity{' '}
+                    {item?.source_identity?.action || 'SKIP'}
+                    {item?.source_identity?.source_record_no ? ` ${item.source_identity.source_record_no}` : ''}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
           {preview.batch_caveat ? (
             <p>
               Batch caveat (not duplicated onto every company note): {preview.batch_caveat}

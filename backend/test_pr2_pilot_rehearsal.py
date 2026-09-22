@@ -25,7 +25,7 @@ from staff_rbac import REVOPS_SPECIALIST, user_has_permission
 PILOT = (
     ("Robert", "Kirsten", "robert.kirsten@northstar.example.test", "brown", 2, 1243),
     ("Tyler", "Sullivan", "tyler.sullivan@northstar.example.test", "dawson", 3, 243),
-    ("Todd", "White", "todd.white@northstar.example.test", "premier", 4, 729),
+    ("Todd", "White", "todd.white@northstar.example.test", "premier", 4, 730),
 )
 FORBIDDEN_CLIENTS = {
     "brown": ("dawson", "premier", "carmeco"),

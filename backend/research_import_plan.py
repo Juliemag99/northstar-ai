@@ -477,6 +477,7 @@ class ResearchPlanRow:
     same_batch_row_ids: list[int] = field(default_factory=list)
     same_batch_conflicts: list[dict[str, Any]] = field(default_factory=list)
     research_anchor: bool = True
+    lineage: dict[str, Any] = field(default_factory=dict)
 
 
 def _client_exists(conn, client_id: int) -> bool:
@@ -501,6 +502,7 @@ def plan_research_rows(
     contact_resolutions: dict[int, dict[str, Any]] | None = None,
     mapping: dict[str, Any] | None = None,
     raw_rows: list[dict[str, str]] | None = None,
+    batch_id: int = 0,
 ) -> list[ResearchPlanRow]:
     companies = load_company_recs(conn)
     locations = load_locations(conn)
@@ -830,6 +832,7 @@ def plan_research_rows(
             )
         )
     apply_same_batch_consolidation(planned)
+    attach_lineage_forecast(conn, planned, client_id=int(client_id), batch_id=int(batch_id))
     return planned
 
 
@@ -1066,6 +1069,200 @@ def apply_same_batch_consolidation(rows: list[ResearchPlanRow]) -> None:
             row.blocking = bool(row.blocking_reasons)
 
 
+LINEAGE_SOURCE_SYSTEM = "RESEARCH_IMPORT"
+LINEAGE_ALIAS_RECORD_NO = ""
+LINEAGE_ACTION_CREATE = "CREATE"
+LINEAGE_ACTION_DEDUPE = "DEDUPE"
+LINEAGE_ACTION_SKIP = "SKIP"
+
+
+def research_identity_record_no(batch_id: int, row_id: int) -> str:
+    """Confirm writes source_record_no as '{batch_id}:{staged_row_id}'."""
+    return f"{int(batch_id)}:{int(row_id)}"
+
+
+def _company_lineage_key(row: ResearchPlanRow) -> str:
+    if row.matched_company_id:
+        return f"id:{int(row.matched_company_id)}"
+    return row.same_batch_key or f"row:{row.row_id}"
+
+
+def _lineage_identity_exists(conn, *, client_id: int, source_record_no: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1 FROM company_source_identities
+        WHERE source_system=?
+          AND source_record_no=?
+          AND COALESCE(client_id, 0)=?
+        """,
+        (LINEAGE_SOURCE_SYSTEM, source_record_no, int(client_id)),
+    ).fetchone()
+    return row is not None
+
+
+def _lineage_alias_exists(conn, *, company_id: int, client_id: int, alias_norm: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1 FROM company_aliases
+        WHERE company_id=?
+          AND COALESCE(client_id, 0)=?
+          AND source_system=?
+          AND COALESCE(source_record_no, '')=?
+          AND alias_norm=?
+        """,
+        (
+            int(company_id),
+            int(client_id),
+            LINEAGE_SOURCE_SYSTEM,
+            LINEAGE_ALIAS_RECORD_NO,
+            alias_norm,
+        ),
+    ).fetchone()
+    return row is not None
+
+
+def attach_lineage_forecast(
+    conn,
+    rows: list[ResearchPlanRow],
+    *,
+    client_id: int,
+    batch_id: int,
+) -> None:
+    """Forecast confirm-side INSERT OR IGNORE alias/identity writes.
+
+    Unique keys match schema:
+      identities: (source_system, source_record_no, COALESCE(client_id,0))
+      aliases: (company_id, COALESCE(client_id,0), source_system, source_record_no, alias_norm)
+
+    Confirm omits alias source_record_no, so it defaults to ''. Same company +
+    client + RESEARCH_IMPORT + same alias_norm therefore DEDUPE across rows and
+    later batches. Identities use batch_id:row_id, so each staged row is unique
+    unless that exact key already exists (idempotent replay).
+    """
+    seen_alias: set[tuple[str, str]] = set()
+    seen_identity: set[str] = set()
+    for row in rows:
+        identity_no = research_identity_record_no(batch_id, row.row_id)
+        company_key = _company_lineage_key(row)
+        name = blank(row.mapped.get("company_name"))
+        alias_norm = norm_name(name) if name else ""
+        skipped = row.ri_class in {CLASS_INVALID, "SKIPPED"}
+        identity_action = LINEAGE_ACTION_SKIP
+        alias_action = LINEAGE_ACTION_SKIP
+        if not skipped:
+            if identity_no in seen_identity or _lineage_identity_exists(
+                conn, client_id=int(client_id), source_record_no=identity_no
+            ):
+                identity_action = LINEAGE_ACTION_DEDUPE
+            else:
+                identity_action = LINEAGE_ACTION_CREATE
+                seen_identity.add(identity_no)
+            if not name:
+                alias_action = LINEAGE_ACTION_SKIP
+            else:
+                alias_key = (company_key, alias_norm)
+                existing = False
+                if row.matched_company_id:
+                    existing = _lineage_alias_exists(
+                        conn,
+                        company_id=int(row.matched_company_id),
+                        client_id=int(client_id),
+                        alias_norm=alias_norm,
+                    )
+                if existing or alias_key in seen_alias:
+                    alias_action = LINEAGE_ACTION_DEDUPE
+                    seen_alias.add(alias_key)
+                else:
+                    alias_action = LINEAGE_ACTION_CREATE
+                    seen_alias.add(alias_key)
+        row.lineage = {
+            "source_row": row.source_row_number,
+            "row_id": row.row_id,
+            "company_name": name,
+            "matched_company_id": row.matched_company_id,
+            "client_id": int(client_id),
+            "batch_id": int(batch_id),
+            "source_system": LINEAGE_SOURCE_SYSTEM,
+            "alias": {
+                "action": alias_action,
+                "alias_name": name,
+                "alias_norm": alias_norm,
+                "source_system": LINEAGE_SOURCE_SYSTEM,
+                "source_record_no": LINEAGE_ALIAS_RECORD_NO,
+                "client_id": int(client_id),
+                "batch_id": int(batch_id),
+                "source_row": row.source_row_number,
+                "company_id": row.matched_company_id,
+                "master_field_change": False,
+            },
+            "source_identity": {
+                "action": identity_action,
+                "source_system": LINEAGE_SOURCE_SYSTEM,
+                "source_record_no": identity_no,
+                "client_id": int(client_id),
+                "batch_id": int(batch_id),
+                "source_row": row.source_row_number,
+                "company_id": row.matched_company_id,
+                "master_field_change": False,
+            },
+        }
+
+
+def proposed_write_summary(forecast: dict[str, Any]) -> list[dict[str, Any]]:
+    """Human-readable deterministic write forecast for preview."""
+    items: list[tuple[str, str, str, bool]] = [
+        ("Companies", "CREATE", "companies_created", True),
+        ("Companies", "REUSE", "companies_reused", True),
+        ("Locations", "CREATE", "locations_created", True),
+        ("CCRs", "CREATE", "ccrs_created", True),
+        ("CCRs", "REUSE", "ccrs_reused", True),
+        ("Contacts", "CREATE", "contacts_created", True),
+        ("Contacts", "REUSE", "contacts_reused", True),
+        ("Contacts", "SKIP", "contacts_skipped", True),
+        ("Notes", "APPEND", "notes_append", True),
+        ("Notes", "DEDUPE", "notes_dedupe", True),
+        ("Research records", "CREATE", "research_created", True),
+        ("Custom attributes", "CREATE", "attributes_created", True),
+        ("Research sources", "CREATE", "sources_captured", True),
+        ("Company aliases", "CREATE", "aliases_created", False),
+        ("Company aliases", "DEDUPE", "aliases_deduped", False),
+        ("Company aliases", "SKIP", "aliases_skipped", False),
+        ("Company source identities", "CREATE", "identities_created", False),
+        ("Company source identities", "DEDUPE", "identities_deduped", False),
+        ("Company source identities", "SKIP", "identities_skipped", False),
+        ("Field provenance events", "CREATE", "provenance_events_created", True),
+        ("Master fields", "FILL BLANK", "master_fill_blank", True),
+        ("Master fields", "UPDATE", "master_accept_incoming", True),
+        ("Master fields", "PRESERVE", "master_keep_existing", True),
+        ("Workflow writes", "SKIP", "workflow_fields_will_write", True),
+        ("Rows", "BLOCKED", "blocked_rows", True),
+    ]
+    summary: list[dict[str, Any]] = []
+    for category, action, key, masterish in items:
+        count = int(forecast.get(key) or 0)
+        if count == 0 and key not in {
+            "aliases_created",
+            "aliases_deduped",
+            "identities_created",
+            "identities_deduped",
+            "workflow_fields_will_write",
+            "provenance_events_created",
+        }:
+            continue
+        lineage = category in {"Company aliases", "Company source identities"}
+        summary.append(
+            {
+                "category": category,
+                "action": action,
+                "count": count,
+                "section": "Source Lineage" if lineage else "Entities",
+                "master_field_change": False if lineage else masterish and action in {"UPDATE", "FILL BLANK"},
+                "line": f"{action} {count} {category.lower()}",
+            }
+        )
+    return summary
+
+
 def aggregate_counts(rows: list[ResearchPlanRow], caveat: str) -> dict[str, int]:
     counts = {
         "source_rows": len(rows),
@@ -1282,11 +1479,35 @@ def forecast_confirm(rows: list[ResearchPlanRow]) -> dict[str, Any]:
         "blocked_rows": 0,
         "workflow_fields_will_write": 0,
         "same_batch_conflicts": 0,
+        "aliases_created": 0,
+        "aliases_deduped": 0,
+        "aliases_skipped": 0,
+        "identities_created": 0,
+        "identities_deduped": 0,
+        "identities_skipped": 0,
+        "provenance_events_created": 0,
     }
     seen_new: set[str] = set()
     seen_research: set[str] = set()
     seen_ccr: set[str] = set()
+    lineage_rows: list[dict[str, Any]] = []
     for row in rows:
+        alias_action = blank((row.lineage or {}).get("alias", {}).get("action"))
+        identity_action = blank((row.lineage or {}).get("source_identity", {}).get("action"))
+        if alias_action == LINEAGE_ACTION_CREATE:
+            forecast["aliases_created"] += 1
+        elif alias_action == LINEAGE_ACTION_DEDUPE:
+            forecast["aliases_deduped"] += 1
+        else:
+            forecast["aliases_skipped"] += 1
+        if identity_action == LINEAGE_ACTION_CREATE:
+            forecast["identities_created"] += 1
+        elif identity_action == LINEAGE_ACTION_DEDUPE:
+            forecast["identities_deduped"] += 1
+        else:
+            forecast["identities_skipped"] += 1
+        if row.lineage:
+            lineage_rows.append(row.lineage)
         if row.blocking:
             forecast["blocked_rows"] += 1
         if row.same_batch_conflicts and row.research_anchor:
@@ -1302,6 +1523,9 @@ def forecast_confirm(rows: list[ResearchPlanRow]) -> dict[str, Any]:
                 if key:
                     seen_new.add(key)
                 forecast["locations_created"] += 1
+                for field in ("company_name", "website", "phone", "address", "city", "state", "zip"):
+                    if blank(row.mapped.get(field)):
+                        forecast["provenance_events_created"] += 1
         else:
             forecast["companies_reused"] += 1
         if key and key not in seen_ccr:
@@ -1310,6 +1534,8 @@ def forecast_confirm(rows: list[ResearchPlanRow]) -> dict[str, Any]:
                 forecast["ccrs_created"] += 1
             elif row.this_client_ccr_id:
                 forecast["ccrs_reused"] += 1
+        elif key:
+            forecast["ccrs_reused"] += 1
         if row.notes_action in {"set_imported_notes", "append_imported_notes"}:
             forecast["notes_append"] += 1
         elif row.notes_action == "imported_notes_already_present":
@@ -1334,8 +1560,10 @@ def forecast_confirm(rows: list[ResearchPlanRow]) -> dict[str, Any]:
                 klass = blank(conflict.get("class"))
                 if decision == "FILL_BLANK":
                     forecast["master_fill_blank"] += 1
+                    forecast["provenance_events_created"] += 1
                 elif decision == "ACCEPT_INCOMING":
                     forecast["master_accept_incoming"] += 1
+                    forecast["provenance_events_created"] += 1
                 elif decision == "ADD_AS_LOCATION" or (
                     row.ri_class == CLASS_NEW_LOCATION and row.match_resolution == "TREAT_AS_NEW_LOCATION"
                 ):
@@ -1343,6 +1571,8 @@ def forecast_confirm(rows: list[ResearchPlanRow]) -> dict[str, Any]:
                     forecast["locations_created"] += 1
                 elif klass in {"SAME", "PROPOSE_UPDATE", "MANUAL_AUTHORITY_CONFLICT", "FILL_BLANK"}:
                     forecast["master_keep_existing"] += 1
+    forecast["lineage"] = lineage_rows
+    forecast["write_summary"] = proposed_write_summary(forecast)
     return forecast
 
 
@@ -1398,4 +1628,5 @@ def row_to_dict(row: ResearchPlanRow) -> dict[str, Any]:
         "same_batch_row_ids": row.same_batch_row_ids,
         "same_batch_conflicts": row.same_batch_conflicts,
         "research_anchor": row.research_anchor,
+        "lineage": row.lineage,
     }

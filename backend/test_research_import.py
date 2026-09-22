@@ -19,6 +19,7 @@ from auth_passwords import hash_password
 from main import app
 from staff_rbac import REVOPS_SPECIALIST, SYSTEM_ADMINISTRATOR, ensure_staff_role_schema
 
+from import_brown_industries import norm_name
 from contact_phone import upsert_contact_phone_keys
 from db import DB_PATH, PRODUCTION_DB_PATH, get_connection
 from models import NorthStarUser
@@ -708,24 +709,54 @@ class ResearchImportTests(unittest.TestCase):
     def test_schema_refuses_live_and_is_not_in_migrate(self) -> None:
         import inspect
         import sqlite3
+        from unittest.mock import patch
 
         from db import migrate_schema
+        from research_import_schema import ALLOW_SCHEMA_ENV, schema_installed
 
         self.assertNotIn("research_import", inspect.getsource(migrate_schema))
         live = Path(PRODUCTION_DB_PATH).resolve()
+        os.environ.pop(ALLOW_SCHEMA_ENV, None)
+        os.environ.pop("NORTHSTAR_ALLOW_RESEARCH_IMPORT_CONFIRM", None)
         conn = sqlite3.connect(live.as_uri() + "?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         try:
-            with self.assertRaises(LiveResearchSchemaForbidden):
-                ensure_research_import_schema(conn)
-            names = {
-                r[0]
-                for r in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'research_%'"
-                )
-            }
-            self.assertNotIn("research_import_batches", names)
-            self.assertNotIn("client_company_research", names)
+            # After RI-5A the live tables exist: ensure is an additive no-op
+            # (no DROP/rewrite) and does not require the schema flag.
+            self.assertTrue(schema_installed(conn))
+            ensure_research_import_schema(conn)
+            # First install on live still requires NORTHSTAR_ALLOW_RESEARCH_IMPORT_SCHEMA.
+            # NORTHSTAR_ALLOW_RESEARCH_IMPORT_CONFIRM alone must not open that gate.
+            with patch("research_import_schema.schema_installed", return_value=False):
+                with self.assertRaises(LiveResearchSchemaForbidden):
+                    ensure_research_import_schema(conn)
+                os.environ["NORTHSTAR_ALLOW_RESEARCH_IMPORT_CONFIRM"] = "1"
+                with self.assertRaises(LiveResearchSchemaForbidden):
+                    ensure_research_import_schema(conn)
+        finally:
+            os.environ.pop("NORTHSTAR_ALLOW_RESEARCH_IMPORT_CONFIRM", None)
+            conn.close()
+
+    def test_schema_flag_does_not_enable_live_confirm(self) -> None:
+        from research_import_plan import confirm_enabled
+        from research_import_schema import ALLOW_SCHEMA_ENV
+
+        os.environ[ALLOW_SCHEMA_ENV] = "1"
+        os.environ["NORTHSTAR_ALLOW_RESEARCH_IMPORT_CONFIRM"] = "1"
+        self.addCleanup(lambda: os.environ.pop(ALLOW_SCHEMA_ENV, None))
+        self.addCleanup(lambda: os.environ.pop("NORTHSTAR_ALLOW_RESEARCH_IMPORT_CONFIRM", None))
+        self.assertFalse(is_production_path())
+        with get_connection() as conn:
+            self.assertFalse(is_production_db(conn))
+            self.assertTrue(confirm_enabled(conn))
+        live = Path(PRODUCTION_DB_PATH).resolve()
+        import sqlite3
+
+        conn = sqlite3.connect(live.as_uri() + "?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            self.assertTrue(is_production_db(conn))
+            self.assertFalse(confirm_enabled(conn))
         finally:
             conn.close()
 
@@ -2620,5 +2651,619 @@ class ResearchImportAuthorizationTests(unittest.TestCase):
             self._delete_user(user_id)
 
 
+class ResearchImportLiveOneShotTests(unittest.TestCase):
+    """RI-5B one-shot live confirm is batch-bound and fail-closed. Isolated testdb only."""
+
+    EXPECTED_SHA = "f4f8256c6e2c2f0af11806d809c0ba929998b75390d10740780b34b3c00385da"
+    EXPECTED_FP = "9a738ebd998830708f2b48e317c6635a9da3608d2b9ba337d4599d3115d2ff32"
+
+    def setUp(self) -> None:
+        os.environ.pop("NORTHSTAR_ALLOW_RESEARCH_IMPORT_CONFIRM", None)
+        self.admin = _actor()
+        self.specialist = NorthStarUser(
+            id=self.admin.id,
+            email=self.admin.email,
+            full_name=self.admin.full_name,
+            is_administrator=False,
+            is_internal_northstar=True,
+            active=True,
+        )
+        with get_connection() as conn:
+            self.premier_id = int(
+                conn.execute("SELECT id FROM clients WHERE lower(code)='premier'").fetchone()[0]
+            )
+            self.brown_id = int(
+                conn.execute("SELECT id FROM clients WHERE lower(code)='brown'").fetchone()[0]
+            )
+            row = conn.execute(
+                "SELECT id, client_id, sha256, status FROM research_import_batches WHERE id=1"
+            ).fetchone()
+            self.has_batch1 = row is not None
+            if self.has_batch1:
+                self.batch1_client = int(row["client_id"])
+                self.batch1_sha = str(row["sha256"] or "")
+                self.batch1_status = str(row["status"] or "")
+
+    def test_contract_matches_only_exact_tuple(self) -> None:
+        from research_import_live_confirm import one_shot_contract_matches
+
+        self.assertTrue(
+            one_shot_contract_matches(
+                client_id=4,
+                batch_id=1,
+                sha256=self.EXPECTED_SHA,
+                fingerprint=self.EXPECTED_FP,
+                actor=self.admin,
+            )
+        )
+        self.assertFalse(
+            one_shot_contract_matches(
+                client_id=4,
+                batch_id=2,
+                sha256=self.EXPECTED_SHA,
+                fingerprint=self.EXPECTED_FP,
+                actor=self.admin,
+            )
+        )
+        self.assertFalse(
+            one_shot_contract_matches(
+                client_id=self.brown_id,
+                batch_id=1,
+                sha256=self.EXPECTED_SHA,
+                fingerprint=self.EXPECTED_FP,
+                actor=self.admin,
+            )
+        )
+        self.assertFalse(
+            one_shot_contract_matches(
+                client_id=4,
+                batch_id=1,
+                sha256="0" * 64,
+                fingerprint=self.EXPECTED_FP,
+                actor=self.admin,
+            )
+        )
+        self.assertFalse(
+            one_shot_contract_matches(
+                client_id=4,
+                batch_id=1,
+                sha256=self.EXPECTED_SHA,
+                fingerprint="0" * 64,
+                actor=self.admin,
+            )
+        )
+        self.assertFalse(
+            one_shot_contract_matches(
+                client_id=4,
+                batch_id=1,
+                sha256=self.EXPECTED_SHA,
+                fingerprint=self.EXPECTED_FP,
+                actor=self.specialist,
+            )
+        )
+        self.assertFalse(
+            one_shot_contract_matches(
+                client_id=4,
+                batch_id=1,
+                sha256=self.EXPECTED_SHA,
+                fingerprint=self.EXPECTED_FP,
+                actor=None,
+            )
+        )
+
+    def test_production_default_without_one_shot_is_refused(self) -> None:
+        from research_import_live_confirm import assert_confirm_permitted
+
+        self.assertFalse(is_production_path())
+        with get_connection() as conn:
+            self.assertFalse(is_production_db(conn))
+            with self.assertRaises(PermissionError) as raised:
+                assert_confirm_permitted(
+                    conn,
+                    client_id=4,
+                    batch_id=1,
+                    expected_fingerprint=self.EXPECTED_FP,
+                    actor=self.admin,
+                )
+            self.assertEqual(str(raised.exception), ISOLATED_CONFIRM_DISABLED)
+
+    def test_one_shot_gate_on_mocked_production(self) -> None:
+        from unittest.mock import patch
+
+        from research_import_live_confirm import assert_confirm_permitted
+
+        if not self.has_batch1 or self.batch1_sha != self.EXPECTED_SHA or self.batch1_client != 4:
+            self.skipTest("testdb copy does not contain RI-5A Premier batch 1")
+        with patch("research_import_live_confirm.is_production_db", return_value=True):
+            with get_connection() as conn:
+                grant = assert_confirm_permitted(
+                    conn,
+                    client_id=4,
+                    batch_id=1,
+                    expected_fingerprint=self.EXPECTED_FP,
+                    actor=self.admin,
+                )
+                self.assertEqual(grant, "ri5b_one_shot")
+                with self.assertRaises(PermissionError) as wrong_batch:
+                    assert_confirm_permitted(
+                        conn,
+                        client_id=4,
+                        batch_id=2,
+                        expected_fingerprint=self.EXPECTED_FP,
+                        actor=self.admin,
+                    )
+                self.assertEqual(str(wrong_batch.exception), PRODUCTION_CONFIRM_DISABLED)
+                with self.assertRaises(PermissionError) as wrong_client:
+                    assert_confirm_permitted(
+                        conn,
+                        client_id=self.brown_id,
+                        batch_id=1,
+                        expected_fingerprint=self.EXPECTED_FP,
+                        actor=self.admin,
+                    )
+                self.assertEqual(str(wrong_client.exception), PRODUCTION_CONFIRM_DISABLED)
+                with self.assertRaises(PermissionError) as wrong_fp:
+                    assert_confirm_permitted(
+                        conn,
+                        client_id=4,
+                        batch_id=1,
+                        expected_fingerprint="ff" * 32,
+                        actor=self.admin,
+                    )
+                self.assertEqual(str(wrong_fp.exception), PRODUCTION_CONFIRM_DISABLED)
+                with self.assertRaises(PermissionError) as specialist:
+                    assert_confirm_permitted(
+                        conn,
+                        client_id=4,
+                        batch_id=1,
+                        expected_fingerprint=self.EXPECTED_FP,
+                        actor=self.specialist,
+                    )
+                self.assertEqual(str(specialist.exception), PRODUCTION_CONFIRM_DISABLED)
+                conn.execute(
+                    "UPDATE research_import_batches SET sha256=? WHERE id=1 AND client_id=4",
+                    ("ab" * 32,),
+                )
+                try:
+                    with self.assertRaises(PermissionError) as wrong_sha:
+                        assert_confirm_permitted(
+                            conn,
+                            client_id=4,
+                            batch_id=1,
+                            expected_fingerprint=self.EXPECTED_FP,
+                            actor=self.admin,
+                        )
+                    self.assertEqual(str(wrong_sha.exception), PRODUCTION_CONFIRM_DISABLED)
+                finally:
+                    conn.execute(
+                        "UPDATE research_import_batches SET sha256=? WHERE id=1 AND client_id=4",
+                        (self.EXPECTED_SHA,),
+                    )
+                    conn.commit()
+                os.environ["NORTHSTAR_ALLOW_RESEARCH_IMPORT_CONFIRM"] = "1"
+                try:
+                    with self.assertRaises(PermissionError) as env_still_closed:
+                        assert_confirm_permitted(
+                            conn,
+                            client_id=4,
+                            batch_id=99,
+                            expected_fingerprint=self.EXPECTED_FP,
+                            actor=self.admin,
+                        )
+                    self.assertEqual(str(env_still_closed.exception), PRODUCTION_CONFIRM_DISABLED)
+                finally:
+                    os.environ.pop("NORTHSTAR_ALLOW_RESEARCH_IMPORT_CONFIRM", None)
+
+    def test_one_shot_cannot_confirm_a_future_batch(self) -> None:
+        from unittest.mock import patch
+
+        from research_import_live_confirm import assert_confirm_permitted
+        from research_import_staging import upload_research_import
+
+        uploaded = upload_research_import(
+            client_id=self.premier_id,
+            actor=self.admin,
+            filename="future.csv",
+            content=_csv(["Company Name"], [["Future RI Batch"]]),
+            source_type="INTERNAL_RESEARCH",
+            source_label="must not confirm",
+        )
+        other_id = int(uploaded["batch"]["batch_id"])
+        self.assertNotEqual(other_id, 1)
+        with patch("research_import_live_confirm.is_production_db", return_value=True):
+            with get_connection() as conn:
+                with self.assertRaises(PermissionError) as raised:
+                    assert_confirm_permitted(
+                        conn,
+                        client_id=self.premier_id,
+                        batch_id=other_id,
+                        expected_fingerprint=self.EXPECTED_FP,
+                        actor=self.admin,
+                    )
+                self.assertEqual(str(raised.exception), PRODUCTION_CONFIRM_DISABLED)
+
+
+class ResearchImportLineageForecastTests(unittest.TestCase):
+    """RI-5C preview/confirm parity for alias and source-identity writes."""
+
+    def setUp(self) -> None:
+        os.environ.pop("NORTHSTAR_ALLOW_RESEARCH_IMPORT_CONFIRM", None)
+        self.actor = _actor()
+        with get_connection() as conn:
+            self.premier_id = int(
+                conn.execute("SELECT id FROM clients WHERE lower(code)='premier'").fetchone()[0]
+            )
+            self.brown_id = int(
+                conn.execute("SELECT id FROM clients WHERE lower(code)='brown'").fetchone()[0]
+            )
+            self.carmeco_id = int(
+                conn.execute("SELECT id FROM clients WHERE lower(code)='carmeco'").fetchone()[0]
+            )
+            ensure_research_import_schema(conn)
+            conn.commit()
+
+    def _enable(self) -> None:
+        os.environ["NORTHSTAR_ALLOW_RESEARCH_IMPORT_CONFIRM"] = "1"
+        self.addCleanup(lambda: os.environ.pop("NORTHSTAR_ALLOW_RESEARCH_IMPORT_CONFIRM", None))
+
+    def _upload(self, filename: str, headers: list[str], rows: list[list[str]], **kwargs):
+        uploaded = upload_research_import(
+            client_id=kwargs.pop("client_id", self.premier_id),
+            actor=self.actor,
+            filename=filename,
+            content=_csv(headers, rows),
+            **kwargs,
+        )
+        return uploaded["batch"]
+
+    def _parity(self, plan: dict, result: dict) -> None:
+        forecast = plan["forecast"]
+        pairs = (
+            ("companies_created", "companies_created"),
+            ("companies_reused", "companies_reused"),
+            ("ccrs_created", "ccrs_created"),
+            ("ccrs_reused", "ccrs_reused"),
+            ("contacts_created", "contacts_created"),
+            ("contacts_reused", "contacts_reused"),
+            ("contacts_skipped", "contacts_skipped"),
+            ("notes_append", "notes_created"),
+            ("notes_dedupe", "notes_deduped"),
+            ("research_created", "research_created"),
+            ("attributes_created", "attributes_created"),
+            ("sources_captured", "sources_created"),
+            ("aliases_created", "aliases_created"),
+            ("aliases_deduped", "aliases_deduped"),
+            ("identities_created", "identities_created"),
+            ("identities_deduped", "identities_deduped"),
+            ("workflow_fields_will_write", "workflow_fields_written"),
+            ("provenance_events_created", "provenance_events_created"),
+        )
+        for fkey, rkey in pairs:
+            self.assertEqual(
+                int(forecast.get(fkey) or 0),
+                int(result.get(rkey) or 0),
+                f"{fkey} != {rkey}: {forecast.get(fkey)} vs {result.get(rkey)}",
+            )
+        self.assertEqual(int(result.get("workflow_fields_written") or 0), 0)
+        actions = {
+            (item.get("company_name"), item.get("alias", {}).get("action"), item.get("source_identity", {}).get("action"))
+            for item in plan.get("lineage") or []
+        }
+        self.assertTrue(actions)
+
+    def _seed_company(
+        self,
+        *,
+        name: str,
+        website: str,
+        address: str = "100 Pattern Ave",
+        city: str = "Schaumburg",
+        state: str = "IL",
+        zip_code: str = "60173",
+        phone: str = "847-555-0100",
+        premier: bool = False,
+        notes: str = "",
+        brown: bool = False,
+        carmeco: bool = False,
+        contact: tuple[str, str] | None = None,
+    ) -> int:
+        token = secrets.token_hex(4)
+        with get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO companies (
+                    external_record_no, company_name, address, city, state, zip,
+                    website, legacy_phone, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'TEST')
+                """,
+                (f"RI5C-{token}", name, address, city, state, zip_code, website, phone),
+            )
+            company_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            if premier:
+                conn.execute(
+                    """
+                    INSERT INTO client_company_relationships (client_id, company_id, status, notes)
+                    VALUES (?, ?, 'New', ?)
+                    """,
+                    (self.premier_id, company_id, notes),
+                )
+            if brown:
+                conn.execute(
+                    """
+                    INSERT INTO client_company_relationships (client_id, company_id, status, notes)
+                    VALUES (?, ?, 'New', '')
+                    """,
+                    (self.brown_id, company_id),
+                )
+            if carmeco:
+                conn.execute(
+                    """
+                    INSERT INTO client_company_relationships (client_id, company_id, status, notes)
+                    VALUES (?, ?, 'New', '')
+                    """,
+                    (self.carmeco_id, company_id),
+                )
+            if contact:
+                first, last = contact
+                conn.execute(
+                    """
+                    INSERT INTO contacts (
+                        company_id, external_record_no, first_name, last_name, source_row_index
+                    ) VALUES (?, ?, ?, ?, 0)
+                    """,
+                    (company_id, f"RI5C-C-{token}", first, last),
+                )
+            conn.commit()
+        return company_id
+
+    def test_ri5b_pattern_preview_confirm_parity(self) -> None:
+        self._enable()
+        note = "Existing Premier workflow note — do not duplicate."
+        alpha = self._seed_company(
+            name="RI5C Pattern Alpha Co",
+            website="https://ri5c-alpha.example",
+            premier=True,
+            notes=note,
+            contact=("Terri", "Pattern"),
+        )
+        beta = self._seed_company(
+            name="RI5C Pattern Beta Co",
+            website="https://ri5c-beta.example",
+            premier=True,
+            notes=note,
+        )
+        gamma = self._seed_company(
+            name="RI5C Pattern Gamma Co",
+            website="https://ri5c-gamma.example",
+            brown=True,
+            carmeco=True,
+        )
+        headers = [
+            "Company Name", "Website", "Product Source", "Contact Name", "Comments",
+        ]
+        rows = [
+            [
+                "RI5C Pattern Alpha Co",
+                "https://ri5c-alpha.example",
+                "https://ri5c-alpha.example/product",
+                "Terri Pattern",
+                note,
+            ],
+            [
+                "RI5C Pattern Beta Co",
+                "https://ri5c-beta.example",
+                "https://ri5c-beta.example/product",
+                "",
+                note,
+            ],
+            [
+                "RI5C Pattern Gamma Co",
+                "https://ri5c-gamma.example",
+                "https://ri5c-gamma.example/product",
+                "",
+                "",
+            ],
+        ]
+        batch = self._upload("ri5c-pattern.csv", headers, rows, source_type="INTERNAL_RESEARCH")
+        mapping = build_v3_mapping(
+            headers,
+            fields={
+                "company_name": "Company Name",
+                "website": "Website",
+                "product_source": "Product Source",
+                "contact_full_name": "Contact Name",
+                "imported_notes": "Comments",
+            },
+        )
+        save_mapping(self.premier_id, batch["batch_id"], actor=self.actor, mapping=mapping)
+        plan = dry_run_research_import(self.premier_id, batch["batch_id"], limit=10)
+        self.assertFalse(plan["blocking"], plan.get("blocking_reasons"))
+        self.assertEqual(plan["forecast"]["companies_created"], 0)
+        self.assertEqual(plan["forecast"]["companies_reused"], 3)
+        self.assertEqual(plan["forecast"]["ccrs_created"], 1)
+        self.assertEqual(plan["forecast"]["ccrs_reused"], 2)
+        self.assertEqual(plan["forecast"]["contacts_created"], 0)
+        self.assertEqual(plan["forecast"]["contacts_reused"], 1)
+        self.assertEqual(plan["forecast"]["notes_dedupe"], 2)
+        self.assertEqual(plan["forecast"]["notes_append"], 0)
+        self.assertEqual(plan["forecast"]["research_created"], 3)
+        self.assertEqual(plan["forecast"]["attributes_created"], 0)
+        self.assertEqual(plan["forecast"]["sources_captured"], 6)
+        self.assertEqual(plan["forecast"]["aliases_created"], 3)
+        self.assertEqual(plan["forecast"]["aliases_deduped"], 0)
+        self.assertEqual(plan["forecast"]["identities_created"], 3)
+        self.assertEqual(plan["forecast"]["identities_deduped"], 0)
+        self.assertEqual(plan["forecast"]["master_accept_incoming"], 0)
+        self.assertEqual(plan["forecast"]["workflow_fields_will_write"], 0)
+        self.assertEqual(plan["forecast"]["provenance_events_created"], 0)
+        alias_actions = [item["alias"]["action"] for item in plan["lineage"]]
+        identity_actions = [item["source_identity"]["action"] for item in plan["lineage"]]
+        self.assertEqual(alias_actions, ["CREATE", "CREATE", "CREATE"])
+        self.assertEqual(identity_actions, ["CREATE", "CREATE", "CREATE"])
+        result = confirm_research_import(
+            client_id=self.premier_id,
+            batch_id=batch["batch_id"],
+            plan_fingerprint=plan["plan_fingerprint"],
+            actor=self.actor,
+        )
+        self._parity(plan, result)
+        replay = confirm_research_import(
+            client_id=self.premier_id,
+            batch_id=batch["batch_id"],
+            plan_fingerprint=plan["plan_fingerprint"],
+            actor=self.actor,
+        )
+        self.assertTrue(replay.get("idempotent"))
+        with get_connection() as conn:
+            self.assertEqual(
+                int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM company_aliases WHERE source_system='RESEARCH_IMPORT' AND company_id IN (?,?,?)",
+                        (alpha, beta, gamma),
+                    ).fetchone()[0]
+                ),
+                3,
+            )
+            self.assertEqual(
+                int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM company_source_identities WHERE source_system='RESEARCH_IMPORT' AND company_id IN (?,?,?)",
+                        (alpha, beta, gamma),
+                    ).fetchone()[0]
+                ),
+                3,
+            )
+
+    def test_same_batch_alias_dedupe_and_identity_per_row(self) -> None:
+        self._enable()
+        headers = ["Org Name", "Website", "Source"]
+        rows = [
+            ["Unique RI5C Same Co", "https://ri5c-same.example", "https://ri5c-same.example/a"],
+            ["unique  ri5c same co", "https://ri5c-same.example", "https://ri5c-same.example/b"],
+        ]
+        batch = self._upload("ri5c-same.csv", headers, rows, source_type="INTERNAL_RESEARCH")
+        mapping = build_v3_mapping(
+            headers,
+            fields={"company_name": "Org Name", "website": "Website", "product_source": "Source"},
+        )
+        save_mapping(self.premier_id, batch["batch_id"], actor=self.actor, mapping=mapping)
+        plan = dry_run_research_import(self.premier_id, batch["batch_id"], limit=10)
+        self.assertFalse(plan["blocking"], plan.get("blocking_reasons"))
+        self.assertEqual(plan["forecast"]["companies_created"], 1)
+        self.assertEqual(plan["forecast"]["companies_reused"], 1)
+        self.assertEqual(plan["forecast"]["aliases_created"], 1)
+        self.assertEqual(plan["forecast"]["aliases_deduped"], 1)
+        self.assertEqual(plan["forecast"]["identities_created"], 2)
+        self.assertEqual(plan["forecast"]["identities_deduped"], 0)
+        result = confirm_research_import(
+            client_id=self.premier_id,
+            batch_id=batch["batch_id"],
+            plan_fingerprint=plan["plan_fingerprint"],
+            actor=self.actor,
+        )
+        self._parity(plan, result)
+
+    def test_existing_alias_and_identity_dedupe_and_new_batch(self) -> None:
+        self._enable()
+        company_id = self._seed_company(
+            name="RI5C Existing Lineage Co",
+            website="https://ri5c-existing-lineage.example",
+            premier=True,
+        )
+        with get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO company_aliases (
+                    company_id, alias_name, alias_norm, source_system, client_id, source_record_no
+                ) VALUES (?, ?, ?, 'RESEARCH_IMPORT', ?, '')
+                """,
+                (
+                    company_id,
+                    "RI5C Existing Lineage Co",
+                    norm_name("RI5C Existing Lineage Co"),
+                    self.premier_id,
+                ),
+            )
+            conn.commit()
+        headers = ["Org Name", "Website"]
+        batch = self._upload(
+            "ri5c-existing.csv",
+            headers,
+            [["RI5C Existing Lineage Co", "https://ri5c-existing-lineage.example"]],
+            source_type="INTERNAL_RESEARCH",
+        )
+        mapping = build_v3_mapping(headers, fields={"company_name": "Org Name", "website": "Website"})
+        save_mapping(self.premier_id, batch["batch_id"], actor=self.actor, mapping=mapping)
+        plan = dry_run_research_import(self.premier_id, batch["batch_id"], limit=5)
+        self.assertEqual(plan["forecast"]["aliases_created"], 0)
+        self.assertEqual(plan["forecast"]["aliases_deduped"], 1)
+        self.assertEqual(plan["forecast"]["identities_created"], 1)
+        row_id = plan["rows"][0]["row_id"]
+        identity_no = f"{batch['batch_id']}:{row_id}"
+        with get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO company_source_identities (
+                    company_id, client_id, source_system, source_record_no
+                ) VALUES (?, ?, 'RESEARCH_IMPORT', ?)
+                """,
+                (company_id, self.premier_id, identity_no),
+            )
+            conn.commit()
+        plan2 = dry_run_research_import(self.premier_id, batch["batch_id"], limit=5)
+        self.assertEqual(plan2["forecast"]["aliases_deduped"], 1)
+        self.assertEqual(plan2["forecast"]["identities_created"], 0)
+        self.assertEqual(plan2["forecast"]["identities_deduped"], 1)
+        result = confirm_research_import(
+            client_id=self.premier_id,
+            batch_id=batch["batch_id"],
+            plan_fingerprint=plan2["plan_fingerprint"],
+            actor=self.actor,
+        )
+        self._parity(plan2, result)
+        second = self._upload(
+            "ri5c-existing-b2.csv",
+            headers,
+            [["RI5C Existing Lineage Co", "https://ri5c-existing-lineage.example"]],
+            source_type="INTERNAL_RESEARCH",
+        )
+        save_mapping(self.premier_id, second["batch_id"], actor=self.actor, mapping=mapping)
+        plan3 = dry_run_research_import(self.premier_id, second["batch_id"], limit=5)
+        self.assertEqual(plan3["forecast"]["aliases_created"], 0)
+        self.assertEqual(plan3["forecast"]["aliases_deduped"], 1)
+        self.assertEqual(plan3["forecast"]["identities_created"], 1)
+        result3 = confirm_research_import(
+            client_id=self.premier_id,
+            batch_id=second["batch_id"],
+            plan_fingerprint=plan3["plan_fingerprint"],
+            actor=self.actor,
+        )
+        self._parity(plan3, result3)
+
+    def test_new_company_creates_alias_and_identity(self) -> None:
+        self._enable()
+        headers = ["Org Name", "Website"]
+        batch = self._upload(
+            "ri5c-new.csv",
+            headers,
+            [["Unique RI5C Brand New Co", "https://ri5c-brand-new.example"]],
+            source_type="INTERNAL_RESEARCH",
+        )
+        mapping = build_v3_mapping(headers, fields={"company_name": "Org Name", "website": "Website"})
+        save_mapping(self.premier_id, batch["batch_id"], actor=self.actor, mapping=mapping)
+        plan = dry_run_research_import(self.premier_id, batch["batch_id"], limit=5)
+        self.assertEqual(plan["forecast"]["companies_created"], 1)
+        self.assertEqual(plan["forecast"]["aliases_created"], 1)
+        self.assertEqual(plan["forecast"]["identities_created"], 1)
+        result = confirm_research_import(
+            client_id=self.premier_id,
+            batch_id=batch["batch_id"],
+            plan_fingerprint=plan["plan_fingerprint"],
+            actor=self.actor,
+        )
+        self._parity(plan, result)
+
+
 if __name__ == "__main__":
     unittest.main()
+
