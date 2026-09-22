@@ -98,7 +98,9 @@ function normalizeContact(raw: unknown): ContactSummary {
     last_name: pick(record, 'last_name'),
     title: pick(record, 'title'),
     phone: pick(record, 'phone'),
+    phone_extension: pick(record, 'phone_extension'),
     alt_phone: pick(record, 'alt_phone'),
+    alt_phone_extension: pick(record, 'alt_phone_extension'),
     email: pick(record, 'email'),
     external_record_no: pick(record, 'external_record_no'),
   }
@@ -3710,7 +3712,9 @@ export type ContactWorkspace = {
   last_name: string
   title: string
   phone: string
+  phone_extension?: string
   alt_phone: string
+  alt_phone_extension?: string
   email: string
   company_id: number | null
   company_name: string
@@ -4005,7 +4009,9 @@ export async function fetchContacts(params?: {
         full_name: fullName,
         title: pick(record, 'title'),
         phone: pick(record, 'phone'),
+        phone_extension: pick(record, 'phone_extension'),
         alt_phone: pick(record, 'alt_phone'),
+        alt_phone_extension: pick(record, 'alt_phone_extension'),
         email: pick(record, 'email'),
         company_id: record.company_id == null ? null : asNumber(record.company_id),
         company_name: pick(record, 'company_name'),
@@ -4351,6 +4357,7 @@ export async function previewManualContact(body: {
   title?: string
   email?: string
   phone?: string
+  phone_extension?: string
   alt_phone?: string
 }): Promise<ManualContactPreviewResponse> {
   const writeClientId = requireWriteClientId(body.client_id)
@@ -4372,7 +4379,9 @@ export async function saveManualContact(body: {
   title?: string
   email?: string
   phone?: string
+  phone_extension?: string
   alt_phone?: string
+  alt_phone_extension?: string
   confirm_without_contact_info?: boolean
   created_by?: string
 }): Promise<ManualContactSaveResult> {
@@ -4383,6 +4392,30 @@ export async function saveManualContact(body: {
     body: JSON.stringify({ ...body, client_id: writeClientId }),
   })
   return (await parseJson(response)) as ManualContactSaveResult
+}
+
+export async function updateContactPhones(
+  contactId: number,
+  body: {
+    client_id: number
+    phone?: string | null
+    phone_extension?: string | null
+    alt_phone?: string | null
+    alt_phone_extension?: string | null
+  },
+): Promise<{ ok: boolean; workspace: ContactWorkspace; phone: string; phone_extension: string }> {
+  const writeClientId = requireWriteClientId(body.client_id)
+  const response = await fetch(`/api/contacts/${encodeURIComponent(String(contactId))}/phone`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, client_id: writeClientId }),
+  })
+  return (await parseJson(response)) as {
+    ok: boolean
+    workspace: ContactWorkspace
+    phone: string
+    phone_extension: string
+  }
 }
 
 export type ManualCompanyClientRel = {

@@ -6,7 +6,7 @@ Never infers Carmeco. Does not use Client Knowledge.
 
 from __future__ import annotations
 
-from staff_context import resolve_staff_actor
+from staff_context import resolve_staff_actor, runtime_attribution_name
 
 from typing import Any
 
@@ -333,7 +333,7 @@ def save_manual_company(body: ManualCompanySaveRequest) -> ManualCompanySaveResu
     action = _blank(body.action).lower()
     if action not in {"create", "link"}:
         raise ValueError("action must be create or link.")
-    created_by = _blank(body.created_by) or _blank(user.full_name) or "Julie Magnani"
+    created_by = runtime_attribution_name(user, getattr(body, "created_by", ""))
     name = _blank(body.company_name)
 
     with get_connection() as conn:

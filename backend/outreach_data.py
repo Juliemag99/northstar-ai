@@ -5,7 +5,7 @@ Reuses activities + client_company_relationships. No email send. No appointment 
 
 from __future__ import annotations
 
-from staff_context import resolve_staff_actor
+from staff_context import resolve_staff_actor, runtime_attribution_name
 
 from datetime import date, datetime
 from typing import Any
@@ -171,7 +171,7 @@ def log_outreach(
         client_id=client_id,
         status=outcome,
     )
-    created_by = _blank(body.created_by) or _blank(user.full_name) or "Julie Magnani"
+    created_by = runtime_attribution_name(user, getattr(body, "created_by", ""))
 
     with get_connection() as conn:
         cl = conn.execute(

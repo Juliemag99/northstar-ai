@@ -11,6 +11,8 @@ import {
   rescheduleAppointment,
   type AppointmentRecord,
 } from './api/carmeco'
+import { useAuth } from './auth/useAuth'
+import { authenticatedActorName } from './auth/reportDefaults'
 import AppointmentDetailsFields from './AppointmentDetailsFields'
 import NextActionFields from './NextActionFields'
 import {
@@ -71,6 +73,8 @@ export default function Appointments({
   activeClientName: string
   onAppointmentsChanged?: () => void
 }) {
+  const { user } = useAuth()
+  const actorName = authenticatedActorName(user)
   const [searchParams, setSearchParams] = useSearchParams()
   const bucket = parseBucket(searchParams.get('filter'))
   const scoped = activeClientId != null && activeClientId > 0
@@ -281,7 +285,7 @@ export default function Appointments({
           next_action: storedNextAction(cancelNextSel, nextActionCatalog),
           follow_up_date: cancelFollowDate || null,
           follow_up_time: cancelFollowTime,
-          created_by: 'Julie Magnani',
+          created_by: actorName,
         })
         setMessage('Appointment cancelled.')
       } else {

@@ -21,9 +21,10 @@ export function staffRoleLabel(
   return 'Staff'
 }
 
-/** Hide Administration and Client Setup from non-admins. Backend still enforces. */
+/** Hide Administration, Client Setup, and Cross-Client from non-admins. Backend still enforces. */
 export function staffNavItemVisible(navId: string, canAdminister: boolean): boolean {
   if (navId === 'administration' || navId === 'clients') return canAdminister
+  if (navId === 'cross-client-opportunities') return canAdminister
   return true
 }
 

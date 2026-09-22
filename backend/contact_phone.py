@@ -248,10 +248,27 @@ def store_phone_parts(raw: str, *, field: str = "phone") -> tuple[str, str]:
     return text, ""
 
 
+def digits_only_extension(raw: object = "") -> str:
+    return re.sub(r"\D", "", _blank(raw))
+
+
+def stored_phone_pair(
+    phone_raw: str,
+    extension_raw: str | None = None,
+    *,
+    field: str = "phone",
+) -> tuple[str, str]:
+    """Durable (main, extension). Explicit extension stays out of stored main phone."""
+    main, parsed_ext = store_phone_parts(phone_raw, field=field)
+    if extension_raw is None:
+        return main, parsed_ext
+    return main, digits_only_extension(extension_raw)
+
+
 def format_phone_with_extension(main: object = "", extension: object = "") -> str:
     """Render stored main + extension as '(xxx) xxx-xxxx x16'."""
     phone = _blank(main)
-    ext = re.sub(r"\D", "", _blank(extension))
+    ext = digits_only_extension(extension)
     if phone and ext:
         return f"{phone} x{ext}"
     return phone

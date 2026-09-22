@@ -31,8 +31,8 @@ import {
   type NextActionSelection,
 } from './nextAction'
 import type { DashboardFollowUpItem } from './types/carmeco'
-
-const WORKSPACE_USER = 'Julie Magnani'
+import { useAuth } from './auth/useAuth'
+import { authenticatedActorName } from './auth/reportDefaults'
 
 type TaskActionKind = 'call' | 'complete' | 'reschedule' | null
 
@@ -83,6 +83,8 @@ export default function Tasks({
   activeClientName: string
   onTasksChanged?: () => void
 }) {
+  const { user } = useAuth()
+  const actorName = authenticatedActorName(user)
   const [items, setItems] = useState<DashboardFollowUpItem[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -271,7 +273,7 @@ export default function Tasks({
         company_id: item.company_id,
         contact_id: hasValidContact(item) ? item.contact_id : null,
         notes: completeNote,
-        created_by: WORKSPACE_USER,
+        created_by: actorName,
       })
       closeAction()
       setMessage(`Completed follow-up for ${display(item.contact_name || item.company_name)}.`)
@@ -304,7 +306,7 @@ export default function Tasks({
         queue_source: item.source,
         queue_source_id: item.source_id,
         complete_current: true,
-        created_by: WORKSPACE_USER,
+        created_by: actorName,
         appointment: isAppointmentSetStatus(callStatus)
           ? {
               appointment_date: appointmentDetails.appointment_date,
@@ -347,7 +349,7 @@ export default function Tasks({
         assigned_user_id: rescheduleAssignedUserId ? Number(rescheduleAssignedUserId) : null,
         next_action: storedNextAction(rescheduleNextSel, catalog),
         notes: rescheduleNotes,
-        created_by: WORKSPACE_USER,
+        created_by: actorName,
       })
       closeAction()
       setMessage(`Rescheduled follow-up for ${display(item.contact_name || item.company_name)}.`)

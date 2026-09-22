@@ -4,7 +4,9 @@ export interface ContactSummary {
   last_name: string
   title: string
   phone: string
+  phone_extension?: string
   alt_phone: string
+  alt_phone_extension?: string
   email: string
   external_record_no: string
 }
@@ -16,7 +18,9 @@ export interface ContactListItem {
   full_name: string
   title: string
   phone: string
+  phone_extension?: string
   alt_phone: string
+  alt_phone_extension?: string
   email: string
   company_id: number | null
   company_name: string

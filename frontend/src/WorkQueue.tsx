@@ -11,6 +11,8 @@ import {
   fetchWorkQueueClients,
 } from './api/carmeco'
 import { requireWriteClientId } from './writeClient'
+import { useAuth } from './auth/useAuth'
+import { staffCanAdminister } from './auth/staffCanAdminister'
 import NextActionFields from './NextActionFields'
 import {
   emptyNextActionCatalog,
@@ -100,6 +102,8 @@ export default function WorkQueue({
   assignedClients?: ClientOption[]
   onQueueChanged?: () => void
 }) {
+  const { authenticated, user } = useAuth()
+  const canAdminister = staffCanAdminister(authenticated, user)
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const [clients, setClients] = useState<ClientOption[]>(assignedClients ?? [])
@@ -500,7 +504,7 @@ export default function WorkQueue({
       await completeContactFollowUp(item.contact_id, {
         client_id: item.client_id,
         notes: notes.trim(),
-        created_by: 'Julie Magnani',
+        created_by: user?.full_name?.trim() || undefined,
       })
       setMessage(`Follow-up completed for ${item.contact_name || item.company_name}.`)
       await loadQueue()
@@ -535,7 +539,7 @@ export default function WorkQueue({
           next_action: nextAction,
           follow_up_date: scheduleDate,
           follow_up_time: scheduleTime,
-          created_by: 'Julie Magnani',
+          created_by: user?.full_name?.trim() || undefined,
         })
         if (item.work_type === 'Call') {
           await completeWorkQueueItem({
@@ -637,7 +641,7 @@ export default function WorkQueue({
       tone: 'follow-up',
       emptyLabel: 'Overdue',
     },
-  ]
+  ].filter((card) => canAdminister || card.id !== 'cross-client')
 
   const freshCards = [
     {
@@ -793,7 +797,9 @@ export default function WorkQueue({
               <option value="new">New Assignment</option>
               <option value="needs-next-action">Needs Next Action</option>
               <option value="research">Research</option>
-              <option value="cross-client">Cross-Client Opportunity</option>
+              {canAdminister ? (
+                <option value="cross-client">Cross-Client Opportunity</option>
+              ) : null}
               <option value="other">Other</option>
             </select>
           </label>
@@ -918,7 +924,9 @@ export default function WorkQueue({
         <div className="quick-filter-row">
           <button type="button" className={`quick-filter-chip ${hot ? 'quick-filter-chip--active' : ''}`} onClick={() => toggleBoolFilter('hot', !hot)}>Hot</button>
           <button type="button" className={`quick-filter-chip ${weblead ? 'quick-filter-chip--active' : ''}`} onClick={() => toggleBoolFilter('weblead', !weblead)}>WebLead</button>
+          {canAdminister ? (
           <button type="button" className={`quick-filter-chip ${crossClient ? 'quick-filter-chip--active' : ''}`} onClick={() => toggleBoolFilter('cross_client', !crossClient)}>Cross-Client Opportunity</button>
+          ) : null}
           <button type="button" className="link-btn" onClick={() => {
             const next = searchDraft.trim()
             setDebouncedQ(next)

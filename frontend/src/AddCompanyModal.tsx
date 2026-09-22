@@ -261,7 +261,6 @@ export default function AddCompanyModal({
       ...form,
       company_name: name,
       confirm_create_despite_match: confirmAnyway,
-      created_by: 'Julie Magnani',
     }
     setBusy(true)
     try {

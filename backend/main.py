@@ -74,6 +74,7 @@ from models import (
     ContactActivityCreate,
     ContactAssignRequest,
     ContactAssignResult,
+    ContactPhoneUpdate,
     CompanyLookupResponse,
     ManualContactPreviewRequest,
     ManualContactPreviewResponse,
@@ -259,6 +260,7 @@ from manual_contact_data import (
     lookup_companies_for_client,
     preview_manual_contact,
     save_manual_contact,
+    update_contact_phones,
 )
 from manual_company_data import preview_manual_company, save_manual_company
 from zoominfo_crm_data import (
@@ -4352,6 +4354,21 @@ def get_contact_workspace_api(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.patch("/api/contacts/{contact_id}/phone")
+def patch_contact_phone_api(contact_id: int, body: ContactPhoneUpdate):
+    """Update structured phone / extension. Does not concatenate into stored main phone."""
+    try:
+        return update_contact_phones(contact_id, body)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/contacts/{contact_id}/assign", response_model=ContactAssignResult)

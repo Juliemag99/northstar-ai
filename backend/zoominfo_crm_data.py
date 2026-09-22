@@ -7,7 +7,7 @@ No live ZoomInfo API — callers supply a snapshot (tests and future fetch).
 
 from __future__ import annotations
 
-from staff_context import resolve_staff_actor
+from staff_context import resolve_staff_actor, runtime_attribution_name
 
 from datetime import datetime
 from typing import Any
@@ -364,7 +364,7 @@ def apply_zoominfo_contact_update(
     contact_id: int, body: ZoomInfoContactApplyRequest
 ) -> ZoomInfoContactApplyResult:
     user, client_id = _require_user_and_client(body.client_id)
-    created_by = _blank(body.created_by) or _blank(user.full_name) or "Julie Magnani"
+    created_by = runtime_attribution_name(user, getattr(body, "created_by", ""))
     apply_set = { _blank(f) for f in body.apply_fields if _blank(f) }
     zi = _zoominfo_contact_values(body.zoominfo)
     retrieved_at = _now()
@@ -690,7 +690,7 @@ def save_zoominfo_add(body: ZoomInfoAddSaveRequest) -> ZoomInfoAddResult:
     user, client_id = _require_user_and_client(body.client_id)
     kind = _blank(body.kind).lower() or "contact"
     action = _blank(body.action).lower()
-    created_by = _blank(body.created_by) or _blank(user.full_name) or "Julie Magnani"
+    created_by = runtime_attribution_name(user, getattr(body, "created_by", ""))
     snap = body.zoominfo
     if kind == "company":
         from manual_company_data import save_manual_company

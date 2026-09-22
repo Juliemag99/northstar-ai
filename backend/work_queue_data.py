@@ -8,7 +8,7 @@ Status and work queue are separate:
 
 from __future__ import annotations
 
-from staff_context import resolve_staff_actor
+from staff_context import resolve_staff_actor, runtime_attribution_name
 
 from datetime import date, datetime
 from typing import Literal
@@ -2071,7 +2071,7 @@ def complete_follow_up_task(body: FollowUpTaskCompleteRequest) -> FollowUpTaskAc
     if user is None:
         raise PermissionError("User not found.")
     client_id = require_write_client_id(body.client_id, user_id=user.id)
-    created_by = _blank(body.created_by) or _blank(user.full_name) or "Julie Magnani"
+    created_by = runtime_attribution_name(user, getattr(body, "created_by", ""))
     notes = _blank(body.notes)
     activity_id: int | None = None
 
@@ -2190,7 +2190,7 @@ def reschedule_follow_up_task(body: FollowUpTaskRescheduleRequest) -> FollowUpTa
     follow_at = _follow_up_at_stamp(follow_date, follow_time)
     if not follow_at:
         raise ValueError("Follow-up date and time are required to reschedule.")
-    created_by = _blank(body.created_by) or _blank(user.full_name) or "Julie Magnani"
+    created_by = runtime_attribution_name(user, getattr(body, "created_by", ""))
     notes = _blank(body.notes)
     follow_up_activity_id: int | None = None
 
@@ -2525,7 +2525,7 @@ def log_work_queue_call(body: WorkQueueLogCallRequest) -> WorkQueueLogCallResult
                     appointment_id=int(existing["id"]),
                 )
 
-    created_by = body.created_by.strip() or user.full_name
+    created_by = runtime_attribution_name(user, getattr(body, "created_by", ""))
     from next_actions import canonicalize_next_action
 
     next_action = canonicalize_next_action(

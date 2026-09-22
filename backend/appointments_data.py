@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from staff_context import resolve_staff_actor
+from staff_context import resolve_staff_actor, runtime_attribution_name
 
 from datetime import date, datetime, timezone
 
@@ -795,7 +795,7 @@ def cancel_appointment(appointment_id: int, body) -> AppointmentActionResult:
     _require_client_access(client_id)
     reason = _blank(body.reason) or _blank(body.notes)
     new_status = _blank(body.new_status)
-    created_by = _blank(body.created_by) or "Julie Magnani"
+    created_by = runtime_attribution_name(resolve_staff_actor(), getattr(body, "created_by", ""))
     if not reason:
         raise ValueError("A cancellation reason is required.")
     if not new_status:
@@ -959,7 +959,7 @@ def complete_appointment(appointment_id: int, body) -> AppointmentActionResult:
         body = AppointmentCompleteRequest.model_validate(body)
     client_id = int(body.client_id)
     _require_client_access(client_id)
-    created_by = _blank(body.created_by) or "Julie Magnani"
+    created_by = runtime_attribution_name(resolve_staff_actor(), getattr(body, "created_by", ""))
     grade = _blank(body.grade)
     outcome = _blank(body.outcome)
     follow_up_notes = _blank(body.follow_up_notes)

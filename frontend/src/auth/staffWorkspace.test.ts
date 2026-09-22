@@ -34,17 +34,20 @@ describe('staffRoleLabel', () => {
 })
 
 describe('staffNavItemVisible', () => {
-  it('hides Administration and Clients from specialists', () => {
+  it('hides Administration, Clients, and Cross-Client from specialists', () => {
     expect(staffNavItemVisible('administration', false)).toBe(false)
     expect(staffNavItemVisible('clients', false)).toBe(false)
+    expect(staffNavItemVisible('cross-client-opportunities', false)).toBe(false)
     expect(staffNavItemVisible('dashboard', false)).toBe(true)
     expect(staffNavItemVisible('work-queue', false)).toBe(true)
     expect(staffNavItemVisible('contacts', false)).toBe(true)
+    expect(staffNavItemVisible('reports', false)).toBe(true)
   })
 
-  it('shows Administration and Clients to administrators', () => {
+  it('shows Administration, Clients, and Cross-Client to administrators', () => {
     expect(staffNavItemVisible('administration', true)).toBe(true)
     expect(staffNavItemVisible('clients', true)).toBe(true)
+    expect(staffNavItemVisible('cross-client-opportunities', true)).toBe(true)
   })
 })
 

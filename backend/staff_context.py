@@ -58,3 +58,17 @@ def require_staff_actor(user_id: int | None = None) -> NorthStarUser:
     if user is None or not user.active:
         raise PermissionError("Authentication required.")
     return user
+
+
+def runtime_attribution_name(user: NorthStarUser | None, requested: str = "") -> str:
+    """Display name for ordinary CRM writes.
+
+    Authenticated session/user always wins. A client-supplied created_by such as
+    "Julie Magnani" cannot impersonate another actor when a session user exists.
+    """
+    if user is not None:
+        name = (user.full_name or "").strip() or (user.email or "").strip()
+        if name:
+            return name
+    text = (requested or "").strip()
+    return text or "Julie Magnani"

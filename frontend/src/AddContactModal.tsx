@@ -10,6 +10,7 @@ import {
   type ManualContactMatch,
 } from './api/carmeco'
 import { SELECT_CLIENT_FOR_WRITE, requireWriteClientId } from './writeClient'
+import { digitsOnlyExtension, formatUsPhoneDisplay, splitPhoneExtension } from './phoneDisplay'
 
 export type AddContactModalProps = {
   open: boolean
@@ -26,6 +27,7 @@ const emptyForm = {
   title: '',
   email: '',
   phone: '',
+  phone_extension: '',
   alt_phone: '',
 }
 
@@ -50,26 +52,6 @@ function duplicateStatus(kind: DupStatusKind): { text: string } {
     default:
       return { text: 'Not checked' }
   }
-}
-
-function formatUsPhoneDisplay(raw: string): string {
-  const trimmed = raw.trim()
-  if (!trimmed) return ''
-  const extMatch = trimmed.match(
-    /(?:(?:[\s\-./,])*(?:extension|ext\.?|xt)\s*[:.\-]?\s*|(?<![A-Za-z])x\s*[:.\-]?\s*|\s*#\s*)(\d{1,6})\)?\s*$/i,
-  )
-  let main = trimmed
-  let ext = ''
-  if (extMatch && extMatch.index != null) {
-    main = trimmed.slice(0, extMatch.index).trim()
-    ext = (extMatch[1] || '').replace(/\D/g, '')
-  }
-  let digits = main.replace(/\D/g, '')
-  if (digits.length >= 11 && digits.startsWith('1')) digits = digits.slice(1)
-  if (digits.length > 10) digits = digits.slice(0, 10)
-  if (digits.length !== 10) return trimmed
-  const formatted = `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`
-  return ext ? `${formatted} x${ext}` : formatted
 }
 
 function hasContactInfo(email: string, phone: string, altPhone: string): boolean {
@@ -337,6 +319,7 @@ export default function AddContactModal({
         title: form.title.trim(),
         email: form.email.trim(),
         phone: form.phone.trim(),
+        phone_extension: digitsOnlyExtension(form.phone_extension),
         alt_phone: form.alt_phone.trim(),
       })
       setMatches(preview.matches)
@@ -411,10 +394,10 @@ export default function AddContactModal({
       last_name: last,
       title: form.title.trim(),
       email: form.email.trim(),
-      phone: form.phone.trim(),
+      phone: splitPhoneExtension(form.phone.trim()).main || form.phone.trim(),
+      phone_extension: digitsOnlyExtension(form.phone_extension),
       alt_phone: form.alt_phone.trim(),
       confirm_without_contact_info: confirmWithoutInfo,
-      created_by: 'Julie Magnani',
     }
     setBusy(true)
     try {
@@ -565,9 +548,24 @@ export default function AddContactModal({
                   value={form.phone}
                   onChange={(e) => updateField('phone', e.target.value)}
                   onBlur={() => {
-                    const formatted = formatUsPhoneDisplay(form.phone)
+                    const split = splitPhoneExtension(form.phone)
+                    const formatted = formatUsPhoneDisplay(split.main || form.phone)
+                    const nextExt = split.extension || form.phone_extension
                     if (formatted !== form.phone) updateField('phone', formatted)
+                    if (nextExt && nextExt !== form.phone_extension) {
+                      updateField('phone_extension', digitsOnlyExtension(nextExt))
+                    }
                   }}
+                  autoComplete="off"
+                />
+              </label>
+              <label className="edit-field">
+                <span className="edit-field__label">Extension</span>
+                <input
+                  className="edit-input"
+                  value={form.phone_extension}
+                  onChange={(e) => updateField('phone_extension', digitsOnlyExtension(e.target.value))}
+                  inputMode="numeric"
                   autoComplete="off"
                 />
               </label>

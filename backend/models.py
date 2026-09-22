@@ -28,7 +28,9 @@ class ContactSummary(BaseModel):
     last_name: str = ""
     title: str = ""
     phone: str = ""
+    phone_extension: str = ""
     alt_phone: str = ""
+    alt_phone_extension: str = ""
     email: str = ""
     external_record_no: str = ""
 
@@ -46,7 +48,9 @@ class ContactListItem(BaseModel):
     full_name: str = ""
     title: str = ""
     phone: str = ""
+    phone_extension: str = ""
     alt_phone: str = ""
+    alt_phone_extension: str = ""
     email: str = ""
     company_id: int | None = None
     company_name: str = ""
@@ -2187,7 +2191,9 @@ class ContactWorkspace(BaseModel):
     last_name: str = ""
     title: str = ""
     phone: str = ""
+    phone_extension: str = ""
     alt_phone: str = ""
+    alt_phone_extension: str = ""
     email: str = ""
     company_id: int | None = None
     company_name: str = ""
@@ -2915,13 +2921,25 @@ class ManualContactSaveRequest(BaseModel):
     title: str = ""
     email: str = ""
     phone: str = ""
+    phone_extension: str = ""
     alt_phone: str = ""
+    alt_phone_extension: str = ""
     confirm_without_contact_info: bool = False
     created_by: str = "Julie Magnani"
     source: str = "manual"
     zoominfo_contact_id: str = ""
     linkedin_url: str = ""
     location: str = ""
+
+
+class ContactPhoneUpdate(BaseModel):
+    """Edit stored main phone / structured extension. Does not redesign contact management."""
+
+    client_id: PositiveClientId
+    phone: str | None = None
+    phone_extension: str | None = None
+    alt_phone: str | None = None
+    alt_phone_extension: str | None = None
 
 
 class ManualContactSaveResult(BaseModel):

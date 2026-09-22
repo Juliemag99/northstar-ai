@@ -19,6 +19,8 @@ import type {
   ReportRecordsResponse,
   ReportTeamResponse,
 } from './types/carmeco'
+import type { StaffUser } from './api/auth'
+import { defaultReportUserId } from './auth/reportDefaults'
 
 const PAGE_SIZE = 50
 
@@ -222,14 +224,16 @@ function Pager({
 export default function Reports({
   activeClientId,
   activeClientName,
+  currentUser = null,
 }: {
   activeClientId: number | null
   activeClientName: string
+  currentUser?: StaffUser | null
 }) {
   const defaults = useMemo(() => currentMonthRange(), [])
   const [dateFrom, setDateFrom] = useState(defaults.from)
   const [dateTo, setDateTo] = useState(defaults.to)
-  const [userId, setUserId] = useState(0)
+  const [userId, setUserId] = useState(() => defaultReportUserId(currentUser))
   const [campaignId, setCampaignId] = useState(0)
   const [kindFilter, setKindFilter] = useState('')
   const [filters, setFilters] = useState<ReportFiltersResponse | null>(null)

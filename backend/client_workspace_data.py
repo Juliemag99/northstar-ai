@@ -6,7 +6,7 @@ Master company identity is companies.id; client context is required for CRM fiel
 
 from __future__ import annotations
 
-from staff_context import resolve_staff_actor
+from staff_context import resolve_staff_actor, runtime_attribution_name
 
 import re
 import sqlite3
@@ -54,6 +54,10 @@ def _row_opt(row, key: str) -> str:
 
 def _phone_display(row, field: str, ext_field: str) -> str:
     return format_phone_with_extension(_row_opt(row, field), _row_opt(row, ext_field))
+
+
+def _ext_digits(row, key: str) -> str:
+    return re.sub(r"\D", "", _row_opt(row, key))
 
 
 def _row_phone_or_legacy(row) -> str:
@@ -1181,7 +1185,9 @@ def _workspace_from_relationship(conn, row) -> CompanyWorkspace:
             last_name=_blank(c["last_name"]),
             title=_blank(c["title"]),
             phone=_phone_display(c, "phone", "phone_extension"),
+            phone_extension=_ext_digits(c, "phone_extension"),
             alt_phone=_phone_display(c, "alt_phone", "alt_phone_extension"),
+            alt_phone_extension=_ext_digits(c, "alt_phone_extension"),
             email=_blank(c["email"]),
             external_record_no=_blank(c["external_record_no"]),
         )
@@ -1460,7 +1466,9 @@ def _provisional_workspace_for_client(conn, company, client_row) -> CompanyWorks
             last_name=_blank(c["last_name"]),
             title=_blank(c["title"]),
             phone=_phone_display(c, "phone", "phone_extension"),
+            phone_extension=_ext_digits(c, "phone_extension"),
             alt_phone=_phone_display(c, "alt_phone", "alt_phone_extension"),
+            alt_phone_extension=_ext_digits(c, "alt_phone_extension"),
             email=_blank(c["email"]),
             external_record_no=_blank(c["external_record_no"]),
         )
@@ -2133,7 +2141,9 @@ def list_contacts(
                     full_name=_blank(row["full_name"]) or f"{first} {last}".strip(),
                     title=_blank(row["title"]),
                     phone=_phone_display(row, "phone", "phone_extension"),
+                    phone_extension=_ext_digits(row, "phone_extension"),
                     alt_phone=_phone_display(row, "alt_phone", "alt_phone_extension"),
+                    alt_phone_extension=_ext_digits(row, "alt_phone_extension"),
                     email=_blank(row["email"]),
                     company_id=int(row["company_id"]) if row["company_id"] else None,
                     company_name=_blank(row["company_name"]),
@@ -2387,7 +2397,9 @@ def get_contact_workspace(
                     last_name=_blank(row["last_name"]),
                     title=_blank(row["title"]),
                     phone=_phone_display(row, "phone", "phone_extension"),
+                    phone_extension=_ext_digits(row, "phone_extension"),
                     alt_phone=_phone_display(row, "alt_phone", "alt_phone_extension"),
+                    alt_phone_extension=_ext_digits(row, "alt_phone_extension"),
                     email=_blank(row["email"]),
                     company_id=company_id,
                     company_name=_blank(row["company_name"]),
@@ -2535,7 +2547,9 @@ def get_contact_workspace(
         last_name=_blank(row["last_name"]),
         title=_blank(row["title"]),
         phone=_phone_display(row, "phone", "phone_extension"),
+        phone_extension=_ext_digits(row, "phone_extension"),
         alt_phone=_phone_display(row, "alt_phone", "alt_phone_extension"),
+        alt_phone_extension=_ext_digits(row, "alt_phone_extension"),
         email=_blank(row["email"]),
         company_id=company_id,
         company_name=_blank(row["company_name"]),
@@ -2750,7 +2764,7 @@ def update_contact_workflow(contact_id: int, body) -> dict:
                         f"Status changed from {old_status or '—'} to {new_status}."
                     ),
                     assigned_user=_blank(user.full_name),
-                    created_by=_blank(user.full_name) or "Julie Magnani",
+                    created_by=runtime_attribution_name(user),
                 )
             other_after = [
                 dict(r)
@@ -2791,7 +2805,7 @@ def update_contact_workflow(contact_id: int, body) -> dict:
                     assigned_user_id=new_assignee,
                     assigned_user=assignee_name,
                     notes=new_next,
-                    created_by=_blank(body.user) or "Julie Magnani",
+                    created_by=runtime_attribution_name(user, getattr(body, "user", "")),
                 )
             conn.commit()
         except Exception:
@@ -3227,7 +3241,7 @@ def create_contact_activity(contact_id: int, body) -> dict:
     if not user_can_access_client(user.id, client_id) and not user.is_administrator:
         raise PermissionError("Not authorized for this client.")
 
-    created_by = _blank(body.created_by) or _blank(user.full_name) or "Julie Magnani"
+    created_by = runtime_attribution_name(user, getattr(body, "created_by", ""))
     schedule_follow_up = bool(getattr(body, "schedule_follow_up", False))
     if activity_type == "Follow-Up":
         schedule_follow_up = True
@@ -3606,7 +3620,7 @@ def complete_contact_follow_up(contact_id: int, body) -> dict:
         raise PermissionError("User not found.")
     if not user_can_access_client(user.id, client_id) and not user.is_administrator:
         raise PermissionError("Not authorized for this client.")
-    created_by = _blank(body.created_by) or _blank(user.full_name) or "Julie Magnani"
+    created_by = runtime_attribution_name(user, getattr(body, "created_by", ""))
     notes = _blank(body.notes)
     activity_id: int | None = None
 
@@ -3756,7 +3770,7 @@ def reschedule_contact_follow_up(contact_id: int, body) -> dict:
         raise PermissionError("User not found.")
     if not user_can_access_client(user.id, client_id) and not user.is_administrator:
         raise PermissionError("Not authorized for this client.")
-    created_by = _blank(body.created_by) or _blank(user.full_name) or "Julie Magnani"
+    created_by = runtime_attribution_name(user, getattr(body, "created_by", ""))
     notes = _blank(body.notes)
     follow_up_activity_id: int | None = None
 
@@ -3979,7 +3993,7 @@ def assign_shared_contact(contact_id: int, body) -> dict:
         raise PermissionError("Not authorized for this client.")
 
     ensure_contact_workflow_schema()
-    created_by = _blank(body.user) or _blank(user.full_name) or "Julie Magnani"
+    created_by = runtime_attribution_name(user, getattr(body, "user", ""))
     company_created = False
     activity_id = None
 

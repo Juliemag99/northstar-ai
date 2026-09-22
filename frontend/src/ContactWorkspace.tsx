@@ -10,6 +10,7 @@ import {
   fetchNextActions,
   isCampaignRouteStatus,
   rescheduleContactFollowUp,
+  updateContactPhones,
   updateContactWorkflow,
   type ContactTimelineItem,
   type ContactWorkspace as ContactWorkspaceData,
@@ -47,8 +48,13 @@ import {
 } from './workspaceReturn'
 import { SELECT_CLIENT_FOR_WRITE, requireWriteClientId } from './writeClient'
 import ZoomInfoUpdateModal from './ZoomInfoUpdateModal'
-
-const WORKSPACE_USER = 'Julie Magnani'
+import { useAuth } from './auth/useAuth'
+import { authenticatedActorName } from './auth/reportDefaults'
+import {
+  digitsOnlyExtension,
+  formatPhoneWithExtension,
+  splitPhoneExtension,
+} from './phoneDisplay'
 
 function display(value: string | null | undefined): string {
   const t = (value || '').trim()
@@ -95,6 +101,8 @@ export default function ContactWorkspacePage({
     follow_up_date: string
   }) => void
 }) {
+  const { user } = useAuth()
+  const actorName = authenticatedActorName(user)
   const navigate = useNavigate()
   const location = useLocation()
   const [searchParams] = useSearchParams()
@@ -158,6 +166,11 @@ export default function ContactWorkspacePage({
   const [assignSaving, setAssignSaving] = useState(false)
   const [assignError, setAssignError] = useState<string | null>(null)
   const [confirmCompany, setConfirmCompany] = useState(false)
+  const [editingPhone, setEditingPhone] = useState(false)
+  const [phoneMain, setPhoneMain] = useState('')
+  const [phoneExt, setPhoneExt] = useState('')
+  const [phoneSaving, setPhoneSaving] = useState(false)
+  const [phoneError, setPhoneError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -168,6 +181,7 @@ export default function ContactWorkspacePage({
       setAssignError(null)
       setConfirmCompany(false)
       setEditingWorkflow(false)
+      setEditingPhone(false)
       setActionKind(null)
       try {
         const next = await fetchContactWorkspace(contactId, clientId)
@@ -248,6 +262,31 @@ export default function ContactWorkspacePage({
     setFollowUpTime(timeForInput(next.follow_up_time))
   }
 
+  async function savePhone() {
+    let writeId: number
+    try {
+      writeId = requireWriteClientId(clientId)
+    } catch {
+      setPhoneError(SELECT_CLIENT_FOR_WRITE)
+      return
+    }
+    setPhoneSaving(true)
+    setPhoneError(null)
+    try {
+      const result = await updateContactPhones(contactId, {
+        client_id: writeId,
+        phone: phoneMain.trim(),
+        phone_extension: digitsOnlyExtension(phoneExt),
+      })
+      applyWorkspace(result.workspace)
+      setEditingPhone(false)
+    } catch (err) {
+      setPhoneError(err instanceof Error ? err.message : 'Could not update phone.')
+    } finally {
+      setPhoneSaving(false)
+    }
+  }
+
   function notifyClientViews(next: ContactWorkspaceData) {
     if (!onWorkflowSaved || !next.client_id) return
     onWorkflowSaved({
@@ -279,7 +318,7 @@ export default function ContactWorkspacePage({
         next_action: storedNextAction(nextSel, nextActionCatalog),
         follow_up_date: followUpDate,
         follow_up_time: followUpTime,
-        user: WORKSPACE_USER,
+        user: actorName,
       })
       applyWorkspace(result.workspace)
       notifyClientViews(result.workspace)
@@ -319,14 +358,14 @@ export default function ContactWorkspacePage({
         result = await completeContactFollowUp(contactId, {
           client_id: writeId,
           notes: completeNote,
-          created_by: WORKSPACE_USER,
+          created_by: actorName,
         })
       } else if (actionKind === 'reschedule') {
         result = await rescheduleContactFollowUp(contactId, {
           client_id: writeId,
           follow_up_date: rescheduleDate,
           follow_up_time: rescheduleTime,
-          created_by: WORKSPACE_USER,
+          created_by: actorName,
         })
       } else {
         const willSchedule =
@@ -347,7 +386,7 @@ export default function ContactWorkspacePage({
                 follow_up_time: willSchedule ? callFollowTime : '',
                 assigned_user_id: callAssignedUserId ? Number(callAssignedUserId) : 0,
                 schedule_follow_up: willSchedule,
-                created_by: WORKSPACE_USER,
+                created_by: actorName,
                 appointment: isAppointmentSetStatus(callStatus)
                   ? {
                       appointment_date: appointmentDetails.appointment_date,
@@ -368,7 +407,7 @@ export default function ContactWorkspacePage({
                   client_id: writeId,
                   activity_type: 'Note',
                   notes: noteText,
-                  created_by: WORKSPACE_USER,
+                  created_by: actorName,
                 }
               : {
                   client_id: writeId,
@@ -378,7 +417,7 @@ export default function ContactWorkspacePage({
                   follow_up_date: followDate,
                   follow_up_time: followTime || null,
                   assigned_user_id: assignedUserId ? Number(assignedUserId) : 0,
-                  created_by: WORKSPACE_USER,
+                  created_by: actorName,
                 }
         result = await createContactActivity(contactId, body)
       }
@@ -512,7 +551,7 @@ export default function ContactWorkspacePage({
       const result = await assignSharedContact(contactId, {
         client_id: writeId,
         add_company: addCompany,
-        user: WORKSPACE_USER,
+        user: actorName,
       })
       if (result.needs_company_confirmation) {
         setConfirmCompany(true)
@@ -814,7 +853,67 @@ export default function ContactWorkspacePage({
           </div>
           <div>
             <dt>Phone</dt>
-            <dd>{display(data.phone)}</dd>
+            <dd>
+              {editingPhone ? (
+                <div className="milestone-form-grid">
+                  <label className="edit-field">
+                    <span className="edit-field__label">Main</span>
+                    <input
+                      className="edit-input"
+                      value={phoneMain}
+                      onChange={(e) => setPhoneMain(e.target.value)}
+                      autoComplete="off"
+                    />
+                  </label>
+                  <label className="edit-field">
+                    <span className="edit-field__label">Extension</span>
+                    <input
+                      className="edit-input"
+                      value={phoneExt}
+                      onChange={(e) => setPhoneExt(digitsOnlyExtension(e.target.value))}
+                      inputMode="numeric"
+                      autoComplete="off"
+                    />
+                  </label>
+                  <div>
+                    <button type="button" className="primary-btn" disabled={phoneSaving} onClick={() => void savePhone()}>
+                      Save phone
+                    </button>{' '}
+                    <button type="button" className="link-btn" onClick={() => setEditingPhone(false)}>
+                      Cancel
+                    </button>
+                  </div>
+                  {phoneError ? <p className="data-status data-status--error">{phoneError}</p> : null}
+                </div>
+              ) : (
+                <>
+                  {display(
+                    formatPhoneWithExtension(
+                      splitPhoneExtension(data.phone).main || data.phone,
+                      data.phone_extension || splitPhoneExtension(data.phone).extension,
+                    ),
+                  )}
+                  {clientId != null && clientId > 0 ? (
+                    <>
+                      {' '}
+                      <button
+                        type="button"
+                        className="link-btn"
+                        onClick={() => {
+                          const split = splitPhoneExtension(data.phone)
+                          setPhoneMain(split.main || data.phone)
+                          setPhoneExt(digitsOnlyExtension(data.phone_extension || split.extension))
+                          setPhoneError(null)
+                          setEditingPhone(true)
+                        }}
+                      >
+                        Edit
+                      </button>
+                    </>
+                  ) : null}
+                </>
+              )}
+            </dd>
           </div>
           <div>
             <dt>Alternate Phone</dt>

@@ -6,7 +6,7 @@ Does not auto-create NorthStar users (including Julie Magnani) as outside contac
 
 from __future__ import annotations
 
-from staff_context import resolve_staff_actor
+from staff_context import resolve_staff_actor, runtime_attribution_name
 
 import re
 from typing import Any
@@ -18,11 +18,13 @@ from contact_phone import (
     format_phone_with_extension,
     format_us_phone_display,
     lookup_contact_phone_matches,
+    stored_phone_pair,
     store_phone_parts,
     upsert_contact_phone_keys,
 )
 from db import get_connection
 from models import (
+    ContactPhoneUpdate,
     CrmAddContactInput,
     ManualContactMatch,
     ManualContactPreviewRequest,
@@ -656,7 +658,7 @@ def save_manual_contact(body: ManualContactSaveRequest) -> ManualContactSaveResu
     last = _blank(body.last_name)
     if action == "create" and (not first or not last):
         raise ValueError("First name and last name are required.")
-    created_by = _blank(body.created_by) or _blank(user.full_name) or "Julie Magnani"
+    created_by = runtime_attribution_name(user, getattr(body, "created_by", ""))
     selected_company_id = int(body.company_id)
     from client_workspace_data import ensure_contact_workflow_schema
 
@@ -702,8 +704,18 @@ def save_manual_contact(body: ManualContactSaveRequest) -> ManualContactSaveResu
             client_name = _blank(rel["client_name"])
             relationship_id = int(rel["relationship_id"])
             columns = {str(r["name"]) for r in conn.execute("PRAGMA table_info(contacts)")}
-            phone_main, phone_ext = store_phone_parts(_blank(body.phone), field="phone")
-            alt_main, alt_ext = store_phone_parts(_blank(body.alt_phone), field="alt_phone")
+            explicit_ext = _blank(getattr(body, "phone_extension", ""))
+            explicit_alt_ext = _blank(getattr(body, "alt_phone_extension", ""))
+            phone_main, phone_ext = stored_phone_pair(
+                _blank(body.phone),
+                explicit_ext if explicit_ext else None,
+                field="phone",
+            )
+            alt_main, alt_ext = stored_phone_pair(
+                _blank(body.alt_phone),
+                explicit_alt_ext if explicit_alt_ext else None,
+                field="alt_phone",
+            )
             insert_cols = [
                 "company_id",
                 "external_record_no",
@@ -837,3 +849,88 @@ def save_manual_contact(body: ManualContactSaveRequest) -> ManualContactSaveResu
         activity_id=activity_id,
         already_assigned=False,
     )
+
+
+def update_contact_phones(contact_id: int, body: ContactPhoneUpdate) -> dict:
+    """Update stored main phone and structured extension for one CRM contact."""
+    from client_workspace_data import get_contact_workspace
+
+    if not isinstance(body, ContactPhoneUpdate):
+        body = ContactPhoneUpdate.model_validate(body)
+    _user, client_id = _require_user_and_client(body.client_id)
+    cid = int(contact_id)
+    if cid <= 0:
+        raise ValueError("contact_id is required.")
+
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                """
+                SELECT ct.id, ct.company_id, ct.phone, ct.phone_extension,
+                       ct.alt_phone, ct.alt_phone_extension
+                FROM contacts ct
+                JOIN client_company_relationships ccr
+                  ON ccr.company_id = ct.company_id AND ccr.client_id = ?
+                WHERE ct.id = ?
+                """,
+                (client_id, cid),
+            ).fetchone()
+            if row is None:
+                raise LookupError("Contact not found for this client.")
+            columns = {str(r["name"]) for r in conn.execute("PRAGMA table_info(contacts)")}
+            stored_phone = _blank(row["phone"])
+            stored_ext = _blank(row["phone_extension"]) if "phone_extension" in row.keys() else ""
+            stored_alt = _blank(row["alt_phone"])
+            stored_alt_ext = (
+                _blank(row["alt_phone_extension"]) if "alt_phone_extension" in row.keys() else ""
+            )
+            if body.phone is not None and body.phone_extension is None:
+                phone_main, phone_ext = stored_phone_pair(body.phone, None, field="phone")
+            elif body.phone_extension is not None:
+                phone_main, phone_ext = stored_phone_pair(
+                    stored_phone if body.phone is None else _blank(body.phone),
+                    body.phone_extension,
+                    field="phone",
+                )
+            else:
+                phone_main, phone_ext = stored_phone, stored_ext
+            if body.alt_phone is not None and body.alt_phone_extension is None:
+                alt_main, alt_ext = stored_phone_pair(body.alt_phone, None, field="alt_phone")
+            elif body.alt_phone_extension is not None:
+                alt_main, alt_ext = stored_phone_pair(
+                    stored_alt if body.alt_phone is None else _blank(body.alt_phone),
+                    body.alt_phone_extension,
+                    field="alt_phone",
+                )
+            else:
+                alt_main, alt_ext = stored_alt, stored_alt_ext
+            sets = ["phone = ?", "alt_phone = ?"]
+            vals: list[object] = [phone_main, alt_main]
+            if "phone_extension" in columns:
+                sets.append("phone_extension = ?")
+                vals.append(phone_ext or "")
+            if "alt_phone_extension" in columns:
+                sets.append("alt_phone_extension = ?")
+                vals.append(alt_ext or "")
+            vals.append(cid)
+            conn.execute(f"UPDATE contacts SET {', '.join(sets)} WHERE id = ?", vals)
+            upsert_contact_phone_keys(conn, cid, phone_main, alt_main)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    workspace = get_contact_workspace(cid, client_id=client_id)
+    return {
+        "ok": True,
+        "message": "Contact phone updated.",
+        "contact_id": cid,
+        "client_id": client_id,
+        "phone": phone_main,
+        "phone_extension": phone_ext or "",
+        "alt_phone": alt_main,
+        "alt_phone_extension": alt_ext or "",
+        "workspace": workspace,
+    }
+

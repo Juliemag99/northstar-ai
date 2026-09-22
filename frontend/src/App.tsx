@@ -1822,7 +1822,7 @@ function App() {
       const result = await updateCompanyStatus(
         selectedRecordNo,
         draftStatus,
-        WORKSPACE_USER,
+        displayName,
         workspaceClientId,
         workspaceClientName,
       )
@@ -4336,6 +4336,7 @@ function App() {
             <Reports
               activeClientId={activeClientId}
               activeClientName={clientName}
+              currentUser={user}
             />
           )}
 
@@ -4391,7 +4392,11 @@ function App() {
           )}
 
           {!loading && !error && showCrossClientOpportunities && (
-            <CrossClientOpportunities client={client} />
+            canAdminister ? (
+              <CrossClientOpportunities client={client} />
+            ) : (
+              <Navigate to="/" replace />
+            )
           )}
 
           {!loading && !error && showClientSetupPage && canAdminister && showClientOnboarding && (
@@ -4467,6 +4472,7 @@ function App() {
                 <section className="stat-grid stat-grid--work-queue" aria-label="Due work">
                   {workQueueCards
                     .filter((card) => card.lane === 'due')
+                    .filter((card) => canAdminister || card.id !== 'cross-client')
                     .map((card) => (
                     <Link
                       key={card.id}
@@ -4551,6 +4557,7 @@ function App() {
                 </section>
               ) : null}
 
+              {canAdminister ? (
               <Link
                 to={
                   activeClientId != null && activeClientId > 0
@@ -4564,6 +4571,7 @@ function App() {
                 <strong>{opportunityCount ?? '—'}</strong>
                 <small>Find companies with proven engagement elsewhere</small>
               </Link>
+              ) : null}
 
               <div className="panels">
                 <section className="panel panel--wide" aria-labelledby="priority-heading">
