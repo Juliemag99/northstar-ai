@@ -4117,3 +4117,36 @@ a.primary-btn:hover {
   margin-top: 0.9rem;
 }
 
+.steward-company-card,
+.steward-preview,
+.steward-audit {
+  margin-top: 1rem;
+}
+
+.steward-edit-form,
+.steward-current-fields {
+  display: grid;
+  gap: 0.65rem;
+  max-width: 42rem;
+}
+
+.steward-source {
+  font-weight: 650;
+}
+
+.steward-source--manual {
+  color: var(--up, #0b6e4f);
+}
+
+.steward-source--leadmaster {
+  color: #1d4e89;
+}
+
+.steward-source--crm,
+.steward-source--ai,
+.steward-source--merge,
+.steward-source--system {
+  color: inherit;
+}
+
+

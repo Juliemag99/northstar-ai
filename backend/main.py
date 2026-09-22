@@ -2962,14 +2962,17 @@ def leadmaster_refresh_meta_api(request: Request):
 @app.get("/api/admin/data-steward/meta")
 def data_steward_meta_api(request: Request):
     require_administrator(request)
-    from data_steward import live_destructive_enabled
+    from data_steward import live_company_amend_enabled, live_destructive_enabled
 
     return {
         "live_mutations_enabled": live_destructive_enabled(),
+        "company_amend_enabled": live_company_amend_enabled(),
         "archive_enabled": False,
         "delete_enabled": False,
         "merge_enabled": False,
-        "message": "Live archive/delete/merge are not enabled",
+        "remove_relationship_enabled": False,
+        "restore_enabled": False,
+        "message": "Governed Master Company amend is enabled. Live archive/delete/merge/remove remain disabled.",
     }
 
 
@@ -2994,7 +2997,7 @@ def data_steward_provenance_api(
                 "schema_ready": False,
                 "events": [],
                 "current": None,
-                "message": "Provenance schema is not on live northstar.db",
+                "message": "Provenance table is not available on this database copy.",
             }
         events = provenance_history(
             conn,
@@ -3016,7 +3019,111 @@ def data_steward_provenance_api(
             "schema_ready": True,
             "current": current,
             "events": events,
+            "newest_first": True,
         }
+
+
+def _steward_http_error(exc: Exception) -> HTTPException:
+    from data_steward import StewardError, StewardLiveWriteError, StewardPermissionError
+    from data_steward_amend import DuplicateCompanyError
+
+    if isinstance(exc, DuplicateCompanyError):
+        return HTTPException(
+            status_code=409,
+            detail={
+                "code": "duplicate_company",
+                "message": "Proposed values collide with another master company. Save is blocked.",
+                "candidates": exc.candidates,
+            },
+        )
+    if isinstance(exc, StewardPermissionError):
+        return HTTPException(status_code=403, detail=str(exc))
+    if isinstance(exc, StewardLiveWriteError):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, StewardError):
+        code = str(exc)
+        status = 400 if code == "reason_required" else 409
+        return HTTPException(status_code=status, detail={"code": code, "message": code})
+    if isinstance(exc, PermissionError):
+        return HTTPException(status_code=403, detail=str(exc))
+    if isinstance(exc, LookupError):
+        return HTTPException(status_code=404, detail=str(exc))
+    raise exc
+
+
+@app.get("/api/admin/data-steward/companies")
+def data_steward_search_companies_api(request: Request, q: str = Query(default="")):
+    require_administrator(request)
+    from data_steward_amend import search_master_companies
+
+    with get_connection() as conn:
+        return {"companies": search_master_companies(conn, q)}
+
+
+@app.get("/api/admin/data-steward/companies/{company_id}")
+def data_steward_get_company_api(company_id: int, request: Request):
+    require_administrator(request)
+    from data_steward_amend import load_master_company
+
+    try:
+        with get_connection() as conn:
+            return load_master_company(conn, company_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/admin/data-steward/companies/{company_id}/amend/preview")
+def data_steward_preview_company_amend_api(
+    company_id: int, body: dict, request: Request
+):
+    actor = require_administrator(request)
+    from data_steward_amend import CompanyAmendRequest, fields_from_request, preview_company_amend
+
+    parsed = CompanyAmendRequest.model_validate(body or {})
+    try:
+        with get_connection() as conn:
+            return preview_company_amend(
+                conn,
+                actor=actor,
+                company_id=company_id,
+                fields=fields_from_request(parsed),
+                reason=parsed.reason,
+            )
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.post("/api/admin/data-steward/companies/{company_id}/amend")
+def data_steward_save_company_amend_api(
+    company_id: int, body: dict, request: Request
+):
+    actor = require_administrator(request)
+    from data_steward_amend import (
+        CompanyAmendRequest,
+        fields_from_request,
+        save_company_amend,
+    )
+
+    parsed = CompanyAmendRequest.model_validate(body or {})
+    try:
+        with get_connection() as conn:
+            return save_company_amend(
+                conn,
+                actor=actor,
+                company_id=company_id,
+                fields=fields_from_request(parsed),
+                reason=parsed.reason,
+                expected_updated_at=parsed.expected_updated_at,
+                preview_fingerprint_value=parsed.preview_fingerprint,
+            )
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
 
 
 @app.post("/api/clients/{client_id}/admin/leadmaster-refresh")

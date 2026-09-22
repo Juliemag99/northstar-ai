@@ -200,9 +200,19 @@ class StewardPermissionError(PermissionError):
 
 
 def _blank(value: object | None) -> str:
+    """Return stripped text. Empty string means blank.
+
+    This is not a boolean. ``if _blank(value)`` is true when the value has
+    non-empty text (populated), which is why CREATE provenance records
+    populated fields and skips blanks.
+    """
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _has_text(value: object | None) -> bool:
+    return bool(_blank(value))
 
 
 def _is_baseline_value(value: object, *, field: str = "") -> bool:
@@ -431,32 +441,39 @@ def provenance_history(
     if entity_type:
         aliases = _entity_type_aliases(entity_type)
         placeholders = ",".join("?" for _ in aliases)
-        clauses.append(f"entity_type IN ({placeholders})")
+        clauses.append(f"e.entity_type IN ({placeholders})")
         params.extend(aliases)
     if entity_id:
-        clauses.append("entity_id = ?")
+        clauses.append("e.entity_id = ?")
         params.append(int(entity_id))
-    if _blank(field):
-        clauses.append("field = ?")
+    if _has_text(field):
+        clauses.append("e.field = ?")
         params.append(_blank(field))
-    if _blank(source_type):
-        clauses.append("source_type = ?")
+    if _has_text(source_type):
+        clauses.append("e.source_type = ?")
         params.append(_blank(source_type))
     if actor_id:
-        clauses.append("changed_by_user_id = ?")
+        clauses.append("e.changed_by_user_id = ?")
         params.append(int(actor_id))
-    if _blank(since):
-        clauses.append("changed_at >= ?")
+    if _has_text(since):
+        clauses.append("e.changed_at >= ?")
         params.append(_blank(since))
-    if _blank(until):
-        clauses.append("changed_at <= ?")
+    if _has_text(until):
+        clauses.append("e.changed_at <= ?")
         params.append(_blank(until))
     params.append(int(limit))
+    user_join = ""
+    name_select = "'' AS changed_by_name"
+    if _table_exists(conn, "users"):
+        user_join = "LEFT JOIN users u ON u.id = e.changed_by_user_id"
+        name_select = "COALESCE(u.full_name, '') AS changed_by_name"
     rows = conn.execute(
         f"""
-        SELECT * FROM field_provenance_events
+        SELECT e.*, {name_select}
+        FROM field_provenance_events e
+        {user_join}
         WHERE {' AND '.join(clauses)}
-        ORDER BY id DESC LIMIT ?
+        ORDER BY e.id DESC LIMIT ?
         """,
         params,
     ).fetchall()
@@ -921,22 +938,23 @@ def record_populated_creates(
 ) -> None:
     now = _now()
     for field, value in fields.items():
-        if _blank(value):
-            record_provenance(
-                conn,
-                entity_type=entity_type,
-                entity_id=int(entity_id),
-                field=field,
-                new_value=value,
-                source_type=source_type,
-                source_ref=source_ref,
-                action=action,
-                client_id=client_id,
-                changed_at=now,
-                actor=actor,
-                trusted=trusted,
-                changed_by_user_id=changed_by_user_id,
-            )
+        if not _has_text(value):
+            continue
+        record_provenance(
+            conn,
+            entity_type=entity_type,
+            entity_id=int(entity_id),
+            field=field,
+            new_value=value,
+            source_type=source_type,
+            source_ref=source_ref,
+            action=action,
+            client_id=client_id,
+            changed_at=now,
+            actor=actor,
+            trusted=trusted,
+            changed_by_user_id=changed_by_user_id,
+        )
 
 
 def record_changed_fields(
@@ -1209,7 +1227,7 @@ def create_company(
         ("phone", phone_store),
         ("website", website),
     ):
-        if not _blank(value):
+        if not _has_text(value):
             continue
         record_provenance(
             conn,
@@ -1238,9 +1256,8 @@ def amend_company(
     reason: str = "",
     force_fail_after: str = "",
 ) -> dict[str, Any]:
-    assert_not_production_db(conn)
     require_capability(actor, CAP_EDIT, conn=conn)
-    ensure_data_steward_schema(conn)
+    _prepare_company_amend(conn)
     company_id = resolve_company_id(conn, int(company_id))
     stored = _load(conn, "companies", company_id)
     _refuse_stale(conn, "companies", company_id, expected_updated_at)
@@ -1309,6 +1326,8 @@ def _run_company_amend_body(
                 continue
             if key == "phone_extension":
                 old = _blank(stored.get("legacy_phone_extension"))
+                if old == new_val:
+                    continue
                 conn.execute(
                     "UPDATE companies SET legacy_phone_extension = ? WHERE id = ?",
                     (new_val or None, company_id),
@@ -1354,7 +1373,8 @@ def _run_company_amend_body(
             changed.append(key)
             if force_fail_after == f"after_{key}":
                 raise StewardError("forced_rollback")
-        _stamp(conn, "companies", company_id, now)
+        if changed:
+            _stamp(conn, "companies", company_id, now)
         if force_fail_after == "before_commit":
             raise StewardError("forced_rollback")
 
@@ -1666,19 +1686,20 @@ def create_contact(
         ("phone", phone_store),
         ("title", title),
     ):
-        if _blank(value):
-            record_provenance(
-                conn,
-                entity_type=ENTITY_CONTACT,
-                entity_id=contact_id,
-                field=field,
-                new_value=value,
-                source_type=source_type_for_actor(actor),
-                changed_by_user_id=int(actor.id),
-                action="CREATE",
-                changed_at=now,
-                actor=actor,
-            )
+        if not _has_text(value):
+            continue
+        record_provenance(
+            conn,
+            entity_type=ENTITY_CONTACT,
+            entity_id=contact_id,
+            field=field,
+            new_value=value,
+            source_type=source_type_for_actor(actor),
+            changed_by_user_id=int(actor.id),
+            action="CREATE",
+            changed_at=now,
+            actor=actor,
+        )
     return {"contact_id": contact_id, "duplicates": dups}
 
 
@@ -2080,5 +2101,34 @@ def audit_history(
     return [dict(r) for r in rows]
 
 
+def live_company_amend_enabled() -> bool:
+    """DS-7 governed Master Company amend only. Does not enable archive/delete/merge/remove."""
+    return True
+
+
 def live_destructive_enabled() -> bool:
     return False
+
+
+def _is_live_db_path() -> bool:
+    from db import DB_PATH
+
+    return Path(os.fspath(DB_PATH)).resolve() == PRODUCTION_DB_PATH.resolve()
+
+
+def _assert_company_amend_allowed(conn=None) -> None:
+    """Allow isolated writes always; live writes only for governed company amend."""
+    _ = conn
+    if not _is_live_db_path():
+        return
+    if not live_company_amend_enabled():
+        raise StewardLiveWriteError(LIVE_STEWARD_WRITES_DISABLED)
+
+
+def _prepare_company_amend(conn) -> None:
+    _assert_company_amend_allowed(conn)
+    if _is_live_db_path():
+        if not provenance_table_ready(conn):
+            raise StewardError("provenance_schema_missing")
+        return
+    ensure_data_steward_schema(conn)
