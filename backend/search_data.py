@@ -9,13 +9,15 @@ from __future__ import annotations
 from staff_context import resolve_staff_actor
 
 import re
+import sqlite3
 
 from access import get_default_user, get_user_by_id, resolve_visibility_client_ids
 from db import DB_PATH, get_connection
 from models import SearchHit, SearchResponse
 from data_steward import sql_active_ccr, sql_active_company, sql_active_contact
 
-_FTS_SPECIAL = re.compile(r'[^\w\s]+', re.UNICODE)
+# Letters, digits, and in-word apostrophes (O'Reilly). Punctuation is not FTS syntax.
+_FTS_TOKEN = re.compile(r"[0-9A-Za-z]+(?:'[0-9A-Za-z]+)?", re.UNICODE)
 
 
 def _blank(value: object | None) -> str:
@@ -36,19 +38,31 @@ def _table_exists(conn, table: str) -> bool:
     return row is not None
 
 
-def _fts_query(raw: str) -> str:
-    """Build a safe FTS5 MATCH query from user text (AND of token prefixes)."""
-    tokens = [t for t in _FTS_SPECIAL.sub(" ", raw).split() if t]
+def safe_fts_match_query(raw: str) -> str:
+    """Turn ordinary CRM search text into a literal FTS5 MATCH expression.
+
+    Users type company/contact names, not FTS query language. Tokens such as
+    AND/OR/NOT/NEAR and punctuation must not become operators.
+    """
+    text = _blank(raw)
+    if not text:
+        return ""
+    tokens = _FTS_TOKEN.findall(text)
     if not tokens:
         return ""
-    # Escape double quotes in FTS tokens; prefix match for partial terms.
-    cleaned = []
-    for t in tokens:
-        t = t.replace('"', "")
-        if not t:
+    parts: list[str] = []
+    for token in tokens:
+        token = token.replace('"', "")
+        if not token:
             continue
-        cleaned.append(f"{t}*" if len(t) >= 2 else t)
-    return " AND ".join(cleaned)
+        quoted = f'"{token}"'
+        parts.append(f"{quoted}*" if len(token) >= 2 else quoted)
+    return " AND ".join(parts)
+
+
+def _fts_query(raw: str) -> str:
+    """Build a safe FTS5 MATCH query from user text (AND of token prefixes)."""
+    return safe_fts_match_query(raw)
 
 
 def rebuild_search_index(conn=None) -> int:
@@ -970,7 +984,11 @@ def search(
                 LIMIT ?
             """
             group_params = list(params) + [type_limit]
-            rows.extend(conn.execute(sql, group_params).fetchall())
+            try:
+                rows.extend(conn.execute(sql, group_params).fetchall())
+            except sqlite3.OperationalError:
+                # Never surface FTS syntax to the specialist; skip this group.
+                continue
 
     hits = [_row_to_hit(r, raw_q) for r in rows]
 

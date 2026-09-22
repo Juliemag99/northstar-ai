@@ -81,7 +81,7 @@ describe('dashboardStartHereMessage', () => {
     ).toContain('New Assignments (838)')
   })
 
-  it('stays silent when due work already exists', () => {
+  it('still names New Assignments when due work already exists', () => {
     expect(
       dashboardStartHereMessage({
         clientName: 'Brown Industries',
@@ -90,7 +90,7 @@ describe('dashboardStartHereMessage', () => {
         followUpsDueToday: 0,
         overdueFollowUps: 0,
       }),
-    ).toBeNull()
+    ).toContain('New Assignments (838)')
   })
 })
 

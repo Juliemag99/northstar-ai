@@ -178,11 +178,41 @@ def test_specialist_isolation_and_empty_due_queue() -> None:
         )
         new_n = int(queue.summary.new_assignments)
         table_n = _queue_item_table_count(client_id)
-        if new_n <= 0:
-            _fail(f"{name} derived New Assignments should be > 0, got {new_n}")
-        # Table can be 0; New comes from CCR status, not work_queue_items rows.
-        if table_n > new_n + 50:
-            _fail(f"{name} unexpected work_queue_items {table_n} vs new {new_n}")
+        # PW-2A: specialists see New rows assigned to them, not the whole client book.
+        if new_n != 0:
+            _fail(
+                f"{name} specialist with no assigned New rows should see 0 New Assignments, got {new_n}"
+            )
+        with get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE client_company_relationships
+                SET assigned_user_id = ?
+                WHERE id = (
+                    SELECT id FROM client_company_relationships
+                    WHERE client_id = ?
+                      AND lower(trim(COALESCE(status, ''))) = 'new'
+                    ORDER BY id
+                    LIMIT 1
+                )
+                """,
+                (uid, client_id),
+            )
+            conn.commit()
+        assigned_q = list_work_queue(
+            uid,
+            client_id=client_id,
+            work_type="new",
+            limit=20,
+            offset=0,
+            enrich_contacts=False,
+            apply_insight_overlay=False,
+        )
+        assigned_n = int(assigned_q.summary.new_assignments)
+        if assigned_n < 1:
+            _fail(f"{name} assigned New Assignments should be > 0, got {assigned_n}")
+        if table_n > assigned_n + 50 and table_n > new_n + 50:
+            _fail(f"{name} unexpected work_queue_items {table_n} vs new {assigned_n}")
 
         due = list_work_queue(
             uid,

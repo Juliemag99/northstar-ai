@@ -291,7 +291,7 @@ def main() -> int:
 
         brown_note = testdb.http_json(
             "PATCH",
-            notes_path,
+            f"/api/companies/by-record/{record_no}-B/notes",
             {
                 "client_id": brown_id,
                 "note_text": f"{MARKER} brown only",
@@ -325,7 +325,7 @@ def main() -> int:
             carmeco_notes = [
                 r for r in after_ok["notes"] if int(r["client_id"]) == carmeco_id
             ]
-            if not brown_notes or f"{MARKER} brown only" not in str(brown_notes[0].get("note_text")):
+            if not any(f"{MARKER} brown only" in str(r.get("note_text") or "") for r in brown_notes):
                 _fail("Brown notes write did not update Brown.")
             if any(f"{MARKER} brown only" in str(r.get("note_text") or "") for r in carmeco_notes):
                 _fail("Brown notes write changed Carmeco notes.")

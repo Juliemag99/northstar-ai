@@ -1584,7 +1584,10 @@ def list_relationship_statuses(
             catalog_rows = []
         merged: list[str] = []
         seen: set[str] = set()
-        for r in list(rows) + list(catalog_rows):
+        from crm_import_status_notes import STANDARD_CRM_RELATIONSHIP_STATUSES
+
+        extra = [{"status": label} for label in STANDARD_CRM_RELATIONSHIP_STATUSES]
+        for r in list(rows) + list(catalog_rows) + extra:
             label = _blank(r["status"])
             key = label.lower()
             if not label or key in seen:
@@ -1667,19 +1670,10 @@ def update_relationship_status(
         client_code = _blank(rel["client_code"])
         client_name = _blank(rel["client_name"])
 
-        allowed = {
-            _blank(r["status"])
-            for r in conn.execute(
-                """
-                SELECT DISTINCT status FROM client_company_relationships
-                WHERE client_id = ? AND TRIM(status) != ''
-                """,
-                (cid,),
-            )
-        }
-        # Brown may have no statuses yet — allow any non-empty status when set is empty
+        from crm_import_status_notes import status_is_operationally_allowed
+
         old_status = _blank(rel["status"])
-        if allowed and new_status not in allowed and new_status != old_status:
+        if not status_is_operationally_allowed(conn, cid, new_status, old_status):
             raise ValueError(
                 f"Status '{new_status}' is not a known status for {client_name}."
             )
@@ -2653,18 +2647,11 @@ def update_contact_workflow(contact_id: int, body) -> dict:
 
             old_status = _blank(rel["status"])
             if new_status:
-                allowed = {
-                    _blank(r["status"])
-                    for r in conn.execute(
-                        """
-                        SELECT DISTINCT status FROM client_company_relationships
-                        WHERE client_id = ? AND TRIM(status) != ''
-                        """,
-                        (client_id,),
-                    )
-                }
-                old_status = _blank(rel["status"])
-                if allowed and new_status not in allowed and new_status != old_status:
+                from crm_import_status_notes import status_is_operationally_allowed
+
+                if not status_is_operationally_allowed(
+                    conn, client_id, new_status, old_status
+                ):
                     raise ValueError(
                         f"Status '{new_status}' is not a known status for this client."
                     )
@@ -3205,24 +3192,9 @@ def _status_never_requires_follow_up(status: str) -> bool:
 
 
 def _known_client_status(conn, client_id: int, candidate: str, current: str) -> bool:
-    status = _blank(candidate)
-    if not status:
-        return False
-    if status == _blank(current):
-        return True
-    allowed = {
-        _blank(r["status"])
-        for r in conn.execute(
-            """
-            SELECT DISTINCT status FROM client_company_relationships
-            WHERE client_id = ? AND TRIM(status) != ''
-            """,
-            (int(client_id),),
-        )
-    }
-    from appointments_data import is_appointment_set_status
+    from crm_import_status_notes import status_is_operationally_allowed
 
-    return (not allowed) or status in allowed or is_appointment_set_status(status)
+    return status_is_operationally_allowed(conn, client_id, candidate, current)
 
 
 class _ExistingAppointmentSave(Exception):

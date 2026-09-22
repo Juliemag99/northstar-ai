@@ -1903,8 +1903,21 @@ a.activity-item-link:hover p:first-of-type {
 }
 
 .stat-card--wq-new {
-  background: #ffffff;
-  border: 1px solid #d5dde8;
+  background: #ecfdf5;
+  border: 1px solid #6ee7b7;
+}
+
+.work-queue-lane {
+  margin: 0 0 0.85rem;
+}
+
+.work-queue-lane__label {
+  margin: 0 0 0.4rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 
 .stat-card--wq-needs-next {

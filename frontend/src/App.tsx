@@ -35,7 +35,16 @@ import {
   updateCompanyStatus,
 } from './api/carmeco'
 import { pathAfterActiveClientChange } from './activeClientNavigation'
-import { ASK_NORTHSTAR_PATH, isFromAskNorthStar, withAskReturnParam } from './askNorthStarReturn'
+import { isFromAskNorthStar, withAskReturnParam } from './askNorthStarReturn'
+import {
+  appendWorkspaceOrigin,
+  copyWorkspaceReturn,
+  SEARCH_FROM,
+  DASHBOARD_FROM,
+  PROSPECTS_FROM,
+  workspaceReturnLabel,
+  workspaceReturnPath,
+} from './workspaceReturn'
 import {
   APPOINTMENTS_SET_SUBTITLE,
   revenueOpportunityCountsFromSummary,
@@ -213,8 +222,8 @@ const PROSPECT_FILTER_META: Record<
   },
   new: {
     heading: 'New Assignments',
-    empty: 'No new assignments.',
-    description: 'Newly assigned prospects with status New for the Active Client.',
+    empty: 'No New Assignments are currently assigned to you.',
+    description: 'Fresh calling book: assigned prospects with status New.',
   },
 }
 
@@ -498,6 +507,7 @@ function buildWorkQueueCards(
       change: 'Scheduled call tasks',
       tone: 'work' as const,
       icon: '☎',
+      lane: 'due' as const,
       to: `/work-queue?${scopeQuery}type=call&due=today`,
     },
     {
@@ -507,6 +517,7 @@ function buildWorkQueueCards(
       change: 'Past due open tasks',
       tone: 'work' as const,
       icon: '⚠',
+      lane: 'due' as const,
       to: followUpCountHref(overdueItems, 'dashboard-follow-ups-overdue'),
     },
     {
@@ -516,6 +527,7 @@ function buildWorkQueueCards(
       change: 'Open tasks due today',
       tone: 'work' as const,
       icon: '↻',
+      lane: 'due' as const,
       to: followUpCountHref(dueTodayItems, 'dashboard-follow-ups-today'),
     },
     {
@@ -525,6 +537,7 @@ function buildWorkQueueCards(
       change: 'Next 7+ days',
       tone: 'work' as const,
       icon: '◷',
+      lane: 'due' as const,
       to: followUpCountHref(upcomingItems, 'dashboard-follow-ups-upcoming'),
     },
     {
@@ -534,9 +547,10 @@ function buildWorkQueueCards(
         queueSummary != null
           ? String(queueSummary.new_assignments)
           : String(prospects.filter(isNewAssignment).length),
-      change: 'Status = New — start here when nothing is due',
+      change: 'Fresh calling book — assigned New records',
       tone: 'work' as const,
       icon: '＋',
+      lane: 'fresh' as const,
       to: `/work-queue?${scopeQuery}type=new`,
     },
     {
@@ -546,6 +560,7 @@ function buildWorkQueueCards(
       change: 'Working status, no follow-up',
       tone: 'work' as const,
       icon: '▹',
+      lane: 'due' as const,
       to: `/work-queue?${scopeQuery}type=needs-next-action`,
     },
     {
@@ -558,6 +573,7 @@ function buildWorkQueueCards(
       change: 'Scheduled appointments',
       tone: 'work' as const,
       icon: '◷',
+      lane: 'due' as const,
       to: '/appointments?filter=today',
     },
     {
@@ -567,6 +583,7 @@ function buildWorkQueueCards(
       change: 'Actionable for Active Client',
       tone: 'work' as const,
       icon: '⇄',
+      lane: 'due' as const,
       to: `/cross-client-opportunities${oppTarget}`,
     },
   ]
@@ -1421,7 +1438,10 @@ function App() {
       activeClientId != null && activeClientId > 0
         ? activeClientId
         : hit.client_id || null
-    const href = companyWorkspaceHref(hit.external_record_no, openClientId)
+    const href = appendWorkspaceOrigin(
+      companyWorkspaceHref(hit.external_record_no, openClientId),
+      { from: SEARCH_FROM },
+    )
     const focus = hit.focus_target
       ? `${href.includes('?') ? '&' : '?'}focus=${encodeURIComponent(hit.focus_target)}`
       : ''
@@ -2151,7 +2171,7 @@ function App() {
       } else if (andNext) {
         const nextNo = result.next_external_record_no
         if (nextNo) {
-          navigate(companyWorkspaceHref(nextNo, workspaceClientId))
+          navigate(copyWorkspaceReturn(companyWorkspaceHref(nextNo, workspaceClientId), searchParams))
         } else {
           setOutreachMsg(
             (result.message || 'Outreach saved.') + ' No further actionable prospects.',
@@ -2329,17 +2349,18 @@ function App() {
 
   function closeCompanyWorkspace() {
     setAddContactOpen(false)
-    if (fromAskNorthStar) {
-      navigate(ASK_NORTHSTAR_PATH)
-      return
-    }
-    navigate('/prospects')
+    navigate(workspaceReturnPath(searchParams))
   }
 
   function workspaceContactHref(contactId: number) {
-    const base = `/contacts/${contactId}${
-      workspaceClientId ? `?client_id=${workspaceClientId}` : ''
-    }`
+    const params = new URLSearchParams()
+    if (workspaceClientId) params.set('client_id', String(workspaceClientId))
+    for (const key of ['from', 'queue', 'list'] as const) {
+      const value = searchParams.get(key)
+      if (value) params.set(key, value)
+    }
+    const q = params.toString()
+    const base = `/contacts/${contactId}${q ? `?${q}` : ''}`
     return fromAskNorthStar ? withAskReturnParam(base) : base
   }
 
@@ -2725,7 +2746,7 @@ function App() {
               <div className="page-heading page-heading--split">
                 <div>
                   <button type="button" className="link-btn back-link" onClick={closeCompanyWorkspace}>
-                    {fromAskNorthStar ? '← Back to Ask NorthStar' : '← Back to Prospects'}
+                    {workspaceReturnLabel(searchParams)}
                   </button>
                   <h1>{workspace?.company_name || 'Company Workspace'}</h1>
                   <p className="workspace-working-for">
@@ -2811,7 +2832,7 @@ function App() {
                     const nextNo = pendingNextAfterEmailRef.current
                     pendingNextAfterEmailRef.current = null
                     if (nextNo && workspaceClientId > 0) {
-                      navigate(companyWorkspaceHref(nextNo, workspaceClientId))
+                      navigate(copyWorkspaceReturn(companyWorkspaceHref(nextNo, workspaceClientId), searchParams))
                     }
                   }}
                   clientId={workspaceClientId}
@@ -4181,9 +4202,15 @@ function App() {
                               >
                                 <td>
                                   <Link
-                                    to={companyWorkspaceHref(
-                                      prospect.external_record_no,
-                                      prospect.client_id || workspaceClientId,
+                                    to={appendWorkspaceOrigin(
+                                      companyWorkspaceHref(
+                                        prospect.external_record_no,
+                                        prospect.client_id || workspaceClientId,
+                                      ),
+                                      {
+                                        from: PROSPECTS_FROM,
+                                        listQuery: searchParams.toString(),
+                                      },
                                     )}
                                     className="company-link"
                                     onClick={() => setSidebarOpen(false)}
@@ -4431,14 +4458,16 @@ function App() {
               </div>
 
               <div className="kpi-section">
-                <h2 className="kpi-section__label">Today&apos;s Work</h2>
+                <h2 className="kpi-section__label">Due Work</h2>
                 {startHereMessage ? (
                   <p className="dashboard-start-here" role="status">
                     {startHereMessage}
                   </p>
                 ) : null}
-                <section className="stat-grid stat-grid--work-queue" aria-label="Today's work">
-                  {workQueueCards.map((card) => (
+                <section className="stat-grid stat-grid--work-queue" aria-label="Due work">
+                  {workQueueCards
+                    .filter((card) => card.lane === 'due')
+                    .map((card) => (
                     <Link
                       key={card.id}
                       to={card.to}
@@ -4448,6 +4477,31 @@ function App() {
                           ? 'Open follow-up contact.'
                           : 'Open queue.'
                       }`}
+                    >
+                      <div className="stat-card__top">
+                        <p className="stat-label">{card.label}</p>
+                        <span className="stat-icon" aria-hidden="true">
+                          {card.icon}
+                        </span>
+                      </div>
+                      <p className="stat-value">{card.value}</p>
+                      <p className={`stat-change stat-change--${card.tone}`}>{card.change}</p>
+                    </Link>
+                  ))}
+                </section>
+              </div>
+
+              <div className="kpi-section">
+                <h2 className="kpi-section__label">Fresh Calling</h2>
+                <section className="stat-grid stat-grid--work-queue" aria-label="Fresh calling">
+                  {workQueueCards
+                    .filter((card) => card.lane === 'fresh')
+                    .map((card) => (
+                    <Link
+                      key={card.id}
+                      to={card.to}
+                      className={`stat-card stat-card--clickable stat-card--${card.tone}`}
+                      aria-label={`${card.label}: ${card.value}. Open New Assignments.`}
                     >
                       <div className="stat-card__top">
                         <p className="stat-label">{card.label}</p>
@@ -4547,9 +4601,12 @@ function App() {
                             <tr key={`${item.client_id}-${item.external_record_no}`}>
                               <td>
                                 <Link
-                                  to={companyWorkspaceHref(
-                                    item.external_record_no,
-                                    item.client_id,
+                                  to={appendWorkspaceOrigin(
+                                    companyWorkspaceHref(
+                                      item.external_record_no,
+                                      item.client_id,
+                                    ),
+                                    { from: DASHBOARD_FROM },
                                   )}
                                   className="company-link"
                                   onClick={() => setSidebarOpen(false)}

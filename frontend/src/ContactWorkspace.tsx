@@ -40,6 +40,11 @@ import {
   ASK_NORTHSTAR_PATH,
   isFromAskNorthStar,
 } from './askNorthStarReturn'
+import {
+  isFromWorkQueue,
+  workspaceReturnLabel,
+  workspaceReturnPath,
+} from './workspaceReturn'
 import { SELECT_CLIENT_FOR_WRITE, requireWriteClientId } from './writeClient'
 import ZoomInfoUpdateModal from './ZoomInfoUpdateModal'
 
@@ -646,10 +651,10 @@ export default function ContactWorkspacePage({
     )
   }
   const companyHref = data.company_record_no
-    ? `/companies/${encodeURIComponent(data.company_record_no)}${
-        data.client_id ? `?client_id=${data.client_id}` : ''
-      }`
+    ? `/companies/${encodeURIComponent(data.company_record_no)}?${searchParams.toString()}`
     : null
+  const returnPath = workspaceReturnPath(searchParams)
+  const fromWorkQueue = isFromWorkQueue(searchParams.get('from'))
   const workingClientId = clientId != null && clientId > 0 ? clientId : 0
   const hasContactEmail = Boolean((data.email || '').trim())
   const timeline = data.timeline || []
@@ -683,13 +688,17 @@ export default function ContactWorkspacePage({
             >
               ← Back to Ask NorthStar
             </button>
+          ) : fromWorkQueue ? (
+            <button type="button" className="link-btn back-link" onClick={() => navigate(returnPath)}>
+              {workspaceReturnLabel(searchParams)}
+            </button>
           ) : companyHref ? (
             <button type="button" className="link-btn back-link" onClick={() => navigate(companyHref)}>
               ← Back to Company
             </button>
           ) : (
-            <button type="button" className="link-btn back-link" onClick={() => navigate(-1)}>
-              ← Back
+            <button type="button" className="link-btn back-link" onClick={() => navigate(returnPath)}>
+              {workspaceReturnLabel(searchParams)}
             </button>
           )}
           <h1>{fullName}</h1>

@@ -219,7 +219,10 @@ def main() -> int:
             _fail("Flora Jia follow-up leaked into Carmeco Work Queue.")
 
         statuses = list_relationship_statuses(client_id=brown_id)
-        status = next((s for s in statuses if s.strip()), "Left Message")
+        status = next(
+            (s for s in ("Left Message", "Contacted", "New") if s in statuses),
+            next((s for s in statuses if s.strip()), "Left Message"),
+        )
         today = date.today()
         yesterday = (today - timedelta(days=1)).isoformat()
         today_s = today.isoformat()

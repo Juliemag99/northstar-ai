@@ -179,6 +179,30 @@ class ProspectsVisibilityTests(unittest.TestCase):
             client_id=self.client_id, user_id=actor.id, limit=100, offset=100
         )
         later_ids = {p.id for p in later["prospects"]}
+        if valmont_id not in later_ids:
+            # Brown now has more than 200 companies before V; page 2 is no longer
+            # the Valmont page. Compute the actual offset from name order.
+            with get_connection() as conn:
+                before_n = int(
+                    conn.execute(
+                        """
+                        SELECT COUNT(*) AS n
+                        FROM client_company_relationships ccr
+                        JOIN companies co ON co.id = ccr.company_id
+                        WHERE ccr.client_id = ?
+                          AND co.company_name COLLATE NOCASE < 'Valmont'
+                        """,
+                        (self.client_id,),
+                    ).fetchone()["n"]
+                )
+            page_offset = (before_n // 100) * 100
+            paged = list_prospects_page(
+                client_id=self.client_id,
+                user_id=actor.id,
+                limit=100,
+                offset=page_offset,
+            )
+            later_ids = {p.id for p in paged["prospects"]}
         self.assertIn(valmont_id, later_ids)
 
     def test_confirm_indexes_created_company_in_search_fts(self):

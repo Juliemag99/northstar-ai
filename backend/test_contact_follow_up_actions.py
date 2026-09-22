@@ -266,7 +266,12 @@ def main() -> int:
         statuses = list_relationship_statuses(client_id=brown_id)
         if not statuses:
             _fail("Client statuses API source returned no statuses — cannot hardcode.")
-        status = next((s for s in statuses if s.strip()), "Left Message")
+        # Prefer a daily operational label. First-alphabetical used to pick a
+        # catalog-only Brown status that CCR-only validation rejected.
+        status = next(
+            (s for s in ("Left Message", "Contacted", "New") if s in statuses),
+            next((s for s in statuses if s.strip()), "Left Message"),
+        )
         today = date.today()
         first_date = (today + timedelta(days=3)).isoformat()
         second_date = (today + timedelta(days=10)).isoformat()

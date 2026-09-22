@@ -48,7 +48,7 @@ export function resolveActiveClientId(args: {
   return ids[0]
 }
 
-/** Shown when due-work cards are 0 so New Assignments are not mistaken for idle. */
+/** Due work vs fresh calling stay visible even when appointments exist. */
 export function dashboardStartHereMessage(args: {
   clientName: string
   newAssignments: number
@@ -57,8 +57,11 @@ export function dashboardStartHereMessage(args: {
   overdueFollowUps: number
 }): string | null {
   const due = args.callsDue + args.followUpsDueToday + args.overdueFollowUps
-  if (due > 0) return null
   const name = args.clientName.trim() || 'this client'
+  if (due > 0 && args.newAssignments > 0) {
+    return `Due work is listed below. Your fresh calling book is New Assignments (${args.newAssignments}) for ${name}.`
+  }
+  if (due > 0) return null
   if (args.newAssignments > 0) {
     return `Nothing is scheduled due today for ${name}. Start with New Assignments (${args.newAssignments}) or Today’s Priority Prospects.`
   }

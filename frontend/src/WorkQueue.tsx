@@ -22,6 +22,11 @@ import {
   type NextActionSelection,
 } from './nextAction'
 import type { WorkQueueInsightSummary, WorkQueueRow, WorkQueueSummaryV2 } from './types/carmeco'
+import {
+  captureWorkQueueScroll,
+  restoreWorkQueueScroll,
+} from './workspaceReturn'
+import { dueWorkCount, NEW_ASSIGNMENTS_EMPTY } from './workQueueLanes'
 
 type ClientOption = { client_id: number; client_name: string; client_code: string }
 
@@ -310,6 +315,11 @@ export default function WorkQueue({
     void loadQueue()
   }, [loadQueue])
 
+  useEffect(() => {
+    if (loading) return
+    restoreWorkQueueScroll(queueQuery)
+  }, [loading, queueQuery, items.length])
+
   function updateParams(mutator: (params: URLSearchParams) => void) {
     const next = new URLSearchParams(searchParams)
     mutator(next)
@@ -425,6 +435,7 @@ export default function WorkQueue({
   })()
 
   function openItem(item: WorkQueueRow, index = 0) {
+    captureWorkQueueScroll(queueQuery)
     navigate(workspaceHref(item, queueQuery, page * PAGE_SIZE + index + 1, total || 1))
   }
 
@@ -443,6 +454,7 @@ export default function WorkQueue({
         return
       }
       const item = result.items[0]
+      captureWorkQueueScroll('type=work-next')
       navigate(workspaceHref(item, 'type=work-next', 1, result.total || result.items.length))
     } catch {
       if (items.length === 0) {
@@ -563,26 +575,18 @@ export default function WorkQueue({
     }
   }
 
-  const actionableCount = useMemo(() => {
-    const nonNew =
-      summary.calls_due +
-      summary.follow_ups_due +
-      summary.appointments +
-      summary.hot +
-      summary.webleads +
-      summary.needs_next_action +
-      summary.cross_client_opportunities +
-      summary.overdue
-    return nonNew > 0 ? nonNew : summary.new_assignments
-  }, [summary])
+  const dueCount = useMemo(
+    () => dueWorkCount(summary, opportunityCount),
+    [summary, opportunityCount],
+  )
 
-  const summaryCards = [
+  const dueCards = [
     {
       id: 'work-next',
-      label: 'Work Next',
-      value: actionableCount as number | null,
+      label: 'Due Work',
+      value: dueCount as number | null,
       tone: 'work-next',
-      emptyLabel: 'Work Next',
+      emptyLabel: 'Due Work',
     },
     {
       id: 'call',
@@ -627,12 +631,27 @@ export default function WorkQueue({
       emptyLabel: 'Hot',
     },
     {
+      id: 'overdue',
+      label: 'Overdue',
+      value: summary.overdue,
+      tone: 'follow-up',
+      emptyLabel: 'Overdue',
+    },
+  ]
+
+  const freshCards = [
+    {
       id: 'new',
       label: 'New Assignments',
       value: summary.new_assignments,
       tone: 'new',
       emptyLabel: 'New Assignments',
     },
+  ]
+
+  const summaryCards = [
+    ...dueCards,
+    ...freshCards,
     {
       id: 'all',
       label: 'All Work',
@@ -664,11 +683,20 @@ export default function WorkQueue({
           <button type="button" className="primary-btn work-next-btn" onClick={() => void workNext()}>
             WORK NEXT
           </button>
+          <button
+            type="button"
+            className="primary-btn"
+            onClick={() => applySummaryFilter('new')}
+          >
+            New Assignments ({summary.new_assignments})
+          </button>
         </div>
       </div>
 
-      <section className="stat-grid stat-grid--work-summary" aria-label="Work Queue summary">
-        {summaryCards.map((card) => {
+      <section className="work-queue-lane" aria-label="Due work">
+        <h2 className="work-queue-lane__label">Due Work / Follow-Ups</h2>
+        <div className="stat-grid stat-grid--work-summary">
+        {dueCards.map((card) => {
           const selected = activeSummaryId === card.id
           return (
             <button
@@ -699,6 +727,41 @@ export default function WorkQueue({
             </button>
           )
         })}
+        </div>
+      </section>
+
+      <section className="work-queue-lane" aria-label="Fresh calling">
+        <h2 className="work-queue-lane__label">New Assignments / Fresh Calling</h2>
+        <div className="stat-grid stat-grid--work-summary">
+        {freshCards.map((card) => {
+          const selected = activeSummaryId === card.id
+          return (
+            <button
+              key={card.id}
+              type="button"
+              className={`stat-card stat-card--clickable stat-card--wq-${card.tone}${selected ? ' stat-card--wq-selected' : ''}`}
+              onClick={() => applySummaryFilter(card.id)}
+              aria-pressed={selected}
+            >
+              <div className="stat-card__top">
+                <p className="stat-label">{card.label}</p>
+              </div>
+              <p className="stat-value">{card.value}</p>
+            </button>
+          )
+        })}
+        <button
+          type="button"
+          className={`stat-card stat-card--clickable stat-card--wq-all${activeSummaryId === 'all' ? ' stat-card--wq-selected' : ''}`}
+          onClick={() => applySummaryFilter('all')}
+          aria-pressed={activeSummaryId === 'all'}
+        >
+          <div className="stat-card__top">
+            <p className="stat-label">All Work</p>
+          </div>
+          <p className="stat-value stat-value--muted">View all</p>
+        </button>
+        </div>
       </section>
 
       <section className="panel work-queue-filters" aria-label="Work Queue filters">
@@ -894,7 +957,19 @@ export default function WorkQueue({
         </div>
         {!loading && items.length === 0 ? (
           <div className="empty-state work-queue-caught-up">
-            {filteredEmptyLabel ? (
+            {workType === 'new' ? (
+              <>
+                <p>{NEW_ASSIGNMENTS_EMPTY}</p>
+                <div className="edit-actions">
+                  <button type="button" className="primary-btn" onClick={clearFilters}>
+                    All Work
+                  </button>
+                  <Link className="link-btn" to="/">
+                    Return to Dashboard
+                  </Link>
+                </div>
+              </>
+            ) : filteredEmptyLabel ? (
               <>
                 <p>No {filteredEmptyLabel} items in this queue.</p>
                 <div className="edit-actions">

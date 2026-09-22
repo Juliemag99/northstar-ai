@@ -74,6 +74,23 @@ def _needs_next_action_status(status: str) -> bool:
     return status.strip().lower() in NEEDS_NEXT_ACTION_STATUSES
 
 
+def _specialist_own_new_book(user) -> bool:
+    """Specialists see New Assignments assigned to them, not the whole client book."""
+    if user is None or bool(getattr(user, "is_administrator", False)):
+        return False
+    try:
+        from staff_rbac import user_has_permission
+
+        return not user_has_permission(int(user.id), "clients.all")
+    except Exception:
+        return True
+
+
+def _is_new_assignment_work_type(work_type: str | None) -> bool:
+    wt = (work_type or "").strip().lower().replace("_", "-")
+    return wt in {"new", "new-assignment", "new assignment"}
+
+
 QueueKind = Literal["call", "follow_up"]
 
 CALL_ACTION_TYPES = frozenset({"call"})
@@ -732,15 +749,27 @@ def work_queue_summary(*, client: str = "Carmeco", client_id: int | None = None)
             if focus_id is not None:
                 if not user_can_access_client(user.id, int(focus_id)) and not user.is_administrator:
                     raise PermissionError("Not authorized for this client.")
-                row = conn.execute(
-                    """
-                    SELECT COUNT(*) AS n
-                    FROM client_company_relationships
-                    WHERE client_id = ?
-                      AND lower(TRIM(COALESCE(status, ''))) = 'new'
-                    """,
-                    (focus_id,),
-                ).fetchone()
+                if _specialist_own_new_book(user):
+                    row = conn.execute(
+                        """
+                        SELECT COUNT(*) AS n
+                        FROM client_company_relationships
+                        WHERE client_id = ?
+                          AND lower(TRIM(COALESCE(status, ''))) = 'new'
+                          AND assigned_user_id = ?
+                        """,
+                        (focus_id, int(user.id)),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        """
+                        SELECT COUNT(*) AS n
+                        FROM client_company_relationships
+                        WHERE client_id = ?
+                          AND lower(TRIM(COALESCE(status, ''))) = 'new'
+                        """,
+                        (focus_id,),
+                    ).fetchone()
                 new_count = int(row["n"]) if row else 0
     return WorkQueueSummary(
         client=client,
@@ -1036,6 +1065,13 @@ def list_work_queue(
     client_ids = resolve_dashboard_client_ids(user.id, selected_client_id=client_id)
     if not client_ids:
         return empty.model_copy(update={"user_id": user.id})
+
+    if (
+        assigned_user_id is None
+        and _is_new_assignment_work_type(work_type)
+        and _specialist_own_new_book(user)
+    ):
+        assigned_user_id = int(user.id)
 
     today = _today()
     rows_out: list[WorkQueueRow] = []
@@ -1645,6 +1681,14 @@ def list_work_queue(
         ),
         overdue=len({(r.client_id, r.company_id) for r in all_for_summary if r.is_overdue}),
     )
+    if _specialist_own_new_book(user):
+        summary.new_assignments = len(
+            {
+                (r.client_id, r.company_id)
+                for r in all_for_summary
+                if r.work_type == "New Assignment" and r.assigned_user_id == user.id
+            }
+        )
 
     return WorkQueueListResponse(
         user_id=user.id,

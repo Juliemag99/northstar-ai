@@ -287,6 +287,61 @@ def load_client_status_catalog(conn, client_id: int) -> StatusCatalog:
     return StatusCatalog.from_labels(labels)
 
 
+def operational_status_allowlist(conn, client_id: int) -> set[str]:
+    """Labels a specialist may select: existing CCR ∪ catalog ∪ STANDARD.
+
+    Read-only. Does not insert catalog rows or rewrite CCR statuses.
+    """
+    labels: set[str] = set()
+    cid = int(client_id)
+    for row in conn.execute(
+        """
+        SELECT DISTINCT status
+        FROM client_company_relationships
+        WHERE client_id = ? AND TRIM(status) != ''
+        """,
+        (cid,),
+    ):
+        value = blank(row["status"] if hasattr(row, "keys") else row[0])
+        if value:
+            labels.add(value)
+    try:
+        for row in conn.execute(
+            """
+            SELECT DISTINCT status_label
+            FROM client_status_catalog
+            WHERE client_id = ?
+              AND active = 1
+              AND TRIM(status_label) != ''
+            """,
+            (cid,),
+        ):
+            value = blank(row["status_label"] if hasattr(row, "keys") else row[0])
+            if value:
+                labels.add(value)
+    except Exception:
+        pass
+    labels.update(STANDARD_CRM_RELATIONSHIP_STATUSES)
+    return {item for item in labels if item}
+
+
+def status_is_operationally_allowed(conn, client_id: int, candidate: str, current: str = "") -> bool:
+    """True when candidate may be saved for this client without inventing labels."""
+    status = blank(candidate)
+    if not status:
+        return False
+    if status == blank(current):
+        return True
+    allowed = operational_status_allowlist(conn, client_id)
+    if not allowed:
+        return True
+    if status in allowed:
+        return True
+    from appointments_data import is_appointment_set_status
+
+    return is_appointment_set_status(status)
+
+
 def ensure_client_standard_status_catalog(conn, client_id: int) -> list[str]:
     """Upsert missing standard CRM statuses into client_status_catalog.
 

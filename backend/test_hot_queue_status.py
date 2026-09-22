@@ -273,7 +273,13 @@ def main() -> int:
         ).fetchone()
         if brown_whirlpool is None:
             _fail("Brown Whirlpool relationship missing.")
-        if _blank(brown_whirlpool["status"]) != "Left Message":
+        before_brown = next(
+            (r for r in whirlpool_ccrs_before if int(r["client_id"]) == brown_id),
+            None,
+        )
+        if before_brown is None:
+            _fail("Brown Whirlpool relationship missing from pre-test snapshot.")
+        if _blank(brown_whirlpool["status"]) != _blank(before_brown.get("status")):
             _fail("Brown Industries Whirlpool status changed.")
 
     print("test_hot_queue_status: ok")

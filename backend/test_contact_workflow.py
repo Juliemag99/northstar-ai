@@ -228,8 +228,10 @@ def main() -> int:
         statuses = list_relationship_statuses(client_id=carmeco_id)
         if not statuses:
             _fail("Client statuses API source returned no statuses — cannot hardcode.")
-        target_status = next(
-            (s for s in statuses if s.strip() and s.strip().lower() != "new"),
+        # Avoid Appointment Set / Closed: STANDARD union now sorts those near the top.
+        daily = [s for s in ("Left Message", "Contacted", "Send Information") if s in statuses]
+        target_status = daily[0] if daily else next(
+            (s for s in statuses if s.strip() and "appointment" not in s.lower() and s.strip().lower() != "new"),
             statuses[0],
         )
         today = date.today().isoformat()
@@ -299,7 +301,15 @@ def main() -> int:
         assert len(wf_rows) == 1 and int(wf_rows[0]["client_id"]) == carmeco_id
 
         call_status = next(
-            (s for s in statuses if s.strip() and s.strip() != target_status),
+            (
+                s
+                for s in daily + list(statuses)
+                if s.strip()
+                and s.strip() != target_status
+                and "appointment" not in s.lower()
+                and "closed" not in s.lower()
+                and "do not call" not in s.lower()
+            ),
             target_status,
         )
         with get_connection() as conn:
