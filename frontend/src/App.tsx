@@ -94,6 +94,16 @@ import {
 import Contacts from './Contacts'
 import AddContactModal from './AddContactModal'
 import AddCompanyModal from './AddCompanyModal'
+import ProspectBulkAssign, {
+  emptySelection,
+  isRowSelected,
+  pageAllSelected,
+  prospectFilterKey,
+  selectCurrentPage,
+  toggleRow,
+  type ProspectSelection,
+} from './ProspectBulkAssign'
+import { fetchBulkAssignees, type BulkAssignee } from './api/bulkAssignment'
 import Tasks from './Tasks'
 import Appointments from './Appointments'
 import Activities from './Activities'
@@ -848,6 +858,15 @@ function App() {
     : null
   const prospectFilter = parseProspectFilter(searchParams.get('filter'))
   const prospectStatusFilter = asText(searchParams.get('status'))
+  const prospectAssignedFilter = asText(searchParams.get('assigned'))
+  const assignedUserIdForApi =
+    !prospectAssignedFilter
+      ? undefined
+      : prospectAssignedFilter === 'unassigned'
+        ? 0
+        : Number.isFinite(Number(prospectAssignedFilter))
+          ? Number(prospectAssignedFilter)
+          : undefined
   const fromWorkQueue = searchParams.get('from') === 'work-queue'
   const fromAskNorthStar = isFromAskNorthStar(searchParams.get('from'))
   const workQueueClientId = searchParams.get('client_id')
@@ -885,6 +904,8 @@ function App() {
   const [companyListTotal, setCompanyListTotal] = useState(0)
   const [companyListClientTotal, setCompanyListClientTotal] = useState(0)
   const [companyListLoading, setCompanyListLoading] = useState(false)
+  const [prospectSelection, setProspectSelection] = useState<ProspectSelection>(emptySelection())
+  const [bulkAssignees, setBulkAssignees] = useState<BulkAssignee[]>([])
   const COMPANY_PAGE_SIZE = 50
   const companyListRequestSeq = useRef(0)
   const workQueueSaveSeq = useRef(0)
@@ -1016,6 +1037,7 @@ function App() {
             all_clients: allClients,
             limit: COMPANY_PAGE_SIZE,
             offset: 0,
+            assigned_user_id: assignedUserIdForApi,
           }),
           fetchClientStatuses(allClients ? null : activeClientId),
           fetchNextActions(allClients ? null : activeClientId).catch(() =>
@@ -1064,7 +1086,7 @@ function App() {
 
   useEffect(() => {
     setCompanyListPage(0)
-  }, [debouncedCompanyListQuery, activeClientId, activeNav, prospectFilter, prospectStatusFilter])
+  }, [debouncedCompanyListQuery, activeClientId, activeNav, prospectFilter, prospectStatusFilter, prospectAssignedFilter])
 
   useEffect(() => {
     if (activeClientId == null) {
@@ -1113,6 +1135,7 @@ function App() {
       q: debouncedCompanyListQuery,
       status: statusForApi || undefined,
       milestone_type: milestoneTypeForApi,
+      assigned_user_id: assignedUserIdForApi,
       limit: COMPANY_PAGE_SIZE,
       offset: companyListPage * COMPANY_PAGE_SIZE,
     })
@@ -1153,7 +1176,50 @@ function App() {
     companyListPage,
     prospectFilter,
     prospectStatusFilter,
+    prospectAssignedFilter,
+    assignedUserIdForApi,
   ])
+
+  const prospectBulkFilter = {
+    clientId: activeClientId && activeClientId > 0 ? activeClientId : 0,
+    q: debouncedCompanyListQuery,
+    status:
+      prospectStatusFilter ||
+      (prospectFilter === 'hot' ? 'Hot Prospect' : prospectFilter === 'new' ? 'New' : ''),
+    milestoneType:
+      prospectFilter && PROSPECT_MILESTONE_FILTER_TYPES[prospectFilter]
+        ? String(PROSPECT_MILESTONE_FILTER_TYPES[prospectFilter])
+        : '',
+    assignedUserId: assignedUserIdForApi,
+  }
+  const prospectBulkFilterKey = prospectFilterKey(prospectBulkFilter)
+  const showProspectBulk =
+    canAdminister &&
+    activeNav === 'prospects' &&
+    activeClientId != null &&
+    activeClientId > 0
+
+  useEffect(() => {
+    setProspectSelection(emptySelection(companyListTotal))
+  }, [prospectBulkFilterKey, activeClientId, activeNav])
+
+  useEffect(() => {
+    if (!showProspectBulk) {
+      setBulkAssignees([])
+      return
+    }
+    let cancelled = false
+    void fetchBulkAssignees(activeClientId as number)
+      .then((rows) => {
+        if (!cancelled) setBulkAssignees(rows)
+      })
+      .catch(() => {
+        if (!cancelled) setBulkAssignees([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [showProspectBulk, activeClientId])
 
   useEffect(() => {
     let cancelled = false
@@ -1925,6 +1991,7 @@ function App() {
         all_clients: allClients,
         q: debouncedCompanyListQuery || undefined,
         status: prospectStatusFilter || undefined,
+        assigned_user_id: assignedUserIdForApi,
         limit: COMPANY_PAGE_SIZE,
         offset: companyListPage * COMPANY_PAGE_SIZE,
       })
@@ -4153,7 +4220,55 @@ function App() {
                       ))}
                     </select>
                   </label>
+                  {activeClientId != null && activeClientId > 0 ? (
+                    <label className="edit-field">
+                      <span className="edit-field__label">Assigned rep</span>
+                      <select
+                        className="edit-select"
+                        value={prospectAssignedFilter}
+                        aria-label="Assigned rep"
+                        onChange={(event) => {
+                          const next = new URLSearchParams(searchParams)
+                          const value = event.target.value
+                          if (value) next.set('assigned', value)
+                          else next.delete('assigned')
+                          setSearchParams(next, { replace: true })
+                        }}
+                      >
+                        <option value="">All reps</option>
+                        <option value="unassigned">Unassigned</option>
+                        {user?.id ? (
+                          <option value={String(user.id)}>
+                            {user.full_name || user.email || 'Me'}
+                          </option>
+                        ) : null}
+                        {bulkAssignees
+                          .filter((assignee) => assignee.user_id !== user?.id)
+                          .map((assignee) => (
+                            <option key={assignee.user_id} value={String(assignee.user_id)}>
+                              {assignee.full_name || assignee.email}
+                            </option>
+                          ))}
+                      </select>
+                    </label>
+                  ) : null}
                 </div>
+
+                {showProspectBulk ? (
+                  <ProspectBulkAssign
+                    enabled
+                    clientId={activeClientId as number}
+                    clientName={clientName}
+                    rows={companyListRows}
+                    filteredTotal={companyListTotal}
+                    filter={prospectBulkFilter}
+                    selection={prospectSelection}
+                    onSelectionChange={setProspectSelection}
+                    onAssigned={() => {
+                      void refreshProspectsQuietly()
+                    }}
+                  />
+                ) : null}
 
                 {(() => {
                   const rows = companyListRows
@@ -4180,6 +4295,20 @@ function App() {
                         <table className="queue-table">
                           <thead>
                             <tr>
+                              {showProspectBulk ? (
+                                <th className="select-col">
+                                  <input
+                                    type="checkbox"
+                                    aria-label="Select current page"
+                                    checked={pageAllSelected(prospectSelection, rows)}
+                                    onChange={() =>
+                                      setProspectSelection(
+                                        selectCurrentPage(rows, companyListTotal),
+                                      )
+                                    }
+                                  />
+                                </th>
+                              ) : null}
                               <th>Company</th>
                               <th>City</th>
                               <th>State</th>
@@ -4188,6 +4317,7 @@ function App() {
                               </th>
                               <th>Primary Contact</th>
                               <th>Phone</th>
+                              <th>Assigned</th>
                               <th>Last Updated</th>
                             </tr>
                           </thead>
@@ -4200,6 +4330,27 @@ function App() {
                                     : `${prospect.client_id}-${prospect.relationship_id || prospect.id}`
                                 }
                               >
+                                {showProspectBulk ? (
+                                  <td className="select-col">
+                                    <input
+                                      type="checkbox"
+                                      aria-label={`Select ${prospect.company || 'company'}`}
+                                      checked={isRowSelected(
+                                        prospectSelection,
+                                        prospect.relationship_id,
+                                      )}
+                                      onChange={() =>
+                                        setProspectSelection((current) =>
+                                          toggleRow(
+                                            current,
+                                            prospect.relationship_id,
+                                            rows.map((item) => item.relationship_id),
+                                          ),
+                                        )
+                                      }
+                                    />
+                                  </td>
+                                ) : null}
                                 <td>
                                   <Link
                                     to={appendWorkspaceOrigin(
@@ -4249,6 +4400,12 @@ function App() {
                                 </td>
                                 <td>{displayOrDash(prospect.primary_contact)}</td>
                                 <td>{displayOrDash(prospect.phone)}</td>
+                                <td>
+                                  {displayOrDash(
+                                    prospect.assigned_user_name ||
+                                      (prospect.assigned_user_id ? String(prospect.assigned_user_id) : ''),
+                                  )}
+                                </td>
                                 <td>{formatDisplayDateTime(prospect.last_updated)}</td>
                               </tr>
                             ))}

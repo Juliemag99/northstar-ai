@@ -587,6 +587,10 @@ def list_prospects_api(
         default=None,
         description="Optional: Quote | Purchase Order | WebLead | Appointment Set",
     ),
+    assigned_user_id: int | None = Query(
+        default=None,
+        description="Filter by assigned rep. 0 = unassigned.",
+    ),
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ):
@@ -598,6 +602,7 @@ def list_prospects_api(
             q=q,
             status=status,
             milestone_type=milestone_type,
+            assigned_user_id=assigned_user_id,
             limit=limit,
             offset=offset,
         )
@@ -3035,6 +3040,7 @@ def data_steward_provenance_api(
 
 
 def _steward_http_error(exc: Exception) -> HTTPException:
+    from bulk_assignment import BLOCK_CODES_400, BulkAssignmentError
     from data_steward import StewardError, StewardLiveWriteError, StewardPermissionError
     from data_steward_amend import DuplicateCompanyError
 
@@ -3047,6 +3053,11 @@ def _steward_http_error(exc: Exception) -> HTTPException:
                 "candidates": exc.candidates,
             },
         )
+    if isinstance(exc, BulkAssignmentError):
+        code = str(exc)
+        status = 400 if code in BLOCK_CODES_400 else 409
+        detail = {"code": code, "message": code, **(exc.payload or {})}
+        return HTTPException(status_code=status, detail=detail)
     if isinstance(exc, StewardPermissionError):
         return HTTPException(status_code=403, detail=str(exc))
     if isinstance(exc, StewardLiveWriteError):
@@ -3225,6 +3236,53 @@ def data_steward_company_lifecycle_events_api(company_id: int, request: Request)
 
     with get_connection() as conn:
         return {"events": list_company_lifecycle_events(conn, company_id), "newest_first": True}
+
+
+@app.get("/api/admin/bulk-assignment/assignees")
+def bulk_assignment_assignees_api(request: Request, client_id: int = Query(...)):
+    require_administrator(request)
+    from bulk_assignment import list_eligible_assignees
+
+    try:
+        with get_connection() as conn:
+            return {"client_id": int(client_id), "assignees": list_eligible_assignees(conn, client_id=client_id)}
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.post("/api/admin/bulk-assignment/preview")
+def bulk_assignment_preview_api(body: dict, request: Request):
+    actor = require_administrator(request)
+    from bulk_assignment import BulkAssignmentRequest, preview_bulk_assignment
+
+    parsed = BulkAssignmentRequest.model_validate(body or {})
+    try:
+        with get_connection() as conn:
+            return preview_bulk_assignment(conn, actor=actor, body=parsed)
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.post("/api/admin/bulk-assignment/confirm")
+def bulk_assignment_confirm_api(body: dict, request: Request):
+    actor = require_administrator(request)
+    from bulk_assignment import BulkAssignmentRequest, confirm_bulk_assignment
+
+    parsed = BulkAssignmentRequest.model_validate(body or {})
+    try:
+        with get_connection() as conn:
+            return confirm_bulk_assignment(conn, actor=actor, body=parsed)
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
 
 
 @app.post("/api/admin/data-steward/companies/{company_id}/archive/preview")

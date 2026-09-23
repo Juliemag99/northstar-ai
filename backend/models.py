@@ -118,6 +118,8 @@ class ProspectListItem(BaseModel):
     client_code: str = ""
     client_name: str = ""
     relationship_id: int = 0
+    assigned_user_id: int | None = None
+    assigned_user_name: str = ""
 
 
 class LegacyNote(BaseModel):

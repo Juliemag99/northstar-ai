@@ -520,6 +520,7 @@ def list_prospects(
     q: str | None = None,
     status: str | None = None,
     milestone_type: str | None = None,
+    assigned_user_id: int | None = None,
     limit: int | None = None,
     offset: int = 0,
 ) -> list[ProspectListItem]:
@@ -531,6 +532,7 @@ def list_prospects(
         q=q,
         status=status,
         milestone_type=milestone_type,
+        assigned_user_id=assigned_user_id,
         limit=limit,
         offset=offset,
     )["prospects"]
@@ -539,6 +541,143 @@ def list_prospects(
 PROSPECT_MILESTONE_TYPES = frozenset(
     {"Quote", "Purchase Order", "WebLead", "Appointment Set"}
 )
+
+
+def _escape_prospect_like(token: str) -> str:
+    return token.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def prospect_ccr_match_sql(
+    conn,
+    *,
+    client_ids: list[int],
+    q: str | None = None,
+    status: str | None = None,
+    milestone_type: str | None = None,
+    assigned_user_id: int | None = None,
+) -> tuple[str, list[object]]:
+    """CCR-level Prospects FROM/WHERE. Shared by the list API and bulk assignment."""
+    placeholders = ",".join("?" * len(client_ids))
+    tokens = [t for t in _blank(q).split() if t]
+    search_clauses: list[str] = []
+    search_params: list[object] = []
+    for token in tokens:
+        esc = _escape_prospect_like(token)
+        like = f"%{esc}%"
+        search_clauses.append(
+            """
+            (
+              co.company_name LIKE ? ESCAPE '\\'
+              OR COALESCE(NULLIF(TRIM(ccr.external_record_no), ''), co.external_record_no) LIKE ? ESCAPE '\\'
+              OR co.city LIKE ? ESCAPE '\\'
+              OR co.state LIKE ? ESCAPE '\\'
+              OR COALESCE(ccr.status, '') LIKE ? ESCAPE '\\'
+              OR co.website LIKE ? ESCAPE '\\'
+              OR EXISTS (
+                SELECT 1 FROM contacts ct
+                WHERE ct.company_id = co.id
+                  AND (
+                    ct.first_name LIKE ? ESCAPE '\\'
+                    OR ct.last_name LIKE ? ESCAPE '\\'
+                    OR ct.email LIKE ? ESCAPE '\\'
+                    OR ct.phone LIKE ? ESCAPE '\\'
+                  )
+              )
+            )
+            """
+        )
+        search_params.extend([like] * 10)
+
+    search_sql = ""
+    if search_clauses:
+        search_sql = " AND " + " AND ".join(search_clauses)
+
+    status_wanted = _blank(status)
+    status_sql = ""
+    status_params: list[object] = []
+    if status_wanted:
+        status_sql = " AND LOWER(TRIM(COALESCE(ccr.status, ''))) = LOWER(?) "
+        status_params.append(status_wanted)
+
+    assigned_sql = ""
+    assigned_params: list[object] = []
+    if assigned_user_id is not None:
+        if int(assigned_user_id) == 0:
+            assigned_sql = " AND ccr.assigned_user_id IS NULL "
+        else:
+            assigned_sql = " AND ccr.assigned_user_id = ? "
+            assigned_params.append(int(assigned_user_id))
+
+    milestone_wanted = _blank(milestone_type)
+    milestone_sql = ""
+    milestone_params: list[object] = []
+    if milestone_wanted:
+        milestone_sql = """
+            AND EXISTS (
+                SELECT 1 FROM revenue_milestones rm
+                WHERE rm.client_id = ccr.client_id
+                  AND rm.company_id = ccr.company_id
+                  AND rm.milestone_type = ?
+            )
+        """
+        milestone_params.append(milestone_wanted)
+
+    archive_sql = _operational_archive_sql(conn)
+    from_sql = f"""
+        FROM client_company_relationships ccr
+        JOIN clients cl ON cl.id = ccr.client_id
+        JOIN companies co ON co.id = ccr.company_id
+        LEFT JOIN users assigned_u ON assigned_u.id = ccr.assigned_user_id
+        WHERE ccr.client_id IN ({placeholders})
+        {archive_sql}
+        {search_sql}
+        {status_sql}
+        {milestone_sql}
+        {assigned_sql}
+    """
+    params: list[object] = [
+        *client_ids,
+        *search_params,
+        *status_params,
+        *milestone_params,
+        *assigned_params,
+    ]
+    return from_sql, params
+
+
+def list_matching_prospect_ccr_ids(
+    *,
+    client_id: int,
+    q: str | None = None,
+    status: str | None = None,
+    milestone_type: str | None = None,
+    assigned_user_id: int | None = None,
+    conn=None,
+) -> list[int]:
+    """Resolve every CCR id in the current Prospects filter. No page cap."""
+    owns = conn is None
+    if owns:
+        conn = get_connection()
+    try:
+        cid = int(client_id)
+        if cid <= 0:
+            return []
+        from_sql, params = prospect_ccr_match_sql(
+            conn,
+            client_ids=[cid],
+            q=q,
+            status=status,
+            milestone_type=milestone_type,
+            assigned_user_id=assigned_user_id,
+        )
+        rows = conn.execute(
+            f"SELECT ccr.id AS ccr_id {from_sql} ORDER BY ccr.id",
+            params,
+        ).fetchall()
+        return [int(r["ccr_id"]) for r in rows]
+    finally:
+        if owns:
+            conn.close()
 
 
 def _normalize_prospect_milestone_type(value: str | None) -> str:
@@ -561,6 +700,7 @@ def list_prospects_page(
     q: str | None = None,
     status: str | None = None,
     milestone_type: str | None = None,
+    assigned_user_id: int | None = None,
     limit: int | None = None,
     offset: int = 0,
 ) -> dict:
@@ -618,83 +758,21 @@ def list_prospects_page(
             q=q,
             status=status,
             milestone_type=milestone_wanted or None,
+            assigned_user_id=assigned_user_id,
             limit=page_size,
             offset=page_offset,
         )
 
     placeholders = ",".join("?" * len(client_ids))
-    tokens = [t for t in _blank(q).split() if t]
-    search_clauses: list[str] = []
-    search_params: list[object] = []
-    for token in tokens:
-        esc = (
-            token.replace("\\", "\\\\")
-            .replace("%", "\\%")
-            .replace("_", "\\_")
+    with get_connection() as _match_conn:
+        from_sql, match_params = prospect_ccr_match_sql(
+            _match_conn,
+            client_ids=client_ids,
+            q=q,
+            status=status,
+            milestone_type=milestone_wanted or None,
+            assigned_user_id=assigned_user_id,
         )
-        like = f"%{esc}%"
-        search_clauses.append(
-            """
-            (
-              co.company_name LIKE ? ESCAPE '\\'
-              OR COALESCE(NULLIF(TRIM(ccr.external_record_no), ''), co.external_record_no) LIKE ? ESCAPE '\\'
-              OR co.city LIKE ? ESCAPE '\\'
-              OR co.state LIKE ? ESCAPE '\\'
-              OR COALESCE(ccr.status, '') LIKE ? ESCAPE '\\'
-              OR co.website LIKE ? ESCAPE '\\'
-              OR EXISTS (
-                SELECT 1 FROM contacts ct
-                WHERE ct.company_id = co.id
-                  AND (
-                    ct.first_name LIKE ? ESCAPE '\\'
-                    OR ct.last_name LIKE ? ESCAPE '\\'
-                    OR ct.email LIKE ? ESCAPE '\\'
-                    OR ct.phone LIKE ? ESCAPE '\\'
-                  )
-              )
-            )
-            """
-        )
-        search_params.extend([like] * 10)
-
-    search_sql = ""
-    if search_clauses:
-        search_sql = " AND " + " AND ".join(search_clauses)
-
-    status_wanted = _blank(status)
-    status_sql = ""
-    status_params: list[object] = []
-    if status_wanted:
-        status_sql = (
-            " AND LOWER(TRIM(COALESCE(ccr.status, ''))) = LOWER(?) "
-        )
-        status_params.append(status_wanted)
-
-    milestone_sql = ""
-    milestone_params: list[object] = []
-    if milestone_wanted:
-        milestone_sql = """
-            AND EXISTS (
-                SELECT 1 FROM revenue_milestones rm
-                WHERE rm.client_id = ccr.client_id
-                  AND rm.company_id = ccr.company_id
-                  AND rm.milestone_type = ?
-            )
-        """
-        milestone_params.append(milestone_wanted)
-
-    with get_connection() as _arch_conn:
-        archive_sql = _operational_archive_sql(_arch_conn)
-    from_sql = f"""
-        FROM client_company_relationships ccr
-        JOIN clients cl ON cl.id = ccr.client_id
-        JOIN companies co ON co.id = ccr.company_id
-        WHERE ccr.client_id IN ({placeholders})
-        {archive_sql}
-        {search_sql}
-        {status_sql}
-        {milestone_sql}
-    """
     select_sql = f"""
         SELECT
             co.id,
@@ -720,6 +798,8 @@ def list_prospects_page(
             ccr.client_id,
             cl.code AS client_code,
             cl.name AS client_name,
+            ccr.assigned_user_id,
+            COALESCE(assigned_u.full_name, '') AS assigned_user_name,
             (
                 SELECT COUNT(*) FROM contacts ct
                 WHERE ct.company_id = co.id
@@ -772,7 +852,6 @@ def list_prospects_page(
                 client_ids,
             ).fetchone()["n"]
         )
-        match_params = [*client_ids, *search_params, *status_params, *milestone_params]
         total = int(
             conn.execute(
                 f"SELECT COUNT(*) AS n {from_sql}",
@@ -838,6 +917,12 @@ def list_prospects_page(
                     client_code=_blank(row["client_code"]),
                     client_name=_blank(row["client_name"]),
                     relationship_id=int(row["relationship_id"]),
+                    assigned_user_id=(
+                        int(row["assigned_user_id"])
+                        if row["assigned_user_id"] is not None
+                        else None
+                    ),
+                    assigned_user_name=_blank(row["assigned_user_name"]),
                 )
             )
     return {
@@ -854,6 +939,7 @@ def _list_prospects_page_all_clients(
     q: str | None = None,
     status: str | None = None,
     milestone_type: str | None = None,
+    assigned_user_id: int | None = None,
     limit: int = PROSPECTS_DEFAULT_LIMIT,
     offset: int = 0,
 ) -> dict:
@@ -941,6 +1027,21 @@ def _list_prospects_page_all_clients(
         milestone_params.extend(list(client_ids))
         milestone_params.append(milestone_wanted)
 
+    assigned_sql = ""
+    assigned_params: list[object] = []
+    if assigned_user_id is not None:
+        assigned_sql = f"""
+            AND EXISTS (
+                SELECT 1 FROM client_company_relationships ccr_assigned
+                WHERE ccr_assigned.company_id = co.id
+                  AND ccr_assigned.client_id IN ({placeholders})
+                  AND {"ccr_assigned.assigned_user_id IS NULL" if int(assigned_user_id) == 0 else "ccr_assigned.assigned_user_id = ?"}
+            )
+        """
+        assigned_params.extend(list(client_ids))
+        if int(assigned_user_id) != 0:
+            assigned_params.append(int(assigned_user_id))
+
     with get_connection() as _arch_conn:
         from data_steward import sql_active_ccr, sql_active_company
 
@@ -958,6 +1059,7 @@ def _list_prospects_page_all_clients(
         {search_sql}
         {status_sql}
         {milestone_sql}
+        {assigned_sql}
     """
     select_sql = f"""
         SELECT
@@ -1012,7 +1114,7 @@ def _list_prospects_page_all_clients(
         from milestones_data import companies_with_milestone_flags
         from work_queue_data import due_record_nos
 
-        match_params = [*client_ids, *search_params, *status_params, *milestone_params]
+        match_params = [*client_ids, *search_params, *status_params, *milestone_params, *assigned_params]
         client_total = int(
             conn.execute(
                 f"""

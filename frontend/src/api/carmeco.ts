@@ -213,6 +213,11 @@ function normalizeProspect(raw: unknown): ProspectListItem {
     client_code: pick(record, 'client_code'),
     client_name: pick(record, 'client_name'),
     relationship_id: asNumber(record.relationship_id),
+    assigned_user_id:
+      record.assigned_user_id == null || record.assigned_user_id === ''
+        ? null
+        : asNumber(record.assigned_user_id),
+    assigned_user_name: pick(record, 'assigned_user_name', 'assigned_user'),
   }
 }
 
@@ -356,6 +361,7 @@ export async function fetchProspects(params?: {
   q?: string
   status?: string
   milestone_type?: string
+  assigned_user_id?: number | null
   limit?: number
   offset?: number
 }): Promise<ProspectsResponse> {
@@ -373,6 +379,9 @@ export async function fetchProspects(params?: {
   }
   if (params?.milestone_type != null && String(params.milestone_type).trim()) {
     query.set('milestone_type', String(params.milestone_type).trim())
+  }
+  if (params?.assigned_user_id != null && Number.isFinite(params.assigned_user_id)) {
+    query.set('assigned_user_id', String(Math.trunc(params.assigned_user_id)))
   }
   const limitRaw = params?.limit
   const limit =

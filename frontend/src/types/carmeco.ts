@@ -75,6 +75,8 @@ export interface ProspectListItem {
   client_code: string
   client_name: string
   relationship_id: number
+  assigned_user_id?: number | null
+  assigned_user_name?: string
 }
 
 /** @deprecated Alias kept for older call sites during migration */

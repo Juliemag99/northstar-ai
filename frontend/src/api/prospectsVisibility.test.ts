@@ -115,6 +115,27 @@ describe('Companies page prospects visibility API', () => {
     expect(page.total).toBe(26)
   })
 
+  it('passes assigned_user_id including unassigned=0', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          client: { name: 'Premier', client_id: 4, code: 'premier', mode: 'selected_client' },
+          prospects: [],
+          total: 12,
+          client_total: 730,
+          offset: 0,
+          limit: 50,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    await fetchProspects({ client_id: 4, assigned_user_id: 0, limit: 50 })
+    const url = String(fetchMock.mock.calls[0]?.[0] ?? '')
+    expect(url).toContain('assigned_user_id=0')
+    expect(url).toContain('client_id=4')
+  })
+
   it('passes a non-zero offset so rows past the first page are reachable', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
