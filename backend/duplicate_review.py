@@ -120,13 +120,29 @@ def pair_key(company_a_id: int, company_b_id: int) -> str:
     return f"{lo}:{hi}"
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    if not _table_exists(conn, table):
+        return set()
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    if column not in _table_columns(conn, table):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def ensure_duplicate_review_schema(conn: sqlite3.Connection) -> dict[str, int]:
-    """Idempotent empty review tables. Does not insert review decisions."""
-    stats = {"created_company_duplicate_reviews": 0, "created_review_events": 0}
+    """Idempotent empty review/classification tables. Does not insert review decisions."""
+    stats = {
+        "created_company_duplicate_reviews": 0,
+        "created_review_events": 0,
+        "created_classifications": 0,
+    }
     if not _table_exists(conn, "companies"):
         return stats
     existed_reviews = _table_exists(conn, "company_duplicate_reviews")
     existed_events = _table_exists(conn, "company_duplicate_review_events")
+    existed_class = _table_exists(conn, "company_duplicate_classifications")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS company_duplicate_reviews (
@@ -183,10 +199,49 @@ def ensure_duplicate_review_schema(conn: sqlite3.Connection) -> dict[str, int]:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_dup_review_events_review ON company_duplicate_review_events(review_id, id)"
     )
+    _ensure_column(conn, "company_duplicate_review_events", "automated_classification", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "company_duplicate_review_events", "classifier_version", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "company_duplicate_review_events", "review_source", "TEXT NOT NULL DEFAULT 'MANUAL'")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS company_duplicate_classifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair_key TEXT NOT NULL UNIQUE,
+            company_a_id INTEGER NOT NULL,
+            company_b_id INTEGER NOT NULL,
+            classification TEXT NOT NULL,
+            confidence TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            proposed_survivor_company_id INTEGER,
+            proposed_source_company_id INTEGER,
+            survivor_reason_json TEXT NOT NULL DEFAULT '{}',
+            evidence_fingerprint TEXT NOT NULL DEFAULT '',
+            classifier_version TEXT NOT NULL DEFAULT '',
+            classified_at TEXT NOT NULL,
+            stale_at TEXT,
+            CHECK (company_a_id < company_b_id),
+            CHECK (classification IN (
+                'HIGH_CONFIDENCE_DUPLICATE','LIKELY_DUPLICATE','LIKELY_MULTI_LOCATION',
+                'LIKELY_NOT_DUPLICATE','HUMAN_REVIEW_REQUIRED','INSUFFICIENT_EVIDENCE'
+            )),
+            CHECK (confidence IN ('HIGH','MEDIUM','LOW')),
+            FOREIGN KEY (company_a_id) REFERENCES companies(id),
+            FOREIGN KEY (company_b_id) REFERENCES companies(id)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dup_class_classification ON company_duplicate_classifications(classification)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dup_class_version ON company_duplicate_classifications(classifier_version)"
+    )
     if not existed_reviews:
         stats["created_company_duplicate_reviews"] = 1
     if not existed_events:
         stats["created_review_events"] = 1
+    if not existed_class:
+        stats["created_classifications"] = 1
     return stats
 
 
@@ -724,57 +779,18 @@ def list_duplicate_candidates(
     conn: sqlite3.Connection,
     *,
     disposition: str = "unreviewed",
+    queue: str = "",
     q: str = "",
     offset: int = 0,
     limit: int = DEFAULT_LIMIT,
 ) -> dict[str, Any]:
     ensure_duplicate_review_schema(conn)
-    needle = _blank(q).lower()
-    wanted = _blank(disposition).lower() or "unreviewed"
+    from duplicate_classify import enrich_candidate_rows, filter_candidate_rows, summarize_candidates
+
     rows = discover_duplicate_pairs(conn)
-    filtered: list[dict[str, Any]] = []
-    for row in rows:
-        disp = _blank(row.get("disposition")).upper()
-        stale = bool(row.get("stale"))
-        if wanted in {"unreviewed", ""}:
-            if not stale and disp not in {DISPOSITION_UNREVIEWED, ""}:
-                continue
-        elif wanted == "all":
-            pass
-        elif wanted == "stale":
-            if not stale:
-                continue
-        elif wanted == "likely_duplicate":
-            if disp != DISPOSITION_LIKELY or stale:
-                continue
-        elif wanted == "not_duplicate":
-            if disp != DISPOSITION_NOT:
-                continue
-        elif wanted == "multi_location":
-            if disp != DISPOSITION_MULTI:
-                continue
-        elif wanted == "needs_research":
-            if disp != DISPOSITION_RESEARCH or stale:
-                continue
-        elif wanted == "merge_candidate":
-            if disp != DISPOSITION_MERGE or stale:
-                continue
-        elif wanted == "reviewed":
-            if disp == DISPOSITION_UNREVIEWED:
-                continue
-        if needle:
-            blob = " ".join(
-                [
-                    str(row["company_a"].get("company_name") or ""),
-                    str(row["company_b"].get("company_name") or ""),
-                    str(row["company_a"].get("external_record_no") or ""),
-                    str(row["company_b"].get("external_record_no") or ""),
-                    str(row.get("pair_key") or ""),
-                ]
-            ).lower()
-            if needle not in blob:
-                continue
-        filtered.append(row)
+    enrich_candidate_rows(conn, rows)
+    summary = summarize_candidates(rows)
+    filtered = filter_candidate_rows(rows, queue=queue, disposition=disposition, q=q)
     total = len(filtered)
     start = max(0, int(offset))
     size = min(100, max(1, int(limit)))
@@ -784,9 +800,15 @@ def list_duplicate_candidates(
         "merge_will_occur": False,
         "automatic_verdict": False,
         "writes": False,
+        "no_merge_button": True,
+        "assessment_title": "NorthStar Automated Assessment",
+        "classifier_kind": "deterministic_rules",
+        "external_ai_used": False,
         "total": total,
         "offset": start,
         "limit": size,
+        "queue": _blank(queue or disposition) or "unreviewed",
+        "summary": summary,
         "pairs": page,
     }
 
@@ -1220,7 +1242,7 @@ def get_duplicate_pair_detail(
         distinct_site=distinct_site,
         merge_plan=merge_plan,
     )
-    return {
+    payload = {
         "planning_only": True,
         "merge_will_occur": False,
         "automatic_verdict": False,
@@ -1253,7 +1275,11 @@ def get_duplicate_pair_detail(
         },
         "plan_only_warning": PLAN_ONLY_WARNING,
         "no_merge_button": True,
+        "merge_enabled": False,
     }
+    from duplicate_classify import attach_assessment_to_detail
+
+    return attach_assessment_to_detail(conn, payload)
 
 
 def list_review_history(conn: sqlite3.Connection, company_a_id: int, company_b_id: int) -> dict[str, Any]:
@@ -1284,6 +1310,9 @@ def save_duplicate_review(
     company_a_id: int,
     company_b_id: int,
     body: DuplicateReviewSaveRequest,
+    review_source: str = "MANUAL",
+    automated_classification: str = "",
+    classifier_version: str = "",
 ) -> dict[str, Any]:
     if not bool(getattr(actor, "is_administrator", False)):
         raise PermissionError("Not authorized.")
@@ -1375,8 +1404,9 @@ def save_duplicate_review(
             review_id, pair_key, old_disposition, new_disposition,
             old_survivor_company_id, new_survivor_company_id,
             old_source_company_id, new_source_company_id,
-            reason, evidence_fingerprint, actor_user_id, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            reason, evidence_fingerprint, actor_user_id, created_at,
+            automated_classification, classifier_version, review_source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             review_id,
@@ -1391,10 +1421,23 @@ def save_duplicate_review(
             fingerprint,
             int(actor.id),
             now,
+            _blank(automated_classification),
+            _blank(classifier_version),
+            _blank(review_source) or "MANUAL",
         ),
     )
-    from data_steward import ACTION_DUPLICATE_REVIEW, SOURCE_MANUAL_ADMIN, record_provenance
+    from data_steward import (
+        ACTION_DUPLICATE_BATCH_REVIEW,
+        ACTION_DUPLICATE_REVIEW,
+        SOURCE_MANUAL_ADMIN,
+        record_provenance,
+    )
 
+    source_action = (
+        ACTION_DUPLICATE_BATCH_REVIEW
+        if _blank(review_source).upper() == "DUPLICATE_BATCH_REVIEW"
+        else ACTION_DUPLICATE_REVIEW
+    )
     record_provenance(
         conn,
         entity_type=ENTITY_DUPLICATE_REVIEW,
@@ -1403,7 +1446,7 @@ def save_duplicate_review(
         old_value=_blank(old.get("disposition")),
         new_value=disposition,
         source_type=SOURCE_MANUAL_ADMIN,
-        action=ACTION_DUPLICATE_REVIEW,
+        action=source_action,
         reason=reason,
         source_ref=f"{lo}:{hi}",
         actor=actor,

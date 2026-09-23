@@ -8,6 +8,9 @@ vi.mock('./api/duplicateReview', () => ({
   fetchDuplicatePair: vi.fn(),
   fetchDuplicateReviewHistory: vi.fn(),
   saveDuplicateReview: vi.fn(),
+  analyzeDuplicateCandidates: vi.fn(),
+  previewDuplicateBatchReview: vi.fn(),
+  confirmDuplicateBatchReview: vi.fn(),
 }))
 
 const candidate = {
@@ -37,6 +40,13 @@ const candidate = {
   disposition: 'UNREVIEWED',
   review_status: 'UNREVIEWED',
   stale: false,
+  classification: 'HIGH_CONFIDENCE_DUPLICATE',
+  confidence: 'HIGH',
+  auto_proposed_survivor_company_id: 22,
+  survivor_decision_required: false,
+  disagreement: false,
+  review_needed: false,
+  same_client_ccr_conflict: true,
   planning_only: true,
   merge_will_occur: false,
 }
@@ -123,6 +133,19 @@ const detail = {
   },
   plan_only_warning: 'This records a merge plan only. No records will be merged.',
   no_merge_button: true,
+  automated_assessment: {
+    assessment_title: 'NorthStar Automated Assessment',
+    classifier_kind: 'deterministic_rules',
+    external_ai_used: false,
+    classification: 'HIGH_CONFIDENCE_DUPLICATE',
+    confidence: 'HIGH',
+    why: ['Canonical names normalize identically', 'Street address matches', 'Main phone matches'],
+    concern_labels: ['Same client has a relationship on both records (merge complexity, not identity proof)'],
+    proposed_survivor_company_id: 22,
+    survivor_reason: 'established LeadMaster RN; more client relationships',
+    disagreement: false,
+    stale: false,
+  },
 }
 
 afterEach(() => {
@@ -158,17 +181,22 @@ describe('Duplicate Review workspace', () => {
     expect(screen.getByRole('heading', { name: 'Duplicate Review' })).toBeTruthy()
     expect(screen.getByText(/REVIEW \/ PLAN ONLY/)).toBeTruthy()
     await waitFor(() => expect(screen.getAllByText('Edl Packaging Engineers').length).toBeGreaterThan(0))
-    expect(screen.getByText('EXACT_NAME_ADDRESS')).toBeTruthy()
+    expect(screen.getByText('HIGH CONFIDENCE DUPLICATE')).toBeTruthy()
+    expect(screen.getByText('High Confidence Duplicate')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Analyze Duplicate Candidates' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: /Merge/i })).toBeNull()
     expect(screen.queryByRole('button', { name: /Execute/i })).toBeNull()
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Edl Packaging Engineers' })[0])
     await waitFor(() => expect(screen.getByText('MASTER COMPANY A')).toBeTruthy())
     expect(screen.getByText('MASTER COMPANY B')).toBeTruthy()
-    expect(screen.getByText('22')).toBeTruthy()
-    expect(screen.getByText('28')).toBeTruthy()
+    expect(screen.getAllByText('22').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('28').length).toBeGreaterThan(0)
     expect(screen.getAllByText(/SAME-CLIENT CCR CONFLICT/).length).toBeGreaterThan(0)
-    expect(screen.getByText(/exact_email/)).toBeTruthy()
+    expect(screen.getByText('NorthStar Automated Assessment')).toBeTruthy()
+    expect(screen.getByText(/Canonical names normalize identically/)).toBeTruthy()
+    expect(screen.getByText(/Julie disposition/)).toBeTruthy()
+    expect(screen.getAllByText(/Unreviewed/).length).toBeGreaterThan(0)
     expect(screen.getByLabelText('Not Duplicate')).toBeTruthy()
     expect(screen.getByLabelText('Multi-Location')).toBeTruthy()
     expect(screen.getByLabelText('Needs Research')).toBeTruthy()
@@ -259,10 +287,10 @@ describe('Duplicate Review workspace', () => {
     render(<AdministrationDuplicateReview />)
     await waitFor(() => expect(duplicateReview.fetchDuplicateCandidates).toHaveBeenCalled())
     fireEvent.change(screen.getByLabelText('Search'), { target: { value: 'EDL' } })
-    fireEvent.change(screen.getByLabelText('Disposition'), { target: { value: 'multi_location' } })
+    fireEvent.change(screen.getByLabelText('Queue'), { target: { value: 'likely_multi_location' } })
     await waitFor(() =>
       expect(duplicateReview.fetchDuplicateCandidates).toHaveBeenCalledWith(
-        expect.objectContaining({ disposition: 'multi_location' }),
+        expect.objectContaining({ queue: 'likely_multi_location' }),
       ),
     )
     fireEvent.click(screen.getByRole('button', { name: 'Search' }))
@@ -277,5 +305,110 @@ describe('Duplicate Review workspace', () => {
         expect.objectContaining({ offset: 50 }),
       ),
     )
+  })
+
+  it('analyzes candidates and batch-reviews eligible pairs without merge candidate', async () => {
+    vi.mocked(duplicateReview.fetchDuplicateCandidates).mockResolvedValue({
+      planning_only: true,
+      merge_will_occur: false,
+      automatic_verdict: false,
+      writes: false,
+      total: 1,
+      offset: 0,
+      limit: 50,
+      pairs: [candidate],
+      summary: { HIGH_CONFIDENCE_DUPLICATE: 42, review_needed: 23 },
+    })
+    vi.mocked(duplicateReview.analyzeDuplicateCandidates).mockResolvedValue({
+      ok: true,
+      candidates_analyzed: 137,
+      buckets: {
+        HIGH_CONFIDENCE_DUPLICATE: 42,
+        LIKELY_DUPLICATE: 21,
+        LIKELY_MULTI_LOCATION: 18,
+        LIKELY_NOT_DUPLICATE: 25,
+        HUMAN_REVIEW_REQUIRED: 23,
+        INSUFFICIENT_EVIDENCE: 8,
+      },
+      external_ai_used: false,
+    })
+    vi.mocked(duplicateReview.previewDuplicateBatchReview).mockResolvedValue({
+      ok: true,
+      writes: false,
+      action: 'ACCEPT_LIKELY_DUPLICATE',
+      new_disposition: 'LIKELY_DUPLICATE',
+      selected: 20,
+      eligible: 18,
+      excluded: 2,
+      excluded_rows: [{ pair_key: '1:2', reason: 'stale_classification' }],
+      eligible_rows: [],
+      confirm_allowed: true,
+      reason_ok: true,
+      preview_fingerprint: 'abc123',
+      batch_merge_candidate: false,
+    })
+    vi.mocked(duplicateReview.confirmDuplicateBatchReview).mockResolvedValue({
+      ok: true,
+      saved: 18,
+      selected: 20,
+      eligible: 18,
+      excluded: 2,
+      new_disposition: 'LIKELY_DUPLICATE',
+      merge_will_occur: false,
+      approval_created: false,
+    })
+
+    render(<AdministrationDuplicateReview />)
+    await waitFor(() => expect(screen.getByText('High Confidence Duplicate')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Analyze Duplicate Candidates' }))
+    await waitFor(() => expect(duplicateReview.analyzeDuplicateCandidates).toHaveBeenCalled())
+    await waitFor(() => expect(screen.getByText(/Candidates analyzed: 137/)).toBeTruthy())
+    expect(screen.getByLabelText('Select 22:28')).toBeTruthy()
+    fireEvent.click(screen.getByLabelText('Select 22:28'))
+    fireEvent.click(screen.getByRole('button', { name: 'Select Current Page' }))
+    expect(screen.getByLabelText('Select All Filtered')).toBeTruthy()
+    const batchSelect = screen.getByLabelText('Batch action') as HTMLSelectElement
+    expect(Array.from(batchSelect.options).map((row) => row.value)).not.toContain('MERGE_CANDIDATE')
+    fireEvent.change(screen.getByLabelText('Batch reason'), {
+      target: { value: 'Accept high-confidence matches after evidence review.' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Preview batch review' }))
+    await waitFor(() => expect(screen.getAllByText(/18 eligible/).length).toBeGreaterThan(0))
+    expect(screen.getAllByText(/require individual review/).length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm batch review' }))
+    await waitFor(() => expect(duplicateReview.confirmDuplicateBatchReview).toHaveBeenCalled())
+    expect(screen.queryByRole('button', { name: /^Merge$/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Execute/i })).toBeNull()
+  })
+
+  it('shows disagreement separately from the human disposition', async () => {
+    vi.mocked(duplicateReview.fetchDuplicateCandidates).mockResolvedValue({
+      planning_only: true,
+      merge_will_occur: false,
+      automatic_verdict: false,
+      writes: false,
+      total: 1,
+      offset: 0,
+      limit: 50,
+      pairs: [{ ...candidate, disagreement: true, disposition: 'MULTI_LOCATION' }],
+    })
+    vi.mocked(duplicateReview.fetchDuplicatePair).mockResolvedValue({
+      ...detail,
+      review: { ...detail.review, disposition: 'MULTI_LOCATION', reason: 'Two plants' },
+      automated_assessment: {
+        ...detail.automated_assessment,
+        disagreement: true,
+        classification: 'HIGH_CONFIDENCE_DUPLICATE',
+      },
+    })
+    vi.mocked(duplicateReview.fetchDuplicateReviewHistory).mockResolvedValue({ events: [] })
+    render(<AdministrationDuplicateReview />)
+    await waitFor(() => expect(screen.getByText(/DISAGREES/)).toBeTruthy())
+    fireEvent.click(screen.getAllByRole('button', { name: 'Edl Packaging Engineers' })[0])
+    await waitFor(() =>
+      expect(screen.getByText(/HUMAN DECISION DIFFERS FROM AUTOMATED ASSESSMENT/)).toBeTruthy(),
+    )
+    expect(screen.getByText(/Julie disposition/)).toBeTruthy()
+    expect(screen.getByText(/MULTI LOCATION/)).toBeTruthy()
   })
 })

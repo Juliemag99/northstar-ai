@@ -22,6 +22,48 @@ export type DuplicateListCompany = {
   zip?: string
 }
 
+export type DuplicateClassification =
+  | 'HIGH_CONFIDENCE_DUPLICATE'
+  | 'LIKELY_DUPLICATE'
+  | 'LIKELY_MULTI_LOCATION'
+  | 'LIKELY_NOT_DUPLICATE'
+  | 'HUMAN_REVIEW_REQUIRED'
+  | 'INSUFFICIENT_EVIDENCE'
+  | string
+
+export type DuplicateEvidenceFact = {
+  code?: string
+  label?: string
+  polarity?: string
+}
+
+export type DuplicateAutomatedAssessment = {
+  assessment_title?: string
+  classifier_kind?: string
+  external_ai_used?: boolean
+  classification?: DuplicateClassification
+  confidence?: string
+  classifier_version?: string
+  classified_at?: string
+  stale?: boolean
+  persisted?: boolean
+  evidence?: DuplicateEvidenceFact[]
+  concerns?: DuplicateEvidenceFact[]
+  why?: string[]
+  concern_labels?: string[]
+  human_review_triggers?: string[]
+  same_client_ccr_conflict?: boolean
+  material_ccr_conflict?: boolean
+  proposed_survivor_company_id?: number | null
+  proposed_source_company_id?: number | null
+  survivor_decision_required?: boolean
+  survivor_reasons?: string[]
+  survivor_reason?: string
+  disagreement?: boolean
+  review_needed?: boolean
+  review_needed_reasons?: string[]
+}
+
 export type DuplicateCandidate = {
   company_a_id: number
   company_b_id: number
@@ -39,6 +81,33 @@ export type DuplicateCandidate = {
   proposed_source_company_id?: number | null
   planning_only: boolean
   merge_will_occur: boolean
+  classification?: DuplicateClassification | ''
+  confidence?: string
+  classification_stale?: boolean
+  auto_proposed_survivor_company_id?: number | null
+  survivor_decision_required?: boolean
+  disagreement?: boolean
+  review_needed?: boolean
+  review_needed_reasons?: string[]
+  same_client_ccr_conflict?: boolean
+  why_summary?: string
+  concern_summary?: string
+}
+
+export type DuplicateSummary = {
+  candidates?: number
+  classified?: number
+  unclassified?: number
+  review_needed?: number
+  HIGH_CONFIDENCE_DUPLICATE?: number
+  LIKELY_DUPLICATE?: number
+  LIKELY_MULTI_LOCATION?: number
+  LIKELY_NOT_DUPLICATE?: number
+  HUMAN_REVIEW_REQUIRED?: number
+  INSUFFICIENT_EVIDENCE?: number
+  disagreement?: number
+  survivor_decision_required?: number
+  stale_human_review?: number
 }
 
 export type DuplicateCandidatePage = {
@@ -50,6 +119,12 @@ export type DuplicateCandidatePage = {
   offset: number
   limit: number
   pairs: DuplicateCandidate[]
+  summary?: DuplicateSummary
+  queue?: string
+  assessment_title?: string
+  classifier_kind?: string
+  external_ai_used?: boolean
+  no_merge_button?: boolean
 }
 
 export type DuplicateCcr = {
@@ -119,6 +194,8 @@ export type DuplicatePairDetail = {
   }
   plan_only_warning: string
   no_merge_button: boolean
+  automated_assessment?: DuplicateAutomatedAssessment
+  human_review?: DuplicatePairDetail['review']
 }
 
 export type DuplicateReviewSave = {
@@ -131,6 +208,47 @@ export type DuplicateReviewSave = {
   reason: string
   proposed_survivor_company_id?: number | null
   proposed_source_company_id?: number | null
+}
+
+export type DuplicateAnalyzeResult = {
+  ok: boolean
+  candidates_analyzed: number
+  buckets: Record<string, number>
+  inserted?: number
+  updated?: number
+  reused?: number
+  classifier_version?: string
+  external_ai_used?: boolean
+  human_reviews_mutated?: boolean
+  merge_will_occur?: boolean
+  approval_created?: boolean
+}
+
+export type DuplicateBatchPreview = {
+  ok: boolean
+  writes: boolean
+  action: string
+  new_disposition: string
+  selected: number
+  eligible: number
+  excluded: number
+  excluded_rows: Array<Record<string, unknown>>
+  eligible_rows: Array<Record<string, unknown>>
+  confirm_allowed: boolean
+  reason_ok: boolean
+  preview_fingerprint: string
+  batch_merge_candidate?: boolean
+}
+
+export type DuplicateBatchConfirm = {
+  ok: boolean
+  saved: number
+  selected: number
+  eligible: number
+  excluded: number
+  new_disposition: string
+  merge_will_occur?: boolean
+  approval_created?: boolean
 }
 
 async function parseJson<T>(response: Response): Promise<T> {
@@ -156,12 +274,14 @@ async function parseJson<T>(response: Response): Promise<T> {
 
 export async function fetchDuplicateCandidates(args: {
   disposition?: string
+  queue?: string
   q?: string
   offset?: number
   limit?: number
 }): Promise<DuplicateCandidatePage> {
   const query = new URLSearchParams()
-  query.set('disposition', args.disposition || 'unreviewed')
+  query.set('queue', args.queue || args.disposition || 'review_needed')
+  query.set('disposition', args.disposition || args.queue || 'review_needed')
   query.set('q', args.q || '')
   query.set('offset', String(args.offset ?? 0))
   query.set('limit', String(args.limit ?? 50))
@@ -188,6 +308,49 @@ export async function fetchDuplicateReviewHistory(companyAId: number, companyBId
     `/api/admin/duplicate-review/pairs/${companyAId}/${companyBId}/history`,
   )
   return parseJson<{ events: Array<Record<string, unknown>> }>(response)
+}
+
+export async function analyzeDuplicateCandidates(): Promise<DuplicateAnalyzeResult> {
+  const response = await apiFetch('/api/admin/duplicate-review/analyze', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+  return parseJson(response)
+}
+
+export async function previewDuplicateBatchReview(body: {
+  action: string
+  reason: string
+  selection_mode: 'explicit' | 'filtered' | string
+  pair_keys?: string[]
+  queue?: string
+  q?: string
+}): Promise<DuplicateBatchPreview> {
+  const response = await apiFetch('/api/admin/duplicate-review/batch/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return parseJson(response)
+}
+
+export async function confirmDuplicateBatchReview(body: {
+  action: string
+  reason: string
+  selection_mode: 'explicit' | 'filtered' | string
+  pair_keys?: string[]
+  queue?: string
+  q?: string
+  preview_fingerprint: string
+  confirm: boolean
+}): Promise<DuplicateBatchConfirm> {
+  const response = await apiFetch('/api/admin/duplicate-review/batch/confirm', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return parseJson(response)
 }
 
 export async function saveDuplicateReview(

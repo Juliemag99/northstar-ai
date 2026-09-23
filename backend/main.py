@@ -2984,12 +2984,13 @@ def data_steward_meta_api(request: Request):
         "delete_enabled": False,
         "merge_enabled": False,
         "duplicate_review_enabled": True,
+        "duplicate_classification_enabled": True,
         "remove_relationship_enabled": ccr_on,
         "restore_enabled": ccr_on,
         "message": (
             "Governed Master Company amend, archive/restore, client relationship "
-            "remove/restore, and duplicate review/planning are enabled. Live merge "
-            "and hard delete remain disabled."
+            "remove/restore, duplicate review/planning, and automated duplicate "
+            "classification are enabled. Live merge and hard delete remain disabled."
         ),
     }
 
@@ -3297,6 +3298,7 @@ def bulk_assignment_confirm_api(body: dict, request: Request):
 def duplicate_review_candidates_api(
     request: Request,
     disposition: str = Query(default="unreviewed"),
+    queue: str = Query(default=""),
     q: str = Query(default=""),
     offset: int = Query(default=0),
     limit: int = Query(default=50),
@@ -3307,8 +3309,56 @@ def duplicate_review_candidates_api(
     try:
         with get_connection() as conn:
             return list_duplicate_candidates(
-                conn, disposition=disposition, q=q, offset=offset, limit=limit
+                conn, disposition=disposition, queue=queue, q=q, offset=offset, limit=limit
             )
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.post("/api/admin/duplicate-review/analyze")
+def duplicate_review_analyze_api(request: Request, body: dict | None = None):
+    actor = require_administrator(request)
+    from duplicate_classify import DuplicateAnalyzeRequest, analyze_duplicate_candidates
+
+    DuplicateAnalyzeRequest.model_validate(body or {})
+    try:
+        with get_connection() as conn:
+            return analyze_duplicate_candidates(conn, actor=actor)
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.post("/api/admin/duplicate-review/batch/preview")
+def duplicate_review_batch_preview_api(body: dict, request: Request):
+    actor = require_administrator(request)
+    from duplicate_classify import DuplicateBatchReviewRequest, preview_batch_review
+
+    parsed = DuplicateBatchReviewRequest.model_validate(body or {})
+    try:
+        with get_connection() as conn:
+            return preview_batch_review(conn, actor=actor, body=parsed)
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.post("/api/admin/duplicate-review/batch/confirm")
+def duplicate_review_batch_confirm_api(body: dict, request: Request):
+    actor = require_administrator(request)
+    from duplicate_classify import DuplicateBatchReviewRequest, confirm_batch_review
+
+    parsed = DuplicateBatchReviewRequest.model_validate(body or {})
+    try:
+        with get_connection() as conn:
+            return confirm_batch_review(conn, actor=actor, body=parsed)
     except Exception as exc:
         mapped = _steward_http_error(exc)
         if mapped:

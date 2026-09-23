@@ -3,6 +3,7 @@ import {
   fetchDuplicateCandidates,
   fetchDuplicatePair,
   saveDuplicateReview,
+  analyzeDuplicateCandidates,
 } from './duplicateReview'
 
 const fetchMock = vi.fn()
@@ -29,7 +30,7 @@ describe('duplicateReview API', () => {
     await fetchDuplicateCandidates({ disposition: 'unreviewed', q: 'EDL', offset: 0, limit: 50 })
     const url = String(fetchMock.mock.calls[0]?.[0] || '')
     expect(url).toContain('/api/admin/duplicate-review/candidates')
-    expect(url).toContain('disposition=unreviewed')
+    expect(url).toContain('queue=unreviewed')
     expect(url).toContain('q=EDL')
   })
 
@@ -64,6 +65,25 @@ describe('duplicateReview API', () => {
     expect(saved.approval_created).toBe(false)
     expect(String(fetchMock.mock.calls[1]?.[0] || '')).toContain(
       '/api/admin/duplicate-review/pairs/22/28',
+    )
+  })
+
+  it('analyzes candidates without implying merge', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ok: true,
+        candidates_analyzed: 12,
+        merge_will_occur: false,
+        approval_created: false,
+        buckets: { HIGH_CONFIDENCE_DUPLICATE: 3 },
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const result = await analyzeDuplicateCandidates()
+    expect(result.merge_will_occur).toBe(false)
+    expect(String(fetchMock.mock.calls[0]?.[0] || '')).toContain(
+      '/api/admin/duplicate-review/analyze',
     )
   })
 })
