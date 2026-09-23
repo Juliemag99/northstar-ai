@@ -478,6 +478,9 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         from company_merges import ensure_company_merge_schema
 
         ensure_company_merge_schema(conn)
+        from duplicate_review import ensure_duplicate_review_schema
+
+        ensure_duplicate_review_schema(conn)
     elif _table_exists(conn, "companies"):
         from crm_identity_keys import ensure_crm_identity_key_schema
 
@@ -491,6 +494,9 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         from company_merges import ensure_company_merge_schema
 
         ensure_company_merge_schema(conn)
+        from duplicate_review import ensure_duplicate_review_schema
+
+        ensure_duplicate_review_schema(conn)
     from auth_sessions import ensure_staff_auth_schema
 
     ensure_staff_auth_schema(conn)

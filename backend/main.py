@@ -2983,11 +2983,13 @@ def data_steward_meta_api(request: Request):
         "company_restore_enabled": archive_on,
         "delete_enabled": False,
         "merge_enabled": False,
+        "duplicate_review_enabled": True,
         "remove_relationship_enabled": ccr_on,
         "restore_enabled": ccr_on,
         "message": (
-            "Governed Master Company amend, archive/restore, and client relationship "
-            "remove/restore are enabled. Live merge and hard delete remain disabled."
+            "Governed Master Company amend, archive/restore, client relationship "
+            "remove/restore, and duplicate review/planning are enabled. Live merge "
+            "and hard delete remain disabled."
         ),
     }
 
@@ -3043,6 +3045,7 @@ def _steward_http_error(exc: Exception) -> HTTPException:
     from bulk_assignment import BLOCK_CODES_400, BulkAssignmentError
     from data_steward import StewardError, StewardLiveWriteError, StewardPermissionError
     from data_steward_amend import DuplicateCompanyError
+    from duplicate_review import DuplicateReviewError
 
     if isinstance(exc, DuplicateCompanyError):
         return HTTPException(
@@ -3053,6 +3056,11 @@ def _steward_http_error(exc: Exception) -> HTTPException:
                 "candidates": exc.candidates,
             },
         )
+    if isinstance(exc, DuplicateReviewError):
+        code = str(exc)
+        status = 404 if code == "company_not_found" else 400
+        detail = {"code": code, "message": code, **(exc.payload or {})}
+        return HTTPException(status_code=status, detail=detail)
     if isinstance(exc, BulkAssignmentError):
         code = str(exc)
         status = 400 if code in BLOCK_CODES_400 else 409
@@ -3278,6 +3286,91 @@ def bulk_assignment_confirm_api(body: dict, request: Request):
     try:
         with get_connection() as conn:
             return confirm_bulk_assignment(conn, actor=actor, body=parsed)
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.get("/api/admin/duplicate-review/candidates")
+def duplicate_review_candidates_api(
+    request: Request,
+    disposition: str = Query(default="unreviewed"),
+    q: str = Query(default=""),
+    offset: int = Query(default=0),
+    limit: int = Query(default=50),
+):
+    require_administrator(request)
+    from duplicate_review import list_duplicate_candidates
+
+    try:
+        with get_connection() as conn:
+            return list_duplicate_candidates(
+                conn, disposition=disposition, q=q, offset=offset, limit=limit
+            )
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.get("/api/admin/duplicate-review/pairs/{company_a_id}/{company_b_id}")
+def duplicate_review_pair_detail_api(
+    company_a_id: int,
+    company_b_id: int,
+    request: Request,
+    planning_survivor_company_id: int | None = Query(default=None),
+):
+    require_administrator(request)
+    from duplicate_review import get_duplicate_pair_detail
+
+    try:
+        with get_connection() as conn:
+            return get_duplicate_pair_detail(
+                conn,
+                company_a_id,
+                company_b_id,
+                planning_survivor_company_id=planning_survivor_company_id,
+            )
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.get("/api/admin/duplicate-review/pairs/{company_a_id}/{company_b_id}/history")
+def duplicate_review_pair_history_api(company_a_id: int, company_b_id: int, request: Request):
+    require_administrator(request)
+    from duplicate_review import list_review_history
+
+    try:
+        with get_connection() as conn:
+            return list_review_history(conn, company_a_id, company_b_id)
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.post("/api/admin/duplicate-review/pairs/{company_a_id}/{company_b_id}")
+def duplicate_review_save_api(company_a_id: int, company_b_id: int, body: dict, request: Request):
+    actor = require_administrator(request)
+    from duplicate_review import DuplicateReviewSaveRequest, save_duplicate_review
+
+    parsed = DuplicateReviewSaveRequest.model_validate(body or {})
+    try:
+        with get_connection() as conn:
+            return save_duplicate_review(
+                conn,
+                actor=actor,
+                company_a_id=company_a_id,
+                company_b_id=company_b_id,
+                body=parsed,
+            )
     except Exception as exc:
         mapped = _steward_http_error(exc)
         if mapped:

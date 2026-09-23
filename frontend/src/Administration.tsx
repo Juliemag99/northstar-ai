@@ -19,6 +19,7 @@ import AdministrationClientDataImport from './AdministrationClientDataImport'
 import AdministrationMasterDataExport from './AdministrationMasterDataExport'
 import AdministrationLeadmasterRefresh from './AdministrationLeadmasterRefresh'
 import AdministrationDataSteward from './AdministrationDataSteward'
+import AdministrationDuplicateReview from './AdministrationDuplicateReview'
 import AdministrationResearchImport from './AdministrationResearchImport'
 
 type AssignedClient = {
@@ -88,7 +89,9 @@ export default function Administration({
   const [adminTab, setAdminTab] = useState<
     'email' | 'import' | 'client-data-import' | 'research-import' | 'data-management'
   >('email')
-  const [dataMgmtTab, setDataMgmtTab] = useState<'export' | 'leadmaster-refresh' | 'master-data'>('export')
+  const [dataMgmtTab, setDataMgmtTab] = useState<
+    'export' | 'leadmaster-refresh' | 'master-data' | 'duplicate-review'
+  >('export')
 
   const allMyClients = activeClientId == null || activeClientId <= 0
   const connectClientId = allMyClients ? scopedClientId : activeClientId
@@ -361,6 +364,19 @@ export default function Administration({
             <button
               type="button"
               role="tab"
+              aria-selected={dataMgmtTab === 'duplicate-review'}
+              className={
+                dataMgmtTab === 'duplicate-review'
+                  ? 'setup-campaign-tab setup-campaign-tab--active'
+                  : 'setup-campaign-tab'
+              }
+              onClick={() => setDataMgmtTab('duplicate-review')}
+            >
+              Duplicate Review
+            </button>
+            <button
+              type="button"
+              role="tab"
               aria-selected={dataMgmtTab === 'leadmaster-refresh'}
               className={
                 dataMgmtTab === 'leadmaster-refresh'
@@ -374,6 +390,7 @@ export default function Administration({
           </div>
           {dataMgmtTab === 'export' ? <AdministrationMasterDataExport /> : null}
           {dataMgmtTab === 'master-data' ? <AdministrationDataSteward /> : null}
+          {dataMgmtTab === 'duplicate-review' ? <AdministrationDuplicateReview /> : null}
           {dataMgmtTab === 'leadmaster-refresh' ? (
             <AdministrationLeadmasterRefresh
               allMyClients={allMyClients}

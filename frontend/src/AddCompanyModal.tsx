@@ -422,6 +422,10 @@ export default function AddCompanyModal({
                 data-testid="add-company-dup-results"
               >
                 <h3>Possible existing companies</h3>
+                <p className="queue-sub">
+                  Administrators can also review suspected duplicates in Administration → Data
+                  Management → Duplicate Review. That workspace does not merge records.
+                </p>
                 <ul>
                   {matches.map((match) => {
                     const place = [

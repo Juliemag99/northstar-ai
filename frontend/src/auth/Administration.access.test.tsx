@@ -85,6 +85,7 @@ describe('Administration access', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Data Management' }))
     expect(screen.getByRole('tab', { name: 'LeadMaster Refresh' })).toBeTruthy()
     expect(screen.getByRole('tab', { name: 'Master Data' })).toBeTruthy()
+    expect(screen.getByRole('tab', { name: 'Duplicate Review' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Master Data Export' })).toBeTruthy()
     expect(screen.getByRole('radio', { name: 'Excel (.xlsx)' })).toBeTruthy()
     fireEvent.click(screen.getByRole('tab', { name: 'LeadMaster Refresh' }))

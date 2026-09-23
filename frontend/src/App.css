@@ -4191,4 +4191,80 @@ a.primary-btn:hover {
   margin: 0.4rem 0 0.75rem;
 }
 
+.dup-review {
+  margin-top: 1rem;
+}
+
+.dup-plan-banner {
+  display: inline-block;
+  margin: 0.4rem 0 0.75rem;
+  padding: 0.45rem 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  background: #fff6d8;
+  border: 1px solid #e0c25a;
+}
+
+.dup-toolbar,
+.dup-pager,
+.dup-radio {
+  display: flex;
+  gap: 0.75rem;
+  align-items: end;
+  margin: 0.75rem 0;
+  flex-wrap: wrap;
+}
+
+.dup-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.dup-table th,
+.dup-table td {
+  text-align: left;
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid #ddd;
+  vertical-align: top;
+}
+
+.dup-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+.dup-pane {
+  border: 1px solid #ddd;
+  padding: 0.75rem;
+}
+
+.dup-field {
+  display: grid;
+  grid-template-columns: 8.5rem 1fr;
+  gap: 0.35rem;
+  margin: 0.2rem 0;
+}
+
+.dup-field-label {
+  color: #555;
+}
+
+.dup-archive,
+.dup-stale,
+.dup-conflict {
+  font-weight: 700;
+  color: #8a1f11;
+}
+
+.dup-detail textarea,
+.dup-detail select,
+.dup-toolbar input,
+.dup-toolbar select {
+  display: block;
+  width: 100%;
+  margin-top: 0.25rem;
+}
+
+
 
