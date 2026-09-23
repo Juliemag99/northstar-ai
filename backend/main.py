@@ -2962,17 +2962,25 @@ def leadmaster_refresh_meta_api(request: Request):
 @app.get("/api/admin/data-steward/meta")
 def data_steward_meta_api(request: Request):
     require_administrator(request)
-    from data_steward import live_company_amend_enabled, live_destructive_enabled
+    from data_steward import (
+        live_ccr_lifecycle_enabled,
+        live_company_amend_enabled,
+        live_destructive_enabled,
+    )
 
+    ccr_on = live_ccr_lifecycle_enabled()
     return {
         "live_mutations_enabled": live_destructive_enabled(),
         "company_amend_enabled": live_company_amend_enabled(),
         "archive_enabled": False,
         "delete_enabled": False,
         "merge_enabled": False,
-        "remove_relationship_enabled": False,
-        "restore_enabled": False,
-        "message": "Governed Master Company amend is enabled. Live archive/delete/merge/remove remain disabled.",
+        "remove_relationship_enabled": ccr_on,
+        "restore_enabled": ccr_on,
+        "message": (
+            "Governed Master Company amend and client relationship remove/restore are enabled. "
+            "Live master archive/delete/merge remain disabled."
+        ),
     }
 
 
@@ -3042,7 +3050,7 @@ def _steward_http_error(exc: Exception) -> HTTPException:
         return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, StewardError):
         code = str(exc)
-        status = 400 if code == "reason_required" else 409
+        status = 400 if code in {"reason_required", "confirmation_required"} else 409
         return HTTPException(status_code=status, detail={"code": code, "message": code})
     if isinstance(exc, PermissionError):
         return HTTPException(status_code=403, detail=str(exc))
@@ -3119,6 +3127,83 @@ def data_steward_save_company_amend_api(
                 expected_updated_at=parsed.expected_updated_at,
                 preview_fingerprint_value=parsed.preview_fingerprint,
             )
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.get("/api/admin/data-steward/companies/{company_id}/relationship-events")
+def data_steward_company_relationship_events_api(company_id: int, request: Request):
+    require_administrator(request)
+    from data_steward_relationship import list_company_relationship_events
+
+    with get_connection() as conn:
+        return {"events": list_company_relationship_events(conn, company_id), "newest_first": True}
+
+
+@app.post("/api/admin/data-steward/relationships/{ccr_id}/remove/preview")
+def data_steward_preview_remove_api(ccr_id: int, body: dict, request: Request):
+    actor = require_administrator(request)
+    from data_steward_relationship import RelationshipActionRequest, preview_remove_relationship
+
+    parsed = RelationshipActionRequest.model_validate(body or {})
+    try:
+        with get_connection() as conn:
+            return preview_remove_relationship(
+                conn, actor=actor, ccr_id=ccr_id, reason=parsed.reason
+            )
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.post("/api/admin/data-steward/relationships/{ccr_id}/remove")
+def data_steward_confirm_remove_api(ccr_id: int, body: dict, request: Request):
+    actor = require_administrator(request)
+    from data_steward_relationship import RelationshipActionRequest, confirm_remove_relationship
+
+    parsed = RelationshipActionRequest.model_validate(body or {})
+    try:
+        with get_connection() as conn:
+            return confirm_remove_relationship(conn, actor=actor, ccr_id=ccr_id, body=parsed)
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.post("/api/admin/data-steward/relationships/{ccr_id}/restore/preview")
+def data_steward_preview_restore_api(ccr_id: int, body: dict, request: Request):
+    actor = require_administrator(request)
+    from data_steward_relationship import RelationshipActionRequest, preview_restore_relationship
+
+    parsed = RelationshipActionRequest.model_validate(body or {})
+    try:
+        with get_connection() as conn:
+            return preview_restore_relationship(
+                conn, actor=actor, ccr_id=ccr_id, reason=parsed.reason
+            )
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.post("/api/admin/data-steward/relationships/{ccr_id}/restore")
+def data_steward_confirm_restore_api(ccr_id: int, body: dict, request: Request):
+    actor = require_administrator(request)
+    from data_steward_relationship import RelationshipActionRequest, confirm_restore_relationship
+
+    parsed = RelationshipActionRequest.model_validate(body or {})
+    try:
+        with get_connection() as conn:
+            return confirm_restore_relationship(conn, actor=actor, ccr_id=ccr_id, body=parsed)
     except Exception as exc:
         mapped = _steward_http_error(exc)
         if mapped:

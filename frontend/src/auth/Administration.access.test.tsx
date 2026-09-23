@@ -93,7 +93,7 @@ describe('Administration access', () => {
     expect(screen.queryByRole('button', { name: /Confirm \(live confirmation not enabled\)/i })).toBeNull()
     fireEvent.click(screen.getByRole('tab', { name: 'Master Data' }))
     expect(screen.getByRole('heading', { name: 'Master Data' })).toBeTruthy()
-    expect(screen.getByText(/Live archive \/ delete \/ merge \/ remove-from-client not enabled/i)).toBeTruthy()
+    expect(screen.getByText(/Live master archive \/ delete \/ merge not enabled/i)).toBeTruthy()
     expect((screen.getByRole('button', { name: 'Archive (not yet enabled)' }) as HTMLButtonElement).disabled).toBe(true)
     expect((screen.getByRole('button', { name: 'Delete (not yet enabled)' }) as HTMLButtonElement).disabled).toBe(true)
   })

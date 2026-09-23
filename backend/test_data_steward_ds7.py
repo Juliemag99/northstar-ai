@@ -121,15 +121,17 @@ def test_gates_amend_only() -> None:
         _fail("company amend gate should be enabled")
     if live_destructive_enabled():
         _fail("destructive steward gate must stay false")
-    from data_steward import _archive_row, delete_company_permanent, remove_relationship
+    from data_steward import _archive_row, _restore_row, delete_company_permanent, live_ccr_lifecycle_enabled
     import inspect
 
+    if not live_ccr_lifecycle_enabled():
+        _fail("CCR lifecycle gate should be enabled")
     if "assert_not_production_db" not in inspect.getsource(_archive_row):
         _fail("archive/restore lost live refusal")
     if "assert_not_production_db" not in inspect.getsource(delete_company_permanent):
         _fail("delete_company_permanent lost live refusal")
-    if "assert_not_production_db" not in inspect.getsource(remove_relationship):
-        _fail("remove_relationship lost live refusal")
+    if "assert_not_production_db" not in inspect.getsource(_restore_row):
+        _fail("restore_company lost live refusal")
 
 
 def test_create_provenance_records_populated_not_blank() -> None:

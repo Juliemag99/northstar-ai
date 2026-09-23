@@ -321,28 +321,31 @@ def list_client_company_work(
         return []
 
     placeholders = ",".join("?" * len(client_ids))
-    sql = f"""
-        SELECT
-            ccr.id AS relationship_id,
-            ccr.client_id,
-            cl.code AS client_code,
-            cl.name AS client_name,
-            ccr.company_id,
-            co.external_record_no,
-            co.company_name,
-            COALESCE(ccr.status, '') AS status,
-            ccr.assigned_user_id,
-            COALESCE(ccr.priority, '') AS priority,
-            COALESCE(ccr.next_action, '') AS next_action,
-            ccr.follow_up_date,
-            COALESCE(ccr.notes, '') AS notes
-        FROM client_company_relationships ccr
-        JOIN clients cl ON cl.id = ccr.client_id
-        JOIN companies co ON co.id = ccr.company_id
-        WHERE ccr.client_id IN ({placeholders})
-        ORDER BY cl.name COLLATE NOCASE, co.company_name COLLATE NOCASE
-    """
+    from data_steward import sql_active_ccr
+
     with get_connection() as conn:
+        sql = f"""
+            SELECT
+                ccr.id AS relationship_id,
+                ccr.client_id,
+                cl.code AS client_code,
+                cl.name AS client_name,
+                ccr.company_id,
+                co.external_record_no,
+                co.company_name,
+                COALESCE(ccr.status, '') AS status,
+                ccr.assigned_user_id,
+                COALESCE(ccr.priority, '') AS priority,
+                COALESCE(ccr.next_action, '') AS next_action,
+                ccr.follow_up_date,
+                COALESCE(ccr.notes, '') AS notes
+            FROM client_company_relationships ccr
+            JOIN clients cl ON cl.id = ccr.client_id
+            JOIN companies co ON co.id = ccr.company_id
+            WHERE ccr.client_id IN ({placeholders})
+              AND {sql_active_ccr(conn, "ccr")}
+            ORDER BY cl.name COLLATE NOCASE, co.company_name COLLATE NOCASE
+        """
         rows = conn.execute(sql, client_ids).fetchall()
 
     return [

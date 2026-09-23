@@ -24,6 +24,30 @@ from access import (
 from appointments_data import count_hot_prospects, is_hot_prospect_status
 from data_steward import sql_active_ccr, sql_active_company
 from db import DB_PATH, get_connection
+
+
+def _sql_task_has_active_ccr(
+    conn,
+    *,
+    rel_expr: str,
+    client_expr: str,
+    company_expr: str,
+) -> str:
+    """Hide specialist due-work when the client relationship is archived."""
+    return f"""
+    EXISTS (
+      SELECT 1 FROM client_company_relationships ccr
+      WHERE {sql_active_ccr(conn, "ccr")}
+        AND (
+          (CAST(COALESCE({rel_expr}, 0) AS INTEGER) > 0 AND ccr.id = {rel_expr})
+          OR (
+            CAST(COALESCE({rel_expr}, 0) AS INTEGER) <= 0
+            AND ccr.client_id = {client_expr}
+            AND ccr.company_id = {company_expr}
+          )
+        )
+    )
+    """
 from models import (
     DashboardFollowUpItem,
     DashboardFollowUpsResponse,
@@ -366,6 +390,7 @@ def list_due_work_items(
                     ? = 1
                     OR lower(COALESCE(w.completion_status, 'open')) IN ('open', 'due', 'incomplete', 'pending', '')
                   )
+                  AND {_sql_task_has_active_ccr(conn, rel_expr="w.relationship_id", client_expr="w.client_id", company_expr="w.company_id")}
                 ORDER BY w.due_date ASC, w.id ASC
                 """,
                 (
@@ -456,7 +481,7 @@ def list_due_work_items(
 
         if kind == "follow_up":
             act_rows = conn.execute(
-                """
+                f"""
                 SELECT
                     a.activity_id,
                     a.client_id,
@@ -479,6 +504,7 @@ def list_due_work_items(
                   AND (? = 1 OR COALESCE(a.follow_up_completed, 0) = 0)
                   AND lower(COALESCE(a.completion_status, 'open')) NOT IN
                       ('completed', 'cancelled', 'done', 'closed')
+                  AND {_sql_task_has_active_ccr(conn, rel_expr="a.relationship_id", client_expr="a.client_id", company_expr="a.company_id")}
                 ORDER BY a.follow_up_at ASC, a.activity_id ASC
                 """,
                 (focus_id, today, 1 if include_completed else 0),
@@ -558,7 +584,7 @@ def list_open_follow_up_tasks(*, client_id: int) -> list[WorkQueueItem]:
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='work_queue_items'"
         ).fetchone():
             rows = conn.execute(
-                """
+                f"""
                 SELECT
                     w.*,
                     co.company_name,
@@ -571,6 +597,7 @@ def list_open_follow_up_tasks(*, client_id: int) -> list[WorkQueueItem]:
                   AND lower(w.action_type) IN ('follow-up', 'follow up', 'followup')
                   AND lower(COALESCE(w.completion_status, 'open')) IN
                       ('open', 'due', 'incomplete', 'pending', '')
+                  AND {_sql_task_has_active_ccr(conn, rel_expr="w.relationship_id", client_expr="w.client_id", company_expr="w.company_id")}
                 ORDER BY w.due_date ASC, w.due_time ASC, w.id ASC
                 """,
                 (int(client_id),),
@@ -605,7 +632,7 @@ def list_open_follow_up_tasks(*, client_id: int) -> list[WorkQueueItem]:
                     )
                 )
         act_rows = conn.execute(
-            """
+            f"""
             SELECT
                 a.activity_id,
                 a.client_id,
@@ -626,6 +653,7 @@ def list_open_follow_up_tasks(*, client_id: int) -> list[WorkQueueItem]:
               AND COALESCE(a.follow_up_completed, 0) = 0
               AND lower(COALESCE(a.completion_status, 'open')) NOT IN
                   ('completed', 'cancelled', 'done', 'closed')
+              AND {_sql_task_has_active_ccr(conn, rel_expr="a.relationship_id", client_expr="a.client_id", company_expr="a.company_id")}
             ORDER BY a.follow_up_at ASC, a.activity_id ASC
             """,
             (int(client_id),),

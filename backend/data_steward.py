@@ -35,6 +35,8 @@ SOURCE_LEGACY_EXISTING = "LEGACY_EXISTING"
 SOURCE_LEADMASTER_LEGACY = "LEADMASTER_LEGACY"
 SOURCE_REF_ACTIVATION = "data_steward_activation"
 ACTION_BASELINE = "BASELINE"
+ACTION_REMOVE_FROM_CLIENT = "REMOVE_FROM_CLIENT"
+ACTION_RESTORE_TO_CLIENT = "RESTORE_TO_CLIENT"
 
 MANUAL_SOURCES = frozenset({SOURCE_MANUAL_ADMIN, SOURCE_MANUAL_STAFF})
 ALLOWED_SOURCE_TYPES = frozenset(
@@ -1909,19 +1911,47 @@ def link_relationship(
 
 def remove_relationship(conn, *, actor: NorthStarUser, ccr_id: int, reason: str = "") -> dict[str, Any]:
     """REMOVE FROM CLIENT — archive the CCR. Never DELETE the row. Never delete the company."""
-    assert_not_production_db(conn)
+    _prepare_ccr_lifecycle(conn)
     stored = _load(conn, "client_company_relationships", ccr_id)
     require_capability(actor, CAP_CCR_EDIT, client_id=int(stored["client_id"]), conn=conn)
     inspect_relationship_dependencies(conn, int(ccr_id))
-    _archive_row(
-        conn,
-        "client_company_relationships",
-        int(ccr_id),
-        actor,
-        reason or "remove_from_client",
-        ENTITY_CLIENT_RELATIONSHIP,
-    )
     company_id = int(stored["company_id"])
+    already = is_archived(conn, "client_company_relationships", int(ccr_id))
+    if already:
+        return {
+            "company_still_exists": True,
+            "company_id": company_id,
+            "ccr_id": int(ccr_id),
+            "archived": True,
+            "same_id": True,
+            "noop": True,
+            "code": "already_removed",
+        }
+    now = _now()
+    reason_text = _blank(reason) or "remove_from_client"
+    conn.execute(
+        """
+        UPDATE client_company_relationships
+        SET archived_at = ?, archived_by_user_id = ?, archive_reason = ?
+        WHERE id = ?
+        """,
+        (now, int(actor.id), reason_text, int(ccr_id)),
+    )
+    record_provenance(
+        conn,
+        entity_type=ENTITY_CLIENT_RELATIONSHIP,
+        entity_id=int(ccr_id),
+        field="archived_at",
+        old_value="",
+        new_value=now,
+        source_type=source_type_for_actor(actor),
+        changed_by_user_id=int(actor.id),
+        action=ACTION_REMOVE_FROM_CLIENT,
+        reason=reason_text,
+        changed_at=now,
+        client_id=int(stored["client_id"]),
+        actor=actor,
+    )
     remaining = conn.execute(
         "SELECT COUNT(*) FROM companies WHERE id = ?", (company_id,)
     ).fetchone()[0]
@@ -1935,14 +1965,44 @@ def remove_relationship(conn, *, actor: NorthStarUser, ccr_id: int, reason: str 
         "ccr_id": int(ccr_id),
         "archived": bool(still and _blank(still["archived_at"])),
         "same_id": int(still["id"]) == int(ccr_id) if still else False,
+        "noop": False,
+        "code": "removed",
     }
 
 
-def restore_relationship(conn, *, actor: NorthStarUser, ccr_id: int) -> int:
+def restore_relationship(conn, *, actor: NorthStarUser, ccr_id: int, reason: str = "") -> int:
     """Restore the same CCR id. Does not create a new relationship."""
-    return _restore_row(
-        conn, "client_company_relationships", int(ccr_id), actor, ENTITY_CLIENT_RELATIONSHIP
+    _prepare_ccr_lifecycle(conn)
+    stored = _load(conn, "client_company_relationships", ccr_id)
+    require_capability(actor, CAP_CCR_EDIT, client_id=int(stored["client_id"]), conn=conn)
+    if not is_archived(conn, "client_company_relationships", int(ccr_id)):
+        return int(ccr_id)
+    now = _now()
+    old_archived = _blank(stored.get("archived_at"))
+    conn.execute(
+        """
+        UPDATE client_company_relationships
+        SET archived_at = '', archived_by_user_id = NULL, archive_reason = ''
+        WHERE id = ?
+        """,
+        (int(ccr_id),),
     )
+    record_provenance(
+        conn,
+        entity_type=ENTITY_CLIENT_RELATIONSHIP,
+        entity_id=int(ccr_id),
+        field="archived_at",
+        old_value=old_archived or "archived",
+        new_value="",
+        source_type=source_type_for_actor(actor),
+        changed_by_user_id=int(actor.id),
+        action=ACTION_RESTORE_TO_CLIENT,
+        reason=_blank(reason) or "restore_to_client",
+        changed_at=now,
+        client_id=int(stored["client_id"]),
+        actor=actor,
+    )
+    return int(ccr_id)
 
 
 def amend_relationship(
@@ -2102,7 +2162,12 @@ def audit_history(
 
 
 def live_company_amend_enabled() -> bool:
-    """DS-7 governed Master Company amend only. Does not enable archive/delete/merge/remove."""
+    """DS-7 governed Master Company amend only. Does not enable archive/delete/merge."""
+    return True
+
+
+def live_ccr_lifecycle_enabled() -> bool:
+    """DS-8 governed CCR remove/restore only. Does not enable master archive/delete/merge."""
     return True
 
 
@@ -2130,5 +2195,25 @@ def _prepare_company_amend(conn) -> None:
     if _is_live_db_path():
         if not provenance_table_ready(conn):
             raise StewardError("provenance_schema_missing")
+        return
+    ensure_data_steward_schema(conn)
+
+
+def _assert_ccr_lifecycle_allowed(conn=None) -> None:
+    """Allow isolated writes always; live writes only for governed CCR remove/restore."""
+    _ = conn
+    if not _is_live_db_path():
+        return
+    if not live_ccr_lifecycle_enabled():
+        raise StewardLiveWriteError(LIVE_STEWARD_WRITES_DISABLED)
+
+
+def _prepare_ccr_lifecycle(conn) -> None:
+    _assert_ccr_lifecycle_allowed(conn)
+    if _is_live_db_path():
+        if not provenance_table_ready(conn):
+            raise StewardError("provenance_schema_missing")
+        if "archived_at" not in _cols(conn, "client_company_relationships"):
+            raise StewardError("ccr_archive_schema_missing")
         return
     ensure_data_steward_schema(conn)

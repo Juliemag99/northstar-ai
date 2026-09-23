@@ -6,6 +6,13 @@ export type StewardLinkedClient = {
   name: string
   status: string
   ccr_id: number
+  external_record_no?: string
+  assigned_rep?: string
+  assigned_user_id?: number | null
+  is_hot?: boolean
+  archived?: boolean
+  archived_at?: string
+  archive_reason?: string
 }
 
 export type StewardCompany = {
@@ -129,6 +136,7 @@ export async function fetchStewardMeta(): Promise<{
   delete_enabled: boolean
   merge_enabled: boolean
   remove_relationship_enabled?: boolean
+  restore_enabled?: boolean
   message: string
 }> {
   const response = await apiFetch('/api/admin/data-steward/meta')
@@ -186,5 +194,94 @@ export async function fetchStewardProvenance(params: {
   if (params.source_type) query.set('source_type', params.source_type)
   query.set('limit', String(params.limit || 100))
   const response = await apiFetch(`/api/admin/data-steward/provenance?${query}`)
+  return parseSteward(response)
+}
+
+export type StewardDependency = {
+  severity: 'info' | 'warning' | 'block'
+  code: string
+  message: string
+}
+
+export type StewardRelationshipPreview = {
+  ccr_id: number
+  company_id: number
+  company_name: string
+  client_id: number
+  client_code: string
+  client_name: string
+  external_record_no?: string
+  status: string
+  assigned_rep?: string
+  is_hot?: boolean
+  follow_up_date?: string
+  next_action?: string
+  contact_count?: number
+  activity_count?: number
+  history_count?: number
+  campaign_count?: number
+  other_active_relationships?: number
+  archived?: boolean
+  archived_at?: string
+  archived_by_name?: string
+  archive_reason?: string
+  warning: string
+  effects: string[]
+  dependencies: StewardDependency[]
+  reason_ok: boolean
+  blocked?: boolean
+  noop?: boolean
+  preview_fingerprint: string
+  expected_updated_at?: string
+  expected_archived_at?: string
+  writes: boolean
+}
+
+export type StewardRelationshipEvent = StewardProvenanceEvent & {
+  ccr_id?: number
+  client_id?: number
+  client_name?: string
+  action_label?: string
+}
+
+export async function fetchStewardRelationshipEvents(
+  companyId: number,
+): Promise<StewardRelationshipEvent[]> {
+  const response = await apiFetch(
+    `/api/admin/data-steward/companies/${companyId}/relationship-events`,
+  )
+  const payload = await parseSteward<{ events?: StewardRelationshipEvent[] }>(response)
+  return payload.events || []
+}
+
+export async function previewStewardRelationshipAction(
+  ccrId: number,
+  action: 'remove' | 'restore',
+  reason: string,
+): Promise<StewardRelationshipPreview> {
+  const response = await apiFetch(`/api/admin/data-steward/relationships/${ccrId}/${action}/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason }),
+  })
+  return parseSteward(response)
+}
+
+export async function confirmStewardRelationshipAction(
+  ccrId: number,
+  action: 'remove' | 'restore',
+  body: {
+    reason: string
+    confirm: boolean
+    preview_fingerprint?: string
+    expected_updated_at?: string
+    expected_archived_at?: string
+  },
+): Promise<{ ccr_id: number; archived?: boolean; noop?: boolean }> {
+  const response = await apiFetch(`/api/admin/data-steward/relationships/${ccrId}/${action}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
   return parseSteward(response)
 }

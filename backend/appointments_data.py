@@ -106,12 +106,15 @@ def count_hot_prospects(client_ids: list[int]) -> int:
     if not ids:
         return 0
     placeholders = ",".join("?" * len(ids))
+    from data_steward import sql_active_ccr
+
     with get_connection() as conn:
         row = conn.execute(
             f"""
             SELECT COUNT(*) AS n
             FROM client_company_relationships
             WHERE client_id IN ({placeholders})
+              AND {sql_active_ccr(conn, "client_company_relationships")}
               AND lower(trim(status)) = 'hot prospect'
             """,
             ids,

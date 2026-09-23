@@ -264,15 +264,22 @@ def preview_fingerprint(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def list_linked_clients(conn, company_id: int) -> list[dict[str, Any]]:
+def list_linked_clients(conn, company_id: int, *, include_archived: bool = True) -> list[dict[str, Any]]:
+    active_sql = sql_active_ccr(conn, "ccr")
+    archive_filter = "" if include_archived else f"AND {active_sql}"
     rows = conn.execute(
         f"""
-        SELECT cl.id AS client_id, cl.code, cl.name, ccr.status, ccr.id AS ccr_id
+        SELECT cl.id AS client_id, cl.code, cl.name, ccr.status, ccr.id AS ccr_id,
+               ccr.external_record_no, ccr.assigned_user_id, ccr.is_hot,
+               ccr.archived_at, ccr.archive_reason, ccr.archived_by_user_id,
+               COALESCE(u.full_name, '') AS assigned_rep
         FROM client_company_relationships ccr
         JOIN clients cl ON cl.id = ccr.client_id
+        LEFT JOIN users u ON u.id = ccr.assigned_user_id
         WHERE ccr.company_id = ?
-          AND {sql_active_ccr(conn, "ccr")}
-        ORDER BY cl.name, cl.id
+          {archive_filter}
+        ORDER BY CASE WHEN TRIM(COALESCE(ccr.archived_at,'')) = '' THEN 0 ELSE 1 END,
+                 cl.name, cl.id
         """,
         (int(company_id),),
     ).fetchall()
@@ -283,6 +290,13 @@ def list_linked_clients(conn, company_id: int) -> list[dict[str, Any]]:
             "name": _blank(r["name"]),
             "status": _blank(r["status"]),
             "ccr_id": int(r["ccr_id"]),
+            "external_record_no": _blank(r["external_record_no"]),
+            "assigned_user_id": int(r["assigned_user_id"]) if r["assigned_user_id"] else None,
+            "assigned_rep": _blank(r["assigned_rep"]),
+            "is_hot": bool(int(r["is_hot"] or 0)),
+            "archived": bool(_blank(r["archived_at"])),
+            "archived_at": _blank(r["archived_at"]),
+            "archive_reason": _blank(r["archive_reason"]),
         }
         for r in rows
     ]
