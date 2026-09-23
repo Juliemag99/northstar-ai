@@ -37,6 +37,8 @@ SOURCE_REF_ACTIVATION = "data_steward_activation"
 ACTION_BASELINE = "BASELINE"
 ACTION_REMOVE_FROM_CLIENT = "REMOVE_FROM_CLIENT"
 ACTION_RESTORE_TO_CLIENT = "RESTORE_TO_CLIENT"
+ACTION_ARCHIVE_MASTER_COMPANY = "ARCHIVE_MASTER_COMPANY"
+ACTION_RESTORE_MASTER_COMPANY = "RESTORE_MASTER_COMPANY"
 
 MANUAL_SOURCES = frozenset({SOURCE_MANUAL_ADMIN, SOURCE_MANUAL_STAFF})
 ALLOWED_SOURCE_TYPES = frozenset(
@@ -1437,12 +1439,108 @@ def _restore_row(conn, table: str, entity_id: int, actor: NorthStarUser, entity_
     return int(entity_id)
 
 
-def archive_company(conn, *, actor: NorthStarUser, company_id: int, reason: str = "") -> None:
-    _archive_row(conn, "companies", resolve_company_id(conn, int(company_id)), actor, reason, ENTITY_COMPANY)
+def list_active_company_relationships(conn, company_id: int) -> list[dict[str, Any]]:
+    """Active CCRs that block Master Archive. Removed CCRs are not in this list."""
+    rows = conn.execute(
+        f"""
+        SELECT ccr.id AS ccr_id, ccr.client_id, cl.code AS client_code, cl.name AS client_name,
+               COALESCE(ccr.status, '') AS status, ccr.assigned_user_id,
+               COALESCE(ccr.external_record_no, '') AS external_record_no
+        FROM client_company_relationships ccr
+        JOIN clients cl ON cl.id = ccr.client_id
+        WHERE ccr.company_id = ?
+          AND {sql_active_ccr(conn, "ccr")}
+        ORDER BY cl.name, ccr.id
+        """,
+        (int(company_id),),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
-def restore_company(conn, *, actor: NorthStarUser, company_id: int) -> int:
-    return _restore_row(conn, "companies", int(company_id), actor, ENTITY_COMPANY)
+def archive_company(conn, *, actor: NorthStarUser, company_id: int, reason: str = "") -> dict[str, Any]:
+    """Archive the SAME Master Company row. Blocked when any CCR is still active."""
+    _prepare_master_archive(conn)
+    company_id = resolve_company_id(conn, int(company_id))
+    stored = _load(conn, "companies", company_id)
+    require_capability(actor, CAP_ARCHIVE, conn=conn)
+    active = list_active_company_relationships(conn, company_id)
+    if active:
+        raise StewardError("active_ccr_blocks_archive")
+    if is_archived(conn, "companies", company_id):
+        return {
+            "company_id": company_id,
+            "archived": True,
+            "same_id": True,
+            "noop": True,
+            "code": "already_archived",
+        }
+    now = _now()
+    reason_text = _blank(reason) or "archive_master_company"
+    conn.execute(
+        """
+        UPDATE companies
+        SET archived_at = ?, archived_by_user_id = ?, archive_reason = ?
+        WHERE id = ?
+        """,
+        (now, int(actor.id), reason_text, company_id),
+    )
+    record_provenance(
+        conn,
+        entity_type=ENTITY_COMPANY,
+        entity_id=company_id,
+        field="archived_at",
+        old_value="",
+        new_value=now,
+        source_type=source_type_for_actor(actor),
+        changed_by_user_id=int(actor.id),
+        action=ACTION_ARCHIVE_MASTER_COMPANY,
+        reason=reason_text,
+        changed_at=now,
+        actor=actor,
+    )
+    _ = stored
+    return {
+        "company_id": company_id,
+        "archived": True,
+        "same_id": True,
+        "noop": False,
+        "code": "archived",
+        "archived_at": now,
+    }
+
+
+def restore_company(conn, *, actor: NorthStarUser, company_id: int, reason: str = "") -> int:
+    """Restore the SAME Master Company id. Does not restore removed CCRs."""
+    _prepare_master_archive(conn)
+    stored = _load(conn, "companies", int(company_id))
+    require_capability(actor, CAP_RESTORE, conn=conn)
+    if not is_archived(conn, "companies", int(company_id)):
+        return int(company_id)
+    now = _now()
+    old_archived = _blank(stored.get("archived_at"))
+    conn.execute(
+        """
+        UPDATE companies
+        SET archived_at = '', archived_by_user_id = NULL, archive_reason = ''
+        WHERE id = ?
+        """,
+        (int(company_id),),
+    )
+    record_provenance(
+        conn,
+        entity_type=ENTITY_COMPANY,
+        entity_id=int(company_id),
+        field="archived_at",
+        old_value=old_archived or "archived",
+        new_value="",
+        source_type=source_type_for_actor(actor),
+        changed_by_user_id=int(actor.id),
+        action=ACTION_RESTORE_MASTER_COMPANY,
+        reason=_blank(reason) or "restore_master_company",
+        changed_at=now,
+        actor=actor,
+    )
+    return int(company_id)
 
 
 def inspect_company_dependencies(conn, company_id: int) -> dict[str, Any]:
@@ -2171,6 +2269,11 @@ def live_ccr_lifecycle_enabled() -> bool:
     return True
 
 
+def live_master_archive_enabled() -> bool:
+    """DS-9 governed Master Company archive/restore. Does not enable delete/merge."""
+    return True
+
+
 def live_destructive_enabled() -> bool:
     return False
 
@@ -2215,5 +2318,25 @@ def _prepare_ccr_lifecycle(conn) -> None:
             raise StewardError("provenance_schema_missing")
         if "archived_at" not in _cols(conn, "client_company_relationships"):
             raise StewardError("ccr_archive_schema_missing")
+        return
+    ensure_data_steward_schema(conn)
+
+
+def _assert_master_archive_allowed(conn=None) -> None:
+    """Allow isolated writes always; live writes only for governed company archive/restore."""
+    _ = conn
+    if not _is_live_db_path():
+        return
+    if not live_master_archive_enabled():
+        raise StewardLiveWriteError(LIVE_STEWARD_WRITES_DISABLED)
+
+
+def _prepare_master_archive(conn) -> None:
+    _assert_master_archive_allowed(conn)
+    if _is_live_db_path():
+        if not provenance_table_ready(conn):
+            raise StewardError("provenance_schema_missing")
+        if "archived_at" not in _cols(conn, "companies"):
+            raise StewardError("company_archive_schema_missing")
         return
     ensure_data_steward_schema(conn)

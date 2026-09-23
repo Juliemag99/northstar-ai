@@ -73,6 +73,20 @@ def _admin() -> NorthStarUser:
     )
 
 
+def _remove_active_ccrs(conn, company_id: int, reason: str = "ds4") -> list[int]:
+    from data_steward import list_active_company_relationships, remove_relationship
+
+    ids = [int(row["ccr_id"]) for row in list_active_company_relationships(conn, company_id)]
+    for ccr_id in ids:
+        remove_relationship(conn, actor=_admin(), ccr_id=ccr_id, reason=reason)
+    return ids
+
+
+def _restore_ccrs(conn, ccr_ids: list[int], reason: str = "ds4") -> None:
+    for ccr_id in ccr_ids:
+        restore_relationship(conn, actor=_admin(), ccr_id=ccr_id, reason=reason)
+
+
 def _row(**kwargs) -> IncomingRow:
     data = dict(
         source_row=1, record_no="100", company_name="Acme Stamping",
@@ -198,10 +212,12 @@ class DataStewardPhase4Tests(unittest.TestCase):
 
     def test_05_ask_archived_company_hidden(self):
         with self.conn() as conn:
+            ccr_ids = _remove_active_ccrs(conn, 1)
             archive_company(conn, actor=_admin(), company_id=1, reason="ds4")
             hits = _find_companies_by_name(conn, "Shared Stamping", visible_ids=[1])
             self.assertFalse(any(int(h["company_id"]) == 1 for h in hits))
             restore_company(conn, actor=_admin(), company_id=1)
+            _restore_ccrs(conn, ccr_ids)
 
     def test_06_ask_shared_active_client_a(self):
         with self.conn() as conn:
@@ -419,9 +435,11 @@ class DataStewardPhase4Tests(unittest.TestCase):
 
     def test_21_archive_operational_lists(self):
         with self.conn() as conn:
+            ccr_ids = _remove_active_ccrs(conn, 1)
             archive_company(conn, actor=_admin(), company_id=1, reason="ds4")
             self.assertNotIn(1, {int(r["id"]) for r in list_operational_companies(conn)})
             restore_company(conn, actor=_admin(), company_id=1)
+            _restore_ccrs(conn, ccr_ids)
             archive_contact(conn, actor=_admin(), contact_id=1, reason="ds4")
             self.assertNotIn(1, {int(r["id"]) for r in list_operational_contacts(conn, company_id=1)})
             restore_contact(conn, actor=_admin(), contact_id=1)
@@ -432,6 +450,7 @@ class DataStewardPhase4Tests(unittest.TestCase):
 
     def test_22_duplicate_and_refresh_see_archived(self):
         with self.conn() as conn:
+            ccr_ids = _remove_active_ccrs(conn, 1)
             archive_company(conn, actor=_admin(), company_id=1, reason="ds4")
             dups = __import__("data_steward", fromlist=["find_company_duplicates"]).find_company_duplicates(
                 conn, company_name="Shared Stamping", city="Detroit", state="MI"
@@ -443,6 +462,7 @@ class DataStewardPhase4Tests(unittest.TestCase):
             )
             self.assertIn(ARCHIVED_MATCH_REVIEW, str(plan))
             restore_company(conn, actor=_admin(), company_id=1)
+            _restore_ccrs(conn, ccr_ids)
 
     def test_23_lm_keep_and_accept(self):
         from data_steward import attach_leadmaster_identity, amend_company, current_field_authority, ENTITY_COMPANY, SOURCE_MANUAL_ADMIN

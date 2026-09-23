@@ -149,7 +149,8 @@ def _client_relationships(conn, company_id: int) -> list[dict[str, Any]]:
 
 
 SELECT_COLS = (
-    "id, company_name, external_record_no, website, address, city, state, zip, legacy_phone"
+    "id, company_name, external_record_no, website, address, city, state, zip, legacy_phone, "
+    "TRIM(COALESCE(archived_at,'')) AS archived_at"
 )
 
 
@@ -164,6 +165,7 @@ def _pack_row(row) -> dict[str, Any]:
         "state": _blank(row["state"]),
         "zip": _blank(row["zip"]),
         "phone": _blank(row["legacy_phone"]),
+        "archived": bool(_blank(row["archived_at"]) if "archived_at" in row.keys() else ""),
     }
 
 
@@ -262,7 +264,8 @@ def gather_candidates(
         rel = conn.execute(
             f"""
             SELECT co.id, co.company_name, co.external_record_no, co.website, co.address,
-                   co.city, co.state, co.zip, co.legacy_phone
+                   co.city, co.state, co.zip, co.legacy_phone,
+                   TRIM(COALESCE(co.archived_at,'')) AS archived_at
             FROM companies co
             JOIN client_company_relationships ccr ON ccr.company_id = co.id
             WHERE TRIM(ccr.external_record_no) = ?

@@ -2978,6 +2978,7 @@ class ManualCompanyMatch(BaseModel):
     ai_explanation: str = ""
     ai_confidence: str = ""
     ai_available: bool = False
+    archived: bool = False
 
 
 class ManualCompanyPreviewRequest(BaseModel):

@@ -482,8 +482,10 @@ def test_http_admin_only_and_destructive_still_off() -> None:
     body = meta.json()
     if not body.get("remove_relationship_enabled") or not body.get("restore_enabled"):
         _fail(f"CCR flags off {body}")
-    if body.get("archive_enabled") or body.get("delete_enabled") or body.get("merge_enabled"):
+    if body.get("delete_enabled") or body.get("merge_enabled"):
         _fail(f"destructive flags enabled {body}")
+    if not body.get("archive_enabled"):
+        _fail("archive_enabled should be on after DS-9")
     if body.get("live_mutations_enabled"):
         _fail("broad live mutations enabled")
 
@@ -574,11 +576,6 @@ def test_http_admin_only_and_destructive_still_off() -> None:
             _fail(f"unauthenticated remove {unauth.status_code}")
         if unauth.json().get("detail") != AUTH_REQUIRED_DETAIL:
             _fail(f"unauthenticated detail {unauth.json()}")
-    archive_route = http.post(
-        f"/api/admin/data-steward/companies/{seed['company_id']}/archive", headers=headers
-    )
-    if archive_route.status_code not in {403, 404, 405, 409}:
-        _fail(f"archive route unexpectedly available {archive_route.status_code}")
 
 
 if __name__ == "__main__":

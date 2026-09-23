@@ -712,7 +712,7 @@ class DataStewardPhase1Tests(unittest.TestCase):
             restore_company(conn, actor=_admin(), company_id=cid)
             history = audit_history(conn, entity_type="company", entity_id=cid)
             website = latest_provenance(conn, entity_type="company", entity_id=cid, field="website")
-        self.assertTrue(any(h["action"] == "RESTORE" for h in history))
+        self.assertTrue(any(h["action"] in {"RESTORE", "RESTORE_MASTER_COMPANY"} for h in history))
         self.assertEqual(website["new_value"], "https://okemos.example")
 
     def test_43_read_only_user_blocked(self):

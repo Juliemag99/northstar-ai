@@ -114,9 +114,12 @@ export default function AddCompanyModal({
   const noMatches = checkIsCurrent && matches.length === 0 && checkedFingerprint != null
   const canOrdinarySave = noMatches && Boolean(form.company_name.trim())
   const alreadyLinkedToActiveClient = hasMatches && matches.every((match) => match.already_assigned)
-  const guidanceMessage = alreadyLinkedToActiveClient
-    ? `This company is already linked to ${clientName}. Open the existing company, or confirm Create New Anyway.`
-    : checkMessage
+  const archivedHigh = hasMatches && matches.some((match) => match.archived && match.confidence === 'high')
+  const guidanceMessage = archivedHigh
+    ? 'An archived Master Company already exists. Restore it in Admin → Data Management → Master Data instead of creating a duplicate.'
+    : alreadyLinkedToActiveClient
+      ? `This company is already linked to ${clientName}. Open the existing company, or confirm Create New Anyway.`
+      : checkMessage
   const checkRequired = !checkIsCurrent
   const saving = busy && !checking
 
@@ -460,6 +463,14 @@ export default function AddCompanyModal({
                               <div>Record No. {match.external_record_no}</div>
                             ) : null}
                             {clients ? <div>Clients: {clients}</div> : null}
+                            {match.archived ? (
+                              <div
+                                className="add-company-already-linked"
+                                data-testid="add-company-archived-match"
+                              >
+                                Archived Master Company. Restore it in Admin Master Data before linking.
+                              </div>
+                            ) : null}
                             {match.already_assigned ? (
                               <div
                                 className="add-company-already-linked"
@@ -479,7 +490,7 @@ export default function AddCompanyModal({
                           >
                             Open Existing Company
                           </button>
-                          {match.already_assigned ? null : (
+                          {match.already_assigned || match.archived ? null : (
                             <button
                               type="button"
                               className="primary-btn"
@@ -623,7 +634,7 @@ export default function AddCompanyModal({
                 type="button"
                 className="primary-btn"
                 data-testid="add-company-create-anyway"
-                disabled={busy || !checkIsCurrent}
+                disabled={busy || !checkIsCurrent || archivedHigh}
                 onClick={requestCreateAnyway}
               >
                 {anywayArmed ? 'Confirm Create New Anyway' : 'Create New Anyway'}

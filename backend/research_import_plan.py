@@ -216,8 +216,11 @@ def default_ccr_status(conn, client_id: int) -> str:
 
 
 def load_company_recs(conn) -> list[CompanyRec]:
-    archived = any(r[1] == "archived_at" for r in conn.execute("PRAGMA table_info(companies)"))
-    sql = """
+    has_archived = any(r[1] == "archived_at" for r in conn.execute("PRAGMA table_info(companies)"))
+    archived_select = (
+        "TRIM(COALESCE(c.archived_at, '')) AS archived_at" if has_archived else "'' AS archived_at"
+    )
+    sql = f"""
         SELECT
             c.id, c.company_name, c.address, c.city, c.state, c.zip, c.website, c.legacy_phone,
             COALESCE(k.record_no, '') AS record_no,
@@ -226,12 +229,11 @@ def load_company_recs(conn) -> list[CompanyRec]:
             COALESCE(k.phone_digits, '') AS phone_digits,
             COALESCE(k.addr_norm, '') AS addr_norm,
             COALESCE(k.city_norm, '') AS city_norm,
-            COALESCE(k.state_norm, '') AS state_norm
+            COALESCE(k.state_norm, '') AS state_norm,
+            {archived_select}
         FROM companies c
         LEFT JOIN company_identity_keys k ON k.company_id = c.id
     """
-    if archived:
-        sql += " WHERE TRIM(COALESCE(c.archived_at, '')) = ''"
     kept: list[CompanyRec] = []
     for raw in conn.execute(sql):
         kept.append(
@@ -254,6 +256,7 @@ def load_company_recs(conn) -> list[CompanyRec]:
                 display_zip=blank(raw["zip"]),
                 display_phone=blank(raw["legacy_phone"]),
                 display_website=blank(raw["website"]),
+                archived=bool(blank(raw["archived_at"])),
             )
         )
     _attach_company_aliases(conn, kept)
@@ -602,8 +605,15 @@ def plan_research_rows(
                 ),
             ]
         ri_class = classify_match(action, reasons, extras, query, loc_info)
+        archived_match = matched is not None and getattr(matched, "archived", False)
+        if archived_match:
+            ri_class = CLASS_POSSIBLE
+            if "archived_master_requires_restore" not in reasons:
+                reasons = list(reasons) + ["archived_master_requires_restore"]
         resolution = resolutions.get(row_id) or {}
         res_type = blank(resolution.get("resolution_type"))
+        if archived_match and res_type in {RES_USE_EXISTING, RES_CREATE_NEW, RES_NEW_LOCATION}:
+            res_type = ""
         if res_type == RES_USE_EXISTING and resolution.get("company_id"):
             chosen = next((c for c, _r in extras if c.company_id == int(resolution["company_id"])), None)
             if chosen is None and matched is not None and matched.company_id == int(resolution["company_id"]):

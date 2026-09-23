@@ -28,6 +28,10 @@ export type StewardCompany = {
   external_record_no?: string
   updated_at?: string
   archived?: boolean
+  archived_at?: string
+  archived_by_user_id?: number | null
+  archived_by_name?: string
+  archive_reason?: string
   linked_clients?: StewardLinkedClient[]
   master_data_warning?: string
 }
@@ -133,6 +137,7 @@ async function parseSteward<T>(response: Response): Promise<T> {
 export async function fetchStewardMeta(): Promise<{
   company_amend_enabled: boolean
   archive_enabled: boolean
+  company_restore_enabled?: boolean
   delete_enabled: boolean
   merge_enabled: boolean
   remove_relationship_enabled?: boolean
@@ -143,9 +148,13 @@ export async function fetchStewardMeta(): Promise<{
   return parseSteward(response)
 }
 
-export async function searchStewardCompanies(q: string): Promise<StewardCompany[]> {
+export async function searchStewardCompanies(
+  q: string,
+  visibility: 'all' | 'active' | 'archived' = 'all',
+): Promise<StewardCompany[]> {
   const query = new URLSearchParams()
   query.set('q', q)
+  query.set('visibility', visibility)
   const response = await apiFetch(`/api/admin/data-steward/companies?${query}`)
   const payload = await parseSteward<{ companies?: StewardCompany[] }>(response)
   return payload.companies || []
@@ -279,6 +288,102 @@ export async function confirmStewardRelationshipAction(
   },
 ): Promise<{ ccr_id: number; archived?: boolean; noop?: boolean }> {
   const response = await apiFetch(`/api/admin/data-steward/relationships/${ccrId}/${action}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return parseSteward(response)
+}
+
+export type StewardArchivePreview = {
+  company_id: number
+  company_name: string
+  address?: string
+  city?: string
+  state?: string
+  phone?: string
+  website?: string
+  archived: boolean
+  archived_at?: string
+  archived_by_name?: string
+  archive_reason?: string
+  linked_clients: StewardLinkedClient[]
+  active_relationships?: Array<{
+    ccr_id: number
+    client_id: number
+    client_code?: string
+    client_name?: string
+    status?: string
+  }>
+  contact_count?: number
+  alias_count?: number
+  location_count?: number
+  identity_count?: number
+  campaign_count?: number
+  history_count?: number
+  activity_count?: number
+  counts?: Record<string, number>
+  dependencies: StewardDependency[]
+  warning: string
+  instruction?: string
+  ccr_warning?: string
+  effects: string[]
+  reason: string
+  reason_ok: boolean
+  blocked: boolean
+  eligible: boolean
+  already_archived?: boolean
+  already_active?: boolean
+  noop?: boolean
+  collisions?: StewardCandidate[]
+  preview_fingerprint: string
+  expected_updated_at?: string
+  expected_archived_at?: string
+  writes: boolean
+}
+
+export type StewardLifecycleEvent = StewardProvenanceEvent & {
+  action_label?: string
+}
+
+export async function fetchStewardLifecycleEvents(
+  companyId: number,
+): Promise<StewardLifecycleEvent[]> {
+  const response = await apiFetch(
+    `/api/admin/data-steward/companies/${companyId}/lifecycle-events`,
+  )
+  const payload = await parseSteward<{ events?: StewardLifecycleEvent[] }>(response)
+  return payload.events || []
+}
+
+export async function previewStewardMasterArchive(
+  companyId: number,
+  action: 'archive' | 'restore',
+  reason: string,
+): Promise<StewardArchivePreview> {
+  const response = await apiFetch(
+    `/api/admin/data-steward/companies/${companyId}/${action}/preview`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    },
+  )
+  return parseSteward(response)
+}
+
+export async function confirmStewardMasterArchive(
+  companyId: number,
+  action: 'archive' | 'restore',
+  body: {
+    reason: string
+    confirm: boolean
+    preview_fingerprint?: string
+    expected_updated_at?: string
+    expected_archived_at?: string
+  },
+): Promise<{ company_id: number; archived?: boolean; noop?: boolean; code?: string }> {
+  const response = await apiFetch(`/api/admin/data-steward/companies/${companyId}/${action}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),

@@ -205,6 +205,7 @@ class CompanyRec:
     display_phone: str = ""
     display_website: str = ""
     identity_record_nos: tuple[str, ...] = ()
+    archived: bool = False
 
 
 @dataclass(slots=True)
@@ -1144,7 +1145,8 @@ def _load_matching_companies(
                 k.phone_digits,
                 k.addr_norm,
                 k.city_norm,
-                k.state_norm
+                k.state_norm,
+                TRIM(COALESCE(c.archived_at, '')) AS archived_at
             FROM companies c
             JOIN company_identity_keys k ON k.company_id = c.id
             WHERE c.id IN ({placeholders})
@@ -1169,6 +1171,7 @@ def _load_matching_companies(
                     display_zip=_blank(raw["zip"]),
                     display_phone=_blank(raw["legacy_phone"]),
                     display_website=_blank(raw["website"]),
+                    archived=bool(_blank(raw["archived_at"])),
                 )
             )
     _attach_company_aliases(conn, kept)

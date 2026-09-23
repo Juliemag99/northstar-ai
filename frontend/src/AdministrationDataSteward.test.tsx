@@ -13,8 +13,11 @@ vi.mock('./api/dataSteward', () => ({
   saveStewardCompanyAmend: vi.fn(),
   fetchStewardProvenance: vi.fn(),
   fetchStewardRelationshipEvents: vi.fn(),
+  fetchStewardLifecycleEvents: vi.fn(),
   previewStewardRelationshipAction: vi.fn(),
   confirmStewardRelationshipAction: vi.fn(),
+  previewStewardMasterArchive: vi.fn(),
+  confirmStewardMasterArchive: vi.fn(),
 }))
 
 const company = {
@@ -55,7 +58,8 @@ describe('Administration Master Data steward', () => {
   it('searches, shows linked clients, requires a reason, and previews current vs proposed', async () => {
     vi.mocked(dataSteward.fetchStewardMeta).mockResolvedValue({
       company_amend_enabled: true,
-      archive_enabled: false,
+      archive_enabled: true,
+      company_restore_enabled: true,
       delete_enabled: false,
       merge_enabled: false,
       message: 'amend only',
@@ -63,6 +67,7 @@ describe('Administration Master Data steward', () => {
     vi.mocked(dataSteward.searchStewardCompanies).mockResolvedValue([company])
     vi.mocked(dataSteward.fetchStewardCompany).mockResolvedValue(company)
     vi.mocked(dataSteward.fetchStewardRelationshipEvents).mockResolvedValue([])
+    vi.mocked(dataSteward.fetchStewardLifecycleEvents).mockResolvedValue([])
     vi.mocked(dataSteward.fetchStewardProvenance).mockResolvedValue({
       schema_ready: true,
       newest_first: true,
@@ -113,13 +118,13 @@ describe('Administration Master Data steward', () => {
     expect(screen.getByRole('heading', { name: 'Master Data' })).toBeTruthy()
     expect(screen.getByText(/Provenance is stored on live/)).toBeTruthy()
     expect(screen.queryByText(/schema is not on live/i)).toBeNull()
-    expect((screen.getByRole('button', { name: 'Archive (not yet enabled)' }) as HTMLButtonElement).disabled).toBe(true)
     expect((screen.getByRole('button', { name: 'Merge (not yet enabled)' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: 'Delete (not yet enabled)' }) as HTMLButtonElement).disabled).toBe(true)
 
     fireEvent.change(screen.getByLabelText('Search Master Company'), { target: { value: 'Edl' } })
     fireEvent.click(screen.getByRole('button', { name: 'Search' }))
     await waitFor(() => {
-      expect(dataSteward.searchStewardCompanies).toHaveBeenCalledWith('Edl')
+      expect(dataSteward.searchStewardCompanies).toHaveBeenCalledWith('Edl', 'all')
     })
     fireEvent.click(screen.getByRole('button', { name: 'Edl Packaging Engineers' }))
     await waitFor(() => {
@@ -151,7 +156,8 @@ describe('Administration Master Data steward', () => {
   it('blocks save when a duplicate candidate is returned', async () => {
     vi.mocked(dataSteward.fetchStewardMeta).mockResolvedValue({
       company_amend_enabled: true,
-      archive_enabled: false,
+      archive_enabled: true,
+      company_restore_enabled: true,
       delete_enabled: false,
       merge_enabled: false,
       message: 'amend only',
@@ -159,6 +165,7 @@ describe('Administration Master Data steward', () => {
     vi.mocked(dataSteward.searchStewardCompanies).mockResolvedValue([company])
     vi.mocked(dataSteward.fetchStewardCompany).mockResolvedValue(company)
     vi.mocked(dataSteward.fetchStewardRelationshipEvents).mockResolvedValue([])
+    vi.mocked(dataSteward.fetchStewardLifecycleEvents).mockResolvedValue([])
     vi.mocked(dataSteward.fetchStewardProvenance).mockResolvedValue({
       schema_ready: true,
       events: [],
@@ -227,7 +234,8 @@ describe('Administration Master Data steward', () => {
   it('shows Remove From Client and Restore with reason, preview, and confirmation', async () => {
     vi.mocked(dataSteward.fetchStewardMeta).mockResolvedValue({
       company_amend_enabled: true,
-      archive_enabled: false,
+      archive_enabled: true,
+      company_restore_enabled: true,
       delete_enabled: false,
       merge_enabled: false,
       remove_relationship_enabled: true,
@@ -254,6 +262,7 @@ describe('Administration Master Data steward', () => {
         action_label: 'Removed From Client',
       },
     ])
+    vi.mocked(dataSteward.fetchStewardLifecycleEvents).mockResolvedValue([])
     vi.mocked(dataSteward.fetchStewardProvenance).mockResolvedValue({
       schema_ready: true,
       events: [],
@@ -288,13 +297,14 @@ describe('Administration Master Data steward', () => {
     await waitFor(() => screen.getByRole('button', { name: 'Edl Packaging Engineers' }))
     fireEvent.click(screen.getByRole('button', { name: 'Edl Packaging Engineers' }))
     await waitFor(() => screen.getByRole('button', { name: 'Remove From Client' }))
-    expect(screen.getByText('Active')).toBeTruthy()
-    expect(screen.getByText('Removed')).toBeTruthy()
+    expect(screen.getAllByText('Active').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Removed').length).toBeGreaterThan(0)
     expect(screen.getByRole('button', { name: 'Restore' })).toBeTruthy()
     expect(screen.getByLabelText('Show Removed Relationships')).toBeTruthy()
     expect(screen.getByText('Removed From Client')).toBeTruthy()
-    expect((screen.getByRole('button', { name: 'Archive (not yet enabled)' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByRole('button', { name: 'Archive Master Company' })).toBeTruthy()
     expect((screen.getByRole('button', { name: 'Merge (not yet enabled)' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: 'Delete (not yet enabled)' }) as HTMLButtonElement).disabled).toBe(true)
 
     fireEvent.click(screen.getByRole('button', { name: 'Remove From Client' }))
     const previewBtn = screen.getByRole('button', { name: 'Preview' }) as HTMLButtonElement
@@ -314,5 +324,145 @@ describe('Administration Master Data steward', () => {
     await waitFor(() => {
       expect(dataSteward.confirmStewardRelationshipAction).toHaveBeenCalled()
     })
+  })
+
+  it('blocks Archive Master Company when an active client remains and restores the same company', async () => {
+    const archivedCompany = {
+      ...company,
+      archived: true,
+      archived_at: '2026-09-23T12:00:00Z',
+      archived_by_name: 'Julie Magnani',
+      archive_reason: 'Company permanently closed',
+      linked_clients: (company.linked_clients || []).map((row) => ({ ...row, archived: true })),
+    }
+    vi.mocked(dataSteward.fetchStewardMeta).mockResolvedValue({
+      company_amend_enabled: true,
+      archive_enabled: true,
+      company_restore_enabled: true,
+      delete_enabled: false,
+      merge_enabled: false,
+      message: 'archive',
+    })
+    vi.mocked(dataSteward.searchStewardCompanies).mockResolvedValue([company])
+    vi.mocked(dataSteward.fetchStewardCompany).mockResolvedValue(company)
+    vi.mocked(dataSteward.fetchStewardRelationshipEvents).mockResolvedValue([])
+    vi.mocked(dataSteward.fetchStewardLifecycleEvents).mockResolvedValue([
+      {
+        id: 14,
+        entity_type: 'company',
+        entity_id: 22,
+        field: 'archived_at',
+        old_value: '',
+        new_value: '2026-09-23T12:00:00Z',
+        source_type: 'MANUAL_ADMIN',
+        changed_by_user_id: 1,
+        changed_by_name: 'Julie Magnani',
+        changed_at: '2026-09-23T12:00:00Z',
+        action: 'ARCHIVE_MASTER_COMPANY',
+        reason: 'Company permanently closed',
+        action_label: 'Archived Master Company',
+      },
+    ])
+    vi.mocked(dataSteward.fetchStewardProvenance).mockResolvedValue({
+      schema_ready: true,
+      events: [],
+    })
+    vi.mocked(dataSteward.previewStewardMasterArchive).mockResolvedValue({
+      company_id: 22,
+      company_name: 'Edl Packaging Engineers',
+      archived: false,
+      linked_clients: company.linked_clients || [],
+      warning: 'Remove this company from all active clients before archiving the Master Company.',
+      instruction: 'Remove this company from all active clients before archiving the Master Company.',
+      effects: ['The same Master Company id is archived.'],
+      dependencies: [
+        {
+          severity: 'block',
+          code: 'active_ccr',
+          message: 'Active client relationship(s) must be removed first: Brown Industries (CCR #9).',
+        },
+      ],
+      reason: 'Company permanently closed',
+      reason_ok: true,
+      blocked: true,
+      eligible: false,
+      preview_fingerprint: 'arch',
+      writes: false,
+    })
+
+    render(<AdministrationDataSteward />)
+    expect(screen.getByLabelText('Show Archived Companies')).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('Search Master Company'), { target: { value: 'Edl' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }))
+    await waitFor(() => screen.getByRole('button', { name: 'Edl Packaging Engineers' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Edl Packaging Engineers' }))
+    await waitFor(() => screen.getByRole('button', { name: 'Archive Master Company' }))
+    expect(screen.getByText('Archived Master Company')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Archive Master Company' }))
+    const previewBtn = screen.getByRole('button', { name: 'Preview' }) as HTMLButtonElement
+    expect(previewBtn.disabled).toBe(true)
+    fireEvent.change(screen.getByLabelText('Master archive reason'), {
+      target: { value: 'Company permanently closed' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }))
+    await waitFor(() => {
+      expect(screen.getByText(/Remove this company from all active clients/)).toBeTruthy()
+    })
+    expect(screen.getByText(/Remove From Client for each active relationship first/)).toBeTruthy()
+    const confirmBtn = screen.getByRole('button', { name: 'Confirm Archive Master Company' }) as HTMLButtonElement
+    expect(confirmBtn.disabled).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    vi.mocked(dataSteward.fetchStewardCompany).mockResolvedValue(archivedCompany)
+    vi.mocked(dataSteward.previewStewardMasterArchive).mockResolvedValue({
+      company_id: 22,
+      company_name: 'Edl Packaging Engineers',
+      archived: true,
+      archived_at: '2026-09-23T12:00:00Z',
+      archived_by_name: 'Julie Magnani',
+      archive_reason: 'Company permanently closed',
+      linked_clients: archivedCompany.linked_clients || [],
+      warning: 'This restores the existing Master Company. It does not create a new company.',
+      ccr_warning: 'Restoring the Master Company does not restore removed client relationships.',
+      effects: ['The same Master Company id is reactivated. No new company is created.'],
+      dependencies: [],
+      collisions: [
+        {
+          company_id: 88,
+          company_name: 'Edl Packaging Engineers',
+          address: '2 Other',
+          city: 'Green Bay',
+          state: 'WI',
+          zip: '54302',
+          phone: '',
+          website: '',
+          reasons: ['same_name+same_city_state'],
+          severity: 'block',
+        },
+      ],
+      reason: 'Return to active use',
+      reason_ok: true,
+      blocked: true,
+      eligible: false,
+      preview_fingerprint: 'rest',
+      writes: false,
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Edl Packaging Engineers' }))
+    await waitFor(() => screen.getByRole('button', { name: 'Restore Master Company' }))
+    expect(screen.getAllByText(/Company permanently closed/).length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Restore Master Company' }))
+    fireEvent.change(screen.getByLabelText('Master archive reason'), {
+      target: { value: 'Return to active use' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }))
+    await waitFor(() => {
+      expect(screen.getAllByText(/does not create a new company/).length).toBeGreaterThan(0)
+    })
+    expect(screen.getAllByText(/does not restore removed client relationships/).length).toBeGreaterThan(0)
+    expect(screen.getByText(/duplicate\/merge review/)).toBeTruthy()
+    expect(
+      (screen.getByRole('button', { name: 'Confirm Restore Master Company' }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true)
   })
 })

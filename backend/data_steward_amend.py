@@ -434,15 +434,19 @@ def _table_exists(conn, name: str) -> bool:
     return row is not None
 
 
-def search_master_companies(conn, q: str, *, limit: int = 40) -> list[dict[str, Any]]:
+def search_master_companies(
+    conn, q: str, *, limit: int = 40, visibility: str = "all"
+) -> list[dict[str, Any]]:
     query = _collapse(q)
     if not query:
         return []
     like = f"%{query}%"
+    want = _blank(visibility).lower() or "all"
     rows = conn.execute(
         """
         SELECT id, company_name, address, city, state, zip, website,
-               legacy_phone, legacy_phone_extension, external_record_no, last_updated_at
+               legacy_phone, legacy_phone_extension, external_record_no, last_updated_at,
+               archived_at, archived_by_user_id, archive_reason
         FROM companies
         WHERE company_name LIKE ?
            OR CAST(id AS TEXT) = ?
@@ -450,23 +454,44 @@ def search_master_companies(conn, q: str, *, limit: int = 40) -> list[dict[str, 
         ORDER BY company_name, id
         LIMIT ?
         """,
-        (like, query, like, int(limit)),
+        (like, query, like, max(int(limit) * 3, int(limit))),
     ).fetchall()
-    return [
-        {
-            "company_id": int(r["id"]),
-            **_stored_view(dict(r)),
-        }
-        for r in rows
-    ]
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        archived = bool(_blank(r["archived_at"]))
+        if want == "active" and archived:
+            continue
+        if want == "archived" and not archived:
+            continue
+        out.append(
+            {
+                "company_id": int(r["id"]),
+                "archived": archived,
+                "archived_at": _blank(r["archived_at"]),
+                "archive_reason": _blank(r["archive_reason"]),
+                **_stored_view(dict(r)),
+            }
+        )
+        if len(out) >= int(limit):
+            break
+    return out
 
 
 def load_master_company(conn, company_id: int) -> dict[str, Any]:
     stored = _load(conn, "companies", int(company_id))
     current = _stored_view(stored)
+    archived_by = stored.get("archived_by_user_id")
+    actor_name = ""
+    if archived_by and _table_exists(conn, "users"):
+        row = conn.execute("SELECT full_name FROM users WHERE id=?", (int(archived_by),)).fetchone()
+        actor_name = _blank(row["full_name"] if row is not None else "")
     return {
         "company_id": int(company_id),
         "archived": is_archived(conn, "companies", int(company_id)),
+        "archived_at": _blank(stored.get("archived_at")),
+        "archived_by_user_id": int(archived_by) if archived_by else None,
+        "archived_by_name": actor_name,
+        "archive_reason": _blank(stored.get("archive_reason")),
         **current,
         "linked_clients": list_linked_clients(conn, int(company_id)),
         "master_data_warning": (

@@ -1,16 +1,21 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
+  confirmStewardMasterArchive,
   confirmStewardRelationshipAction,
   fetchStewardCompany,
+  fetchStewardLifecycleEvents,
   fetchStewardMeta,
   fetchStewardProvenance,
   fetchStewardRelationshipEvents,
   previewStewardCompanyAmend,
+  previewStewardMasterArchive,
   previewStewardRelationshipAction,
   saveStewardCompanyAmend,
   searchStewardCompanies,
+  type StewardArchivePreview,
   type StewardCandidate,
   type StewardCompany,
+  type StewardLifecycleEvent,
   type StewardPreview,
   type StewardProvenanceEvent,
   type StewardRelationshipEvent,
@@ -19,6 +24,8 @@ import {
 
 type StewardSection = 'companies' | 'audit'
 type RelationshipMode = 'remove' | 'restore'
+type MasterArchiveMode = 'archive' | 'restore'
+type CompanyVisibility = 'all' | 'active' | 'archived'
 
 const FIELD_LABELS: Record<string, string> = {
   company_name: 'Company name',
@@ -74,9 +81,20 @@ export default function AdministrationDataSteward() {
   const [relReason, setRelReason] = useState('')
   const [relConfirm, setRelConfirm] = useState(false)
   const [relPreview, setRelPreview] = useState<StewardRelationshipPreview | null>(null)
+  const [archiveEnabled, setArchiveEnabled] = useState(false)
+  const [visibility, setVisibility] = useState<CompanyVisibility>('all')
+  const [masterMode, setMasterMode] = useState<MasterArchiveMode | null>(null)
+  const [masterReason, setMasterReason] = useState('')
+  const [masterConfirm, setMasterConfirm] = useState(false)
+  const [masterPreview, setMasterPreview] = useState<StewardArchivePreview | null>(null)
+  const [lifecycleEvents, setLifecycleEvents] = useState<StewardLifecycleEvent[]>([])
 
   useEffect(() => {
-    fetchStewardMeta().catch(() => undefined)
+    fetchStewardMeta()
+      .then((meta) => {
+        setArchiveEnabled(Boolean(meta.archive_enabled || meta.company_restore_enabled))
+      })
+      .catch(() => undefined)
   }, [])
 
   const linkedClients = selected?.linked_clients || []
@@ -94,7 +112,7 @@ export default function AdministrationDataSteward() {
     setError('')
     setBusy(true)
     try {
-      const rows = await searchStewardCompanies(query)
+      const rows = await searchStewardCompanies(query, visibility)
       setHits(rows)
       if (rows.length === 0) setMessage('No master companies matched that search.')
       else setMessage('')
@@ -117,6 +135,10 @@ export default function AdministrationDataSteward() {
       setRelPreview(null)
       setRelReason('')
       setRelConfirm(false)
+      setMasterMode(null)
+      setMasterPreview(null)
+      setMasterReason('')
+      setMasterConfirm(false)
       setForm({
         company_name: company.company_name || '',
         address: company.address || '',
@@ -128,17 +150,19 @@ export default function AdministrationDataSteward() {
         phone_extension: company.phone_extension || '',
         reason: '',
       })
-      const [history, relHistory] = await Promise.all([
+      const [history, relHistory, lifeHistory] = await Promise.all([
         fetchStewardProvenance({
           entity_type: 'company',
           entity_id: company.company_id,
           limit: 100,
         }),
         fetchStewardRelationshipEvents(company.company_id),
+        fetchStewardLifecycleEvents(company.company_id),
       ])
       setSchemaReady(history.schema_ready !== false)
       setEvents(history.events || [])
       setRelationshipEvents(relHistory)
+      setLifecycleEvents(lifeHistory)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to load company.')
     } finally {
@@ -253,13 +277,70 @@ export default function AdministrationDataSteward() {
     }
   }
 
+  function startMasterArchive(mode: MasterArchiveMode) {
+    setMasterMode(mode)
+    setMasterReason('')
+    setMasterConfirm(false)
+    setMasterPreview(null)
+    setPreview(null)
+    setEditing(false)
+    setRelMode(null)
+  }
+
+  async function runMasterPreview() {
+    if (!selected || !masterMode) return
+    setError('')
+    setBusy(true)
+    try {
+      const result = await previewStewardMasterArchive(selected.company_id, masterMode, masterReason)
+      setMasterPreview(result)
+      if (!result.reason_ok) setError('A reason is required before confirming Master Company archive or restore.')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Preview failed.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function runMasterConfirm() {
+    if (!selected || !masterMode || !masterPreview) return
+    setError('')
+    setBusy(true)
+    try {
+      const result = await confirmStewardMasterArchive(selected.company_id, masterMode, {
+        reason: masterReason,
+        confirm: masterConfirm,
+        preview_fingerprint: masterPreview.preview_fingerprint,
+        expected_updated_at: masterPreview.expected_updated_at,
+        expected_archived_at: masterPreview.expected_archived_at,
+      })
+      setMessage(
+        result.noop
+          ? masterMode === 'archive'
+            ? 'That Master Company is already archived.'
+            : 'That Master Company is already active.'
+          : masterMode === 'archive'
+            ? 'Archived Master Company. Same company id and history were preserved.'
+            : 'Restored the existing Master Company. Removed client relationships stay removed.',
+      )
+      setMasterMode(null)
+      setMasterPreview(null)
+      setMasterConfirm(false)
+      await selectCompany(selected.company_id)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Master Company update failed.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <section className="administration-section" aria-labelledby="data-steward-heading">
       <h2 id="data-steward-heading">Master Data</h2>
       <p className="queue-sub">
-        Governed Master Company amendment and client relationship remove/restore are available to
-        administrators. Remove From Client archives the relationship only. Live master archive,
-        merge, and hard delete remain disabled. Provenance is stored on live <code>northstar.db</code>.
+        Governed Master Company amendment, archive/restore, and client relationship remove/restore
+        are available to administrators. Archive keeps the same company id and history. Merge and
+        hard delete remain disabled. Provenance is stored on live <code>northstar.db</code>.
       </p>
       <div className="setup-campaign-tabs" role="tablist" aria-label="Master Data">
         <button
@@ -288,15 +369,9 @@ export default function AdministrationDataSteward() {
         </button>
       </div>
       <p className="queue-sub" role="status">
-        Live master archive / delete / merge not enabled
+        Master Company archive and restore are enabled. Merge and hard delete remain disabled.
       </p>
       <div className="setup-actions" style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-        <button type="button" disabled>
-          Archive (not yet enabled)
-        </button>
-        <button type="button" disabled>
-          Restore (not yet enabled)
-        </button>
         <button type="button" disabled>
           Merge (not yet enabled)
         </button>
@@ -315,6 +390,18 @@ export default function AdministrationDataSteward() {
             placeholder="Name, Record No., or company id"
           />
         </label>
+        <label>
+          Company status
+          <select
+            aria-label="Show Archived Companies"
+            value={visibility}
+            onChange={(event) => setVisibility(event.target.value as CompanyVisibility)}
+          >
+            <option value="all">All</option>
+            <option value="active">Active</option>
+            <option value="archived">Archived</option>
+          </select>
+        </label>
         <button type="submit" className="primary-btn" disabled={busy}>
           Search
         </button>
@@ -332,6 +419,7 @@ export default function AdministrationDataSteward() {
               </button>
               <span className="queue-sub">
                 {' '}
+                {hit.archived ? 'Archived · ' : ''}
                 {hit.city}
                 {hit.city && hit.state ? ', ' : ''}
                 {hit.state} · RN {hit.external_record_no || '—'}
@@ -344,6 +432,13 @@ export default function AdministrationDataSteward() {
       {selected ? (
         <div className="steward-company-card">
           <h3>{selected.company_name || 'Master Company'}</h3>
+          {selected.archived ? (
+            <p className="queue-sub" role="status">
+              Archived {selected.archived_at || ''}
+              {selected.archived_by_name ? ` by ${selected.archived_by_name}` : ''}
+              {selected.archive_reason ? ` · ${selected.archive_reason}` : ''}
+            </p>
+          ) : null}
           <p className="queue-sub" role="note">
             MASTER COMPANY DATA. {selected.master_data_warning}
           </p>
@@ -427,6 +522,19 @@ export default function AdministrationDataSteward() {
           ) : (
             <p className="queue-sub">No client relationships to display.</p>
           )}
+          {archiveEnabled ? (
+            <div className="setup-actions" style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              {selected.archived ? (
+                <button type="button" onClick={() => startMasterArchive('restore')}>
+                  Restore Master Company
+                </button>
+              ) : (
+                <button type="button" onClick={() => startMasterArchive('archive')}>
+                  Archive Master Company
+                </button>
+              )}
+            </div>
+          ) : null}
           {!editing ? (
             <button type="button" className="primary-btn" onClick={() => setEditing(true)}>
               Edit
@@ -562,6 +670,139 @@ export default function AdministrationDataSteward() {
         </div>
       ) : null}
 
+      {masterMode && selected ? (
+        <div className="steward-preview" role="dialog" aria-labelledby="master-archive-heading">
+          <h3 id="master-archive-heading">
+            {masterMode === 'archive' ? 'Archive Master Company' : 'Restore Master Company'}
+          </h3>
+          <p className="queue-sub" role="alert">
+            {masterMode === 'archive'
+              ? 'This archives the existing Master Company. It is not a delete. Remove this company from all active clients before archiving the Master Company.'
+              : 'This restores the existing Master Company. It does not create a new company. Restoring the Master Company does not restore removed client relationships.'}
+          </p>
+          <label>
+            Reason for change
+            <input
+              aria-label="Master archive reason"
+              value={masterReason}
+              onChange={(event) => setMasterReason(event.target.value)}
+              placeholder={
+                masterMode === 'archive'
+                  ? 'Company permanently closed'
+                  : 'Return this Master Company to active use'
+              }
+              required
+            />
+          </label>
+          <div className="setup-actions">
+            <button type="button" onClick={runMasterPreview} disabled={busy || !masterReason.trim()}>
+              Preview
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMasterMode(null)
+                setMasterPreview(null)
+                setMasterConfirm(false)
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+          {masterPreview ? (
+            <div>
+              <p>
+                {masterPreview.company_name} #{masterPreview.company_id} · {masterPreview.address || '—'}{' '}
+                {masterPreview.city} {masterPreview.state}
+              </p>
+              <p className="queue-sub">{masterPreview.warning}</p>
+              {masterPreview.ccr_warning ? <p className="queue-sub">{masterPreview.ccr_warning}</p> : null}
+              {(masterPreview.linked_clients || []).length ? (
+                <div>
+                  <h4>Linked clients</h4>
+                  <ul>
+                    {masterPreview.linked_clients.map((client) => (
+                      <li key={client.ccr_id}>
+                        {client.name} ({client.code}) · CCR #{client.ccr_id} ·{' '}
+                        {client.archived ? 'Removed' : 'Active'}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : (
+                <p className="queue-sub">No client relationships on this Master Company.</p>
+              )}
+              <ul>
+                {(masterPreview.effects || []).map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+              {(masterPreview.dependencies || []).length ? (
+                <div>
+                  <h4>Warnings and preserved data</h4>
+                  <ul>
+                    {masterPreview.dependencies.map((item) => (
+                      <li key={item.code}>
+                        {item.severity === 'block'
+                          ? 'Blocked: '
+                          : item.severity === 'warning'
+                            ? 'Warning: '
+                            : ''}
+                        {item.message}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {(masterPreview.collisions || []).length ? (
+                <div role="alert">
+                  <p>Restore is blocked. Another active Master Company looks like a duplicate:</p>
+                  <ul>
+                    {(masterPreview.collisions || []).map((row) => (
+                      <li key={row.company_id}>
+                        {row.company_name} #{row.company_id} · {row.address} {row.city} {row.state} ·{' '}
+                        {(row.reasons || []).join(', ')}
+                      </li>
+                    ))}
+                  </ul>
+                  <p>These records require duplicate/merge review. Restore will not merge them.</p>
+                </div>
+              ) : null}
+              {masterPreview.blocked && masterMode === 'archive' ? (
+                <p className="queue-sub" role="alert">
+                  Remove From Client for each active relationship first. Archive will not proceed.
+                </p>
+              ) : null}
+              <label>
+                <input
+                  type="checkbox"
+                  aria-label="Confirm master archive change"
+                  checked={masterConfirm}
+                  onChange={(event) => setMasterConfirm(event.target.checked)}
+                />{' '}
+                {masterMode === 'archive'
+                  ? `I confirm archiving Master Company ${masterPreview.company_name}. This is not a delete.`
+                  : `I confirm restoring the existing Master Company ${masterPreview.company_name}.`}
+              </label>
+              <button
+                type="button"
+                className="primary-btn"
+                onClick={runMasterConfirm}
+                disabled={
+                  busy ||
+                  !masterPreview.reason_ok ||
+                  !!masterPreview.blocked ||
+                  !masterPreview.eligible ||
+                  !masterConfirm
+                }
+              >
+                {masterMode === 'archive' ? 'Confirm Archive Master Company' : 'Confirm Restore Master Company'}
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
       {preview ? (
         <div className="steward-preview">
           <h3>Review changes</h3>
@@ -676,6 +917,31 @@ export default function AdministrationDataSteward() {
                 </table>
               ) : (
                 <p className="queue-sub">No Remove From Client or Restore events for this company yet.</p>
+              )}
+              <h4>Master Company lifecycle</h4>
+              {lifecycleEvents.length ? (
+                <table className="queue-table">
+                  <thead>
+                    <tr>
+                      <th>When</th>
+                      <th>Action</th>
+                      <th>Actor</th>
+                      <th>Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {lifecycleEvents.map((event) => (
+                      <tr key={`life-${event.id}`}>
+                        <td>{event.changed_at}</td>
+                        <td>{event.action_label || event.action}</td>
+                        <td>{event.changed_by_name || event.changed_by_user_id || '—'}</td>
+                        <td>{event.reason || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <p className="queue-sub">No Archive Master Company or Restore Master Company events yet.</p>
               )}
             </>
           ) : (

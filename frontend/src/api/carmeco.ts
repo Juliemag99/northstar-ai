@@ -4443,6 +4443,7 @@ export type ManualCompanyMatch = {
   ai_explanation: string
   ai_confidence: string
   ai_available: boolean
+  archived?: boolean
 }
 
 export type ManualCompanyPreviewResponse = {

@@ -691,6 +691,10 @@ def ensure_client_relationship(
     user_id: int,
     provenance_note: str,
 ) -> tuple[int, bool, str]:
+    from data_steward import is_archived
+
+    if is_archived(conn, "companies", int(company_id)):
+        raise ValueError("archived_master_requires_restore")
     existing = conn.execute(
         """
         SELECT id, status, notes FROM client_company_relationships

@@ -2966,20 +2966,23 @@ def data_steward_meta_api(request: Request):
         live_ccr_lifecycle_enabled,
         live_company_amend_enabled,
         live_destructive_enabled,
+        live_master_archive_enabled,
     )
 
     ccr_on = live_ccr_lifecycle_enabled()
+    archive_on = live_master_archive_enabled()
     return {
         "live_mutations_enabled": live_destructive_enabled(),
         "company_amend_enabled": live_company_amend_enabled(),
-        "archive_enabled": False,
+        "archive_enabled": archive_on,
+        "company_restore_enabled": archive_on,
         "delete_enabled": False,
         "merge_enabled": False,
         "remove_relationship_enabled": ccr_on,
         "restore_enabled": ccr_on,
         "message": (
-            "Governed Master Company amend and client relationship remove/restore are enabled. "
-            "Live master archive/delete/merge remain disabled."
+            "Governed Master Company amend, archive/restore, and client relationship "
+            "remove/restore are enabled. Live merge and hard delete remain disabled."
         ),
     }
 
@@ -3060,12 +3063,16 @@ def _steward_http_error(exc: Exception) -> HTTPException:
 
 
 @app.get("/api/admin/data-steward/companies")
-def data_steward_search_companies_api(request: Request, q: str = Query(default="")):
+def data_steward_search_companies_api(
+    request: Request,
+    q: str = Query(default=""),
+    visibility: str = Query(default="all"),
+):
     require_administrator(request)
     from data_steward_amend import search_master_companies
 
     with get_connection() as conn:
-        return {"companies": search_master_companies(conn, q)}
+        return {"companies": search_master_companies(conn, q, visibility=visibility)}
 
 
 @app.get("/api/admin/data-steward/companies/{company_id}")
@@ -3204,6 +3211,83 @@ def data_steward_confirm_restore_api(ccr_id: int, body: dict, request: Request):
     try:
         with get_connection() as conn:
             return confirm_restore_relationship(conn, actor=actor, ccr_id=ccr_id, body=parsed)
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.get("/api/admin/data-steward/companies/{company_id}/lifecycle-events")
+def data_steward_company_lifecycle_events_api(company_id: int, request: Request):
+    require_administrator(request)
+    from data_steward_archive import list_company_lifecycle_events
+
+    with get_connection() as conn:
+        return {"events": list_company_lifecycle_events(conn, company_id), "newest_first": True}
+
+
+@app.post("/api/admin/data-steward/companies/{company_id}/archive/preview")
+def data_steward_preview_archive_company_api(company_id: int, body: dict, request: Request):
+    actor = require_administrator(request)
+    from data_steward_archive import MasterArchiveRequest, preview_archive_company
+
+    parsed = MasterArchiveRequest.model_validate(body or {})
+    try:
+        with get_connection() as conn:
+            return preview_archive_company(
+                conn, actor=actor, company_id=company_id, reason=parsed.reason
+            )
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.post("/api/admin/data-steward/companies/{company_id}/archive")
+def data_steward_confirm_archive_company_api(company_id: int, body: dict, request: Request):
+    actor = require_administrator(request)
+    from data_steward_archive import MasterArchiveRequest, confirm_archive_company
+
+    parsed = MasterArchiveRequest.model_validate(body or {})
+    try:
+        with get_connection() as conn:
+            return confirm_archive_company(conn, actor=actor, company_id=company_id, body=parsed)
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.post("/api/admin/data-steward/companies/{company_id}/restore/preview")
+def data_steward_preview_restore_company_api(company_id: int, body: dict, request: Request):
+    actor = require_administrator(request)
+    from data_steward_archive import MasterArchiveRequest, preview_restore_company
+
+    parsed = MasterArchiveRequest.model_validate(body or {})
+    try:
+        with get_connection() as conn:
+            return preview_restore_company(
+                conn, actor=actor, company_id=company_id, reason=parsed.reason
+            )
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.post("/api/admin/data-steward/companies/{company_id}/restore")
+def data_steward_confirm_restore_company_api(company_id: int, body: dict, request: Request):
+    actor = require_administrator(request)
+    from data_steward_archive import MasterArchiveRequest, confirm_restore_company
+
+    parsed = MasterArchiveRequest.model_validate(body or {})
+    try:
+        with get_connection() as conn:
+            return confirm_restore_company(conn, actor=actor, company_id=company_id, body=parsed)
     except Exception as exc:
         mapped = _steward_http_error(exc)
         if mapped:

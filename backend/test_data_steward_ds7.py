@@ -398,10 +398,12 @@ def test_http_admin_amend_specialist_forbidden_unauthenticated_401() -> None:
     if meta.status_code != 200:
         _fail(f"admin meta {meta.status_code}")
     body = meta.json()
-    if body.get("archive_enabled") or body.get("delete_enabled") or body.get("merge_enabled"):
+    if body.get("delete_enabled") or body.get("merge_enabled"):
         _fail(f"destructive flags enabled {body}")
     if not body.get("company_amend_enabled"):
         _fail("company_amend_enabled missing")
+    if not body.get("archive_enabled"):
+        _fail("archive_enabled should be on after DS-9")
 
     stamp = _stamp()
     with get_connection() as conn:

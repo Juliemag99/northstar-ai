@@ -109,7 +109,7 @@ def find_company_matches(
             row = conn.execute(
                 """
                 SELECT id, company_name, external_record_no, website, address, city, state, zip,
-                       legacy_phone
+                       legacy_phone, archived_at
                 FROM companies
                 WHERE TRIM(zoominfo_company_id) = ?
                 LIMIT 1
@@ -231,11 +231,15 @@ def _link_company_on_conn(
     from crm_identity_keys import normalize_record_no
 
     row = conn.execute(
-        "SELECT id, company_name, external_record_no FROM companies WHERE id = ?",
+        "SELECT id, company_name, external_record_no, archived_at FROM companies WHERE id = ?",
         (company_id,),
     ).fetchone()
     if row is None:
         raise LookupError("Company not found.")
+    from data_steward import is_archived
+
+    if is_archived(conn, "companies", company_id):
+        raise ValueError("Archived Master Company. Restore it in Admin Master Data before linking.")
     other_before = _snapshot_other_ccrs(conn, company_id, client_id)
     already = _already_assigned(conn, company_id, client_id)
     client_name = _blank(
@@ -378,6 +382,15 @@ def save_manual_company(body: ManualCompanySaveRequest) -> ManualCompanySaveResu
             )
             if matches and not body.confirm_create_despite_match:
                 raise ValueError(MATCHES_BLOCK_CREATE_MSG)
+            archived_high = [
+                m
+                for m in matches
+                if m.get("archived") and str(m.get("confidence") or "").lower() == "high"
+            ]
+            if archived_high:
+                raise ValueError(
+                    "Archived Master Company already exists. Restore it in Admin Master Data instead of creating a duplicate."
+                )
 
             from crm_add_data import allocate_ns_record_no, ensure_client_relationship
 

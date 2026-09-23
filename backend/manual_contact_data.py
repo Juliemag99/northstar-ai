@@ -12,6 +12,7 @@ import re
 from typing import Any
 
 from access import get_default_user, require_write_client_id, user_can_access_client
+from data_steward import sql_active_ccr, sql_active_company
 from activities_data import insert_activity_row
 from contact_phone import (
     canonical_contact_phone,
@@ -88,9 +89,11 @@ def lookup_companies_for_client(client_id: object, q: str = "") -> dict[str, Any
     query = re.sub(r"[%_]", "", _blank(q))
     like = f"%{query}%" if query else None
     with get_connection() as conn:
+        active_co = sql_active_company(conn, "co")
+        active_ccr = sql_active_ccr(conn, "ccr")
         if like is None:
             rows = conn.execute(
-                """
+                f"""
                 SELECT
                     co.id,
                     co.company_name,
@@ -101,6 +104,8 @@ def lookup_companies_for_client(client_id: object, q: str = "") -> dict[str, Any
                 FROM companies co
                 JOIN client_company_relationships ccr ON ccr.company_id = co.id
                 WHERE ccr.client_id = ?
+                  AND {active_co}
+                  AND {active_ccr}
                 ORDER BY co.company_name COLLATE NOCASE, co.id
                 LIMIT 20
                 """,
@@ -108,7 +113,7 @@ def lookup_companies_for_client(client_id: object, q: str = "") -> dict[str, Any
             ).fetchall()
         else:
             rows = conn.execute(
-                """
+                f"""
                 SELECT
                     co.id,
                     co.company_name,
@@ -119,6 +124,8 @@ def lookup_companies_for_client(client_id: object, q: str = "") -> dict[str, Any
                 FROM companies co
                 JOIN client_company_relationships ccr ON ccr.company_id = co.id
                 WHERE ccr.client_id = ?
+                  AND {active_co}
+                  AND {active_ccr}
                   AND (
                     co.company_name LIKE ?
                     OR co.external_record_no LIKE ?
@@ -143,7 +150,7 @@ def lookup_companies_for_client(client_id: object, q: str = "") -> dict[str, Any
 
 def _load_client_company(conn, client_id: int, company_id: int):
     row = conn.execute(
-        """
+        f"""
         SELECT
             co.id AS company_id,
             co.company_name,
@@ -156,6 +163,8 @@ def _load_client_company(conn, client_id: int, company_id: int):
             ON ccr.company_id = co.id AND ccr.client_id = ?
         JOIN clients cl ON cl.id = ccr.client_id
         WHERE co.id = ?
+          AND {sql_active_company(conn, "co")}
+          AND {sql_active_ccr(conn, "ccr")}
         """,
         (client_id, company_id),
     ).fetchone()
