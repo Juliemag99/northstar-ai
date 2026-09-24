@@ -115,6 +115,7 @@ class MergePlanDecisionRequest(BaseModel):
     reason: str = ""
     actor_id: int | None = None
     created_by: str = ""
+    expected_plan_fingerprint: str = ""
 
 
 class MergePlanPrepareRequest(BaseModel):

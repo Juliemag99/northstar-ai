@@ -126,10 +126,12 @@ describe('duplicateReview API', () => {
     expect(String(fetchMock.mock.calls[0]?.[0] || '')).toContain(
       '/api/admin/duplicate-review/merge-plans/prepare',
     )
-    await fetchMergePlans({ state: 'NEEDS_EXCEPTION_DECISION' })
+    await fetchMergePlans({ state: 'NEEDS_EXCEPTION_DECISION', decision_type: 'survivor', same_client: 'yes' })
     expect(String(fetchMock.mock.calls[1]?.[0] || '')).toContain(
       '/api/admin/duplicate-review/merge-plans',
     )
+    expect(String(fetchMock.mock.calls[1]?.[0] || '')).toContain('decision_type=survivor')
+    expect(String(fetchMock.mock.calls[1]?.[0] || '')).not.toContain('client_id=')
     const saved = await saveMergePlanDecision(22, 28, {
       exception_key: 'STATUS_DECISION_REQUIRED:1',
       chosen_resolution: 'KEEP_SURVIVOR',

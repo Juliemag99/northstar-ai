@@ -368,6 +368,12 @@ export type MergePlanException = {
   field?: string | null
   options?: string[]
   details?: Record<string, unknown>
+  decision_needed?: string
+  why_you?: string
+  choices?: Array<{ value: string; label: string; helper?: string }>
+  simple_survivor?: boolean
+  rn_prompt?: string
+  rn_preservation?: string
 }
 
 export type MergePlanSummary = {
@@ -376,12 +382,42 @@ export type MergePlanSummary = {
   needs_exception_decision?: number
   not_safe_to_plan?: number
   stale?: number
+  simple_decisions?: number
+  complex_decisions?: number
   READY_FOR_HUMAN_APPROVAL?: number
   NEEDS_EXCEPTION_DECISION?: number
   NOT_SAFE_TO_PLAN?: number
   STALE?: number
   exceptions?: number
   exception_decisions?: number
+}
+
+export type WorkbenchIdentity = {
+  company_id: number
+  company_name: string
+  record_label?: string
+  city?: string
+  state?: string
+  zip?: string
+  city_state?: string
+  address?: string
+  phone?: string
+  website?: string
+  domain?: string
+  master_rn?: string | null
+  master_rn_label?: string
+  identity_summary?: string
+  client_names?: string
+  clients?: Array<{ client_id: number; client_code?: string; client_name?: string }>
+  active_ccr_count?: number
+  removed_ccr_count?: number
+  contact_count?: number
+  alias_count?: number
+  location_count?: number
+  campaign_count?: number
+  notes_count?: number
+  activities_count?: number
+  archive_state?: string
 }
 
 export type MergePlanListRow = {
@@ -391,12 +427,21 @@ export type MergePlanListRow = {
   company_b_id: number
   company_a_name?: string
   company_b_name?: string
+  company_a?: WorkbenchIdentity
+  company_b?: WorkbenchIdentity
   source_company_id?: number | null
   survivor_company_id?: number | null
   plan_state: MergePlanState
   plan_state_label?: string
   exception_count?: number
   exceptions?: MergePlanException[]
+  decision_needed?: string
+  decision_needed_all?: string[]
+  workbench_mode?: string
+  simple_decision?: boolean
+  complex_decision?: boolean
+  allow_quick_survivor?: boolean
+  not_safe_reason?: string
   same_client_ccr_conflict?: boolean
   contact_collision_summary?: Record<string, number>
   location_concern?: boolean
@@ -418,6 +463,8 @@ export type MergePlanPage = {
   limit: number
   plans: MergePlanListRow[]
   no_merge_button?: boolean
+  no_execute_merge?: boolean
+  active_client_does_not_scope?: boolean
 }
 
 export type MergePlanDetail = MergePlanListRow & {
@@ -427,6 +474,7 @@ export type MergePlanDetail = MergePlanListRow & {
   plan_only_warning: string
   planner_version?: string
   survivor_source?: string
+  why_proposed_survivor?: string
   master_fields?: Array<Record<string, unknown>>
   ccrs?: Array<Record<string, unknown>>
   contacts?: Record<string, unknown>
@@ -444,6 +492,26 @@ export type MergePlanDetail = MergePlanListRow & {
   stale?: boolean
   no_merge_button?: boolean
   no_execute_merge?: boolean
+  preservation?: {
+    lines?: string[]
+    automatic_contacts?: Array<Record<string, unknown>>
+  }
+  survivor_comparison?: {
+    rows?: Array<{ label: string; company_a: unknown; company_b: unknown; different?: boolean }>
+    survivor_reason?: string
+  }
+  automated_assessment?: DuplicateAutomatedAssessment
+  human_review?: {
+    disposition?: string
+    reason?: string
+    actor_name?: string
+    actor_user_id?: number | null
+    reviewed_at?: string
+    proposed_survivor_company_id?: number | null
+    proposed_source_company_id?: number | null
+  }
+  next_unresolved_exception?: MergePlanException | null
+  ready_for_review?: boolean
 }
 
 export type MergePlanPrepareResult = {
@@ -458,15 +526,38 @@ export type MergePlanPrepareResult = {
   plan_only_warning?: string
 }
 
+export type MergePlanDecisionResult = {
+  ok: boolean
+  plan: MergePlanDetail
+  approval_created?: boolean
+  merge_will_occur?: boolean
+  next_unresolved_exception?: MergePlanException | null
+  ready_for_review?: boolean
+  remaining_exception_count?: number
+  next_needs_decision_pair?: {
+    pair_key?: string
+    company_a_id: number
+    company_b_id: number
+    decision_needed?: string
+    record_a?: string
+    record_b?: string
+  } | null
+  replan_invoked?: boolean
+}
+
 export async function fetchMergePlans(args: {
   state?: string
   q?: string
+  decision_type?: string
+  same_client?: string
   offset?: number
   limit?: number
 }): Promise<MergePlanPage> {
   const query = new URLSearchParams()
   query.set('state', args.state || '')
   query.set('q', args.q || '')
+  query.set('decision_type', args.decision_type || '')
+  query.set('same_client', args.same_client || '')
   query.set('offset', String(args.offset ?? 0))
   query.set('limit', String(args.limit ?? 50))
   const response = await apiFetch(`/api/admin/duplicate-review/merge-plans?${query}`)
@@ -492,10 +583,26 @@ export async function prepareMergePlans(): Promise<MergePlanPrepareResult> {
 export async function saveMergePlanDecision(
   companyAId: number,
   companyBId: number,
-  body: { exception_key: string; chosen_resolution: string; reason?: string },
-): Promise<{ ok: boolean; plan: MergePlanDetail; approval_created?: boolean; merge_will_occur?: boolean }> {
+  body: { exception_key: string; chosen_resolution: string; reason?: string; expected_plan_fingerprint?: string },
+): Promise<MergePlanDecisionResult> {
   const response = await apiFetch(
     `/api/admin/duplicate-review/pairs/${companyAId}/${companyBId}/merge-plan/decisions`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  )
+  return parseJson(response)
+}
+
+export async function saveWorkbenchDisposition(
+  companyAId: number,
+  companyBId: number,
+  body: { disposition: string; reason: string; confirm: boolean },
+): Promise<MergePlanDecisionResult & { disposition: string; disagreement?: boolean }> {
+  const response = await apiFetch(
+    `/api/admin/duplicate-review/pairs/${companyAId}/${companyBId}/merge-plan/disposition`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

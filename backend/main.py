@@ -3451,15 +3451,27 @@ def duplicate_review_list_merge_plans_api(
     request: Request,
     state: str = Query(default=""),
     q: str = Query(default=""),
+    decision_type: str = Query(default=""),
+    same_client: str = Query(default=""),
+    client_id: int | None = Query(default=None),
     offset: int = Query(default=0),
     limit: int = Query(default=50),
 ):
     require_administrator(request)
-    from merge_plan import list_merge_plans
+    from merge_workbench import list_workbench_plans
 
     try:
         with get_connection() as conn:
-            return list_merge_plans(conn, state=state, q=q, offset=offset, limit=limit)
+            return list_workbench_plans(
+                conn,
+                state=state,
+                q=q,
+                decision_type=decision_type,
+                same_client=same_client,
+                client_id=client_id,
+                offset=offset,
+                limit=limit,
+            )
     except Exception as exc:
         mapped = _steward_http_error(exc)
         if mapped:
@@ -3470,11 +3482,11 @@ def duplicate_review_list_merge_plans_api(
 @app.get("/api/admin/duplicate-review/pairs/{company_a_id}/{company_b_id}/merge-plan")
 def duplicate_review_get_merge_plan_api(company_a_id: int, company_b_id: int, request: Request):
     require_administrator(request)
-    from merge_plan import get_merge_plan
+    from merge_workbench import get_workbench_plan
 
     try:
         with get_connection() as conn:
-            return get_merge_plan(conn, company_a_id, company_b_id)
+            return get_workbench_plan(conn, company_a_id, company_b_id)
     except Exception as exc:
         mapped = _steward_http_error(exc)
         if mapped:
@@ -3487,12 +3499,37 @@ def duplicate_review_save_merge_plan_decision_api(
     company_a_id: int, company_b_id: int, body: dict, request: Request
 ):
     actor = require_administrator(request)
-    from merge_plan import MergePlanDecisionRequest, save_merge_plan_decision
+    from merge_plan import MergePlanDecisionRequest
+    from merge_workbench import save_workbench_decision
 
     parsed = MergePlanDecisionRequest.model_validate(body or {})
     try:
         with get_connection() as conn:
-            return save_merge_plan_decision(
+            return save_workbench_decision(
+                conn,
+                actor=actor,
+                company_a_id=company_a_id,
+                company_b_id=company_b_id,
+                body=parsed,
+            )
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.post("/api/admin/duplicate-review/pairs/{company_a_id}/{company_b_id}/merge-plan/disposition")
+def duplicate_review_save_workbench_disposition_api(
+    company_a_id: int, company_b_id: int, body: dict, request: Request
+):
+    actor = require_administrator(request)
+    from merge_workbench import WorkbenchDispositionRequest, save_workbench_disposition
+
+    parsed = WorkbenchDispositionRequest.model_validate(body or {})
+    try:
+        with get_connection() as conn:
+            return save_workbench_disposition(
                 conn,
                 actor=actor,
                 company_a_id=company_a_id,
@@ -3512,13 +3549,18 @@ def duplicate_review_replan_merge_plan_api(
 ):
     actor = require_administrator(request)
     from merge_plan import MergePlanPrepareRequest, replan_merge_plan
+    from merge_workbench import enrich_plan_detail
 
     MergePlanPrepareRequest.model_validate(body or {})
     try:
         with get_connection() as conn:
-            return replan_merge_plan(
+            result = replan_merge_plan(
                 conn, actor=actor, company_a_id=company_a_id, company_b_id=company_b_id
             )
+            result["plan"] = enrich_plan_detail(conn, result["plan"])
+            result["replan_invoked"] = True
+            result["no_merge_button"] = True
+            return result
     except Exception as exc:
         mapped = _steward_http_error(exc)
         if mapped:
