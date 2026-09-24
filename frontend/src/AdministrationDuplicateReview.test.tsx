@@ -11,6 +11,11 @@ vi.mock('./api/duplicateReview', () => ({
   analyzeDuplicateCandidates: vi.fn(),
   previewDuplicateBatchReview: vi.fn(),
   confirmDuplicateBatchReview: vi.fn(),
+  fetchMergePlans: vi.fn(),
+  fetchMergePlan: vi.fn(),
+  prepareMergePlans: vi.fn(),
+  saveMergePlanDecision: vi.fn(),
+  replanMergePlan: vi.fn(),
 }))
 
 const candidate = {
@@ -184,8 +189,9 @@ describe('Duplicate Review workspace', () => {
     expect(screen.getByText('HIGH CONFIDENCE DUPLICATE')).toBeTruthy()
     expect(screen.getByText('High Confidence Duplicate')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Analyze Duplicate Candidates' })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: /Merge/i })).toBeNull()
-    expect(screen.queryByRole('button', { name: /Execute/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /^Merge$/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Execute Merge/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Merge Now/i })).toBeNull()
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Edl Packaging Engineers' })[0])
     await waitFor(() => expect(screen.getByText('MASTER COMPANY A')).toBeTruthy())
@@ -410,5 +416,155 @@ describe('Duplicate Review workspace', () => {
     )
     expect(screen.getByText(/Julie disposition/)).toBeTruthy()
     expect(screen.getByText(/MULTI LOCATION/)).toBeTruthy()
+  })
+
+  it('prepares merge plans, opens needs-decisions detail, and saves a plan-only exception decision', async () => {
+    vi.mocked(duplicateReview.fetchDuplicateCandidates).mockResolvedValue({
+      planning_only: true,
+      merge_will_occur: false,
+      automatic_verdict: false,
+      writes: false,
+      total: 1,
+      offset: 0,
+      limit: 50,
+      pairs: [candidate],
+    })
+    vi.mocked(duplicateReview.fetchMergePlans).mockResolvedValue({
+      planning_only: true,
+      merge_will_occur: false,
+      approval_created: false,
+      execute_merge: false,
+      plan_only_warning: 'PLANNING ONLY — NO MERGE WILL OCCUR',
+      summary: {
+        analyzed: 16,
+        ready_for_review: 3,
+        needs_exception_decision: 12,
+        not_safe_to_plan: 1,
+        stale: 0,
+      },
+      total: 1,
+      offset: 0,
+      limit: 50,
+      plans: [
+        {
+          pair_key: '22:28',
+          company_a_id: 22,
+          company_b_id: 28,
+          company_a_name: 'Edl Packaging Engineers',
+          company_b_name: 'Edl Packaging Engineers',
+          source_company_id: 28,
+          survivor_company_id: 22,
+          plan_state: 'NEEDS_EXCEPTION_DECISION',
+          plan_state_label: 'NEEDS DECISIONS',
+          exception_count: 2,
+          same_client_ccr_conflict: true,
+        },
+      ],
+      no_merge_button: true,
+    })
+    vi.mocked(duplicateReview.prepareMergePlans).mockResolvedValue({
+      ok: true,
+      analyzed: 16,
+      ready_for_review: 3,
+      needs_exception_decision: 12,
+      not_safe_to_plan: 1,
+      stale: 0,
+      merge_will_occur: false,
+      approval_created: false,
+      plan_only_warning: 'PLANNING ONLY — NO MERGE WILL OCCUR',
+    })
+    const planDetail = {
+      planning_only: true,
+      merge_will_occur: false,
+      approval_created: false,
+      plan_only_warning: 'PLANNING ONLY — NO MERGE WILL OCCUR',
+      pair_key: '22:28',
+      company_a_id: 22,
+      company_b_id: 28,
+      source_company_id: 28,
+      survivor_company_id: 22,
+      survivor_source: 'HUMAN_MERGE_CANDIDATE',
+      plan_state: 'NEEDS_EXCEPTION_DECISION',
+      plan_state_label: 'NEEDS DECISIONS',
+      master_fields: [
+        { field: 'company_name', action: 'KEEP_SURVIVOR', survivor_value: 'Edl Packaging Engineers', source_value: 'Edl Packaging Engineers' },
+        { field: 'external_record_no', action: 'PRESERVE_SOURCE_AS_IDENTITY', survivor_value: '99202', source_value: '101620' },
+      ],
+      ccrs: [{ client_name: 'Carmeco', classification: 'CCR_DECISION_REQUIRED', action: 'HUMAN_CCR_DECISION' }],
+      contacts: { unique_to_preserve: 1, exact_duplicates: 1, possible_duplicates: 0, conflicts: 0 },
+      aliases: { unique_to_preserve: 1 },
+      locations: { strong_multi_location_concern: false },
+      identities: { never_drop_source_rn: true },
+      campaigns: { unique_memberships_to_preserve: 1, same_campaign_already_on_survivor: 0 },
+      history: { source: { notes: 1 }, survivor: { notes: 2 } },
+      exceptions: [
+        {
+          exception_key: 'STATUS_DECISION_REQUIRED:1',
+          code: 'STATUS_DECISION_REQUIRED',
+          label: 'Carmeco CCR Status Decision Required requires a human choice.',
+          options: ['KEEP_SURVIVOR', 'KEEP_SOURCE'],
+        },
+      ],
+      location_concern: false,
+      identity_concern: false,
+      no_merge_button: true,
+      no_execute_merge: true,
+    }
+    vi.mocked(duplicateReview.fetchMergePlan).mockResolvedValue(planDetail)
+    vi.mocked(duplicateReview.saveMergePlanDecision).mockResolvedValue({
+      ok: true,
+      approval_created: false,
+      merge_will_occur: false,
+      plan: {
+        ...planDetail,
+        plan_state: 'READY_FOR_HUMAN_APPROVAL',
+        plan_state_label: 'READY FOR REVIEW',
+        exceptions: [],
+      },
+    })
+    vi.mocked(duplicateReview.replanMergePlan).mockResolvedValue({
+      ok: true,
+      approval_created: false,
+      merge_will_occur: false,
+      plan: {
+        ...planDetail,
+        plan_state: 'READY_FOR_HUMAN_APPROVAL',
+        plan_state_label: 'READY FOR REVIEW',
+        exceptions: [],
+      },
+    })
+
+    render(<AdministrationDuplicateReview />)
+    fireEvent.click(screen.getByRole('button', { name: 'Merge Planning' }))
+    await waitFor(() => expect(duplicateReview.fetchMergePlans).toHaveBeenCalled())
+    expect(screen.getByRole('heading', { name: 'Merge Planning' })).toBeTruthy()
+    expect(screen.getAllByText('Ready for Review').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Needs Decisions').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Not Safe').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Stale').length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Prepare Merge Plans' }))
+    await waitFor(() => expect(duplicateReview.prepareMergePlans).toHaveBeenCalled())
+    await waitFor(() => expect(screen.getByText(/Analyzed 16/)).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Needs Decisions' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Edl Packaging Engineers / Edl Packaging Engineers' }))
+    await waitFor(() => expect(screen.getByText('PROPOSED FUTURE MERGE')).toBeTruthy())
+    expect(screen.getAllByText(/PLANNING ONLY — NO MERGE WILL OCCUR/).length).toBeGreaterThan(0)
+    expect(screen.getByText(/Master field result/)).toBeTruthy()
+    expect(screen.getByText(/PRESERVE_SOURCE_AS_IDENTITY/)).toBeTruthy()
+    expect(screen.getByText(/CCR result by client/)).toBeTruthy()
+    expect(screen.getAllByText(/Carmeco/).length).toBeGreaterThan(0)
+    expect(screen.getByText(/Unique 1/)).toBeTruthy()
+    expect(screen.getByText(/Location concern No/)).toBeTruthy()
+    expect(screen.getByLabelText('Decision for STATUS_DECISION_REQUIRED:1')).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('Decision for STATUS_DECISION_REQUIRED:1'), {
+      target: { value: 'KEEP_SURVIVOR' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save decision' }))
+    await waitFor(() => expect(duplicateReview.saveMergePlanDecision).toHaveBeenCalled())
+    fireEvent.click(screen.getByRole('button', { name: 'Replan' }))
+    await waitFor(() => expect(duplicateReview.replanMergePlan).toHaveBeenCalled())
+    expect(screen.queryByRole('button', { name: /Execute Merge/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Merge Now/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /^Merge$/i })).toBeNull()
   })
 })

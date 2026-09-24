@@ -11,6 +11,8 @@ MIGRATION_TABLE_ORDER: tuple[str, ...] = (
     "company_locations",
     "company_merge_history",
     "merge_execution_approvals",
+    "company_merge_plans",
+    "company_merge_plan_decisions",
     "user_client_assignments",
     "contacts",
     "contact_merge_history",

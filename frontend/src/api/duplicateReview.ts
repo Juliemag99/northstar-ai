@@ -353,6 +353,175 @@ export async function confirmDuplicateBatchReview(body: {
   return parseJson(response)
 }
 
+export type MergePlanState =
+  | 'READY_FOR_HUMAN_APPROVAL'
+  | 'NEEDS_EXCEPTION_DECISION'
+  | 'NOT_SAFE_TO_PLAN'
+  | 'STALE'
+  | string
+
+export type MergePlanException = {
+  exception_key: string
+  code?: string
+  label?: string
+  client_id?: number | null
+  field?: string | null
+  options?: string[]
+  details?: Record<string, unknown>
+}
+
+export type MergePlanSummary = {
+  analyzed?: number
+  ready_for_review?: number
+  needs_exception_decision?: number
+  not_safe_to_plan?: number
+  stale?: number
+  READY_FOR_HUMAN_APPROVAL?: number
+  NEEDS_EXCEPTION_DECISION?: number
+  NOT_SAFE_TO_PLAN?: number
+  STALE?: number
+  exceptions?: number
+  exception_decisions?: number
+}
+
+export type MergePlanListRow = {
+  id?: number
+  pair_key: string
+  company_a_id: number
+  company_b_id: number
+  company_a_name?: string
+  company_b_name?: string
+  source_company_id?: number | null
+  survivor_company_id?: number | null
+  plan_state: MergePlanState
+  plan_state_label?: string
+  exception_count?: number
+  exceptions?: MergePlanException[]
+  same_client_ccr_conflict?: boolean
+  contact_collision_summary?: Record<string, number>
+  location_concern?: boolean
+  identity_concern?: boolean
+  classification?: string
+  human_disposition?: string
+}
+
+export type MergePlanPage = {
+  planning_only: boolean
+  merge_will_occur: boolean
+  approval_created?: boolean
+  execute_merge?: boolean
+  plan_only_warning: string
+  planner_version?: string
+  summary: MergePlanSummary
+  total: number
+  offset: number
+  limit: number
+  plans: MergePlanListRow[]
+  no_merge_button?: boolean
+}
+
+export type MergePlanDetail = MergePlanListRow & {
+  planning_only: boolean
+  merge_will_occur: boolean
+  approval_created?: boolean
+  plan_only_warning: string
+  planner_version?: string
+  survivor_source?: string
+  master_fields?: Array<Record<string, unknown>>
+  ccrs?: Array<Record<string, unknown>>
+  contacts?: Record<string, unknown>
+  aliases?: Record<string, unknown>
+  locations?: Record<string, unknown>
+  identities?: Record<string, unknown>
+  campaigns?: Record<string, unknown>
+  history?: Record<string, unknown>
+  dependencies?: Record<string, unknown>
+  exceptions?: MergePlanException[]
+  all_exceptions?: MergePlanException[]
+  not_safe_reasons?: string[]
+  decision_history?: Array<Record<string, unknown>>
+  active_decisions?: Array<Record<string, unknown>>
+  stale?: boolean
+  no_merge_button?: boolean
+  no_execute_merge?: boolean
+}
+
+export type MergePlanPrepareResult = {
+  ok: boolean
+  analyzed: number
+  ready_for_review?: number
+  needs_exception_decision?: number
+  not_safe_to_plan?: number
+  stale?: number
+  merge_will_occur?: boolean
+  approval_created?: boolean
+  plan_only_warning?: string
+}
+
+export async function fetchMergePlans(args: {
+  state?: string
+  q?: string
+  offset?: number
+  limit?: number
+}): Promise<MergePlanPage> {
+  const query = new URLSearchParams()
+  query.set('state', args.state || '')
+  query.set('q', args.q || '')
+  query.set('offset', String(args.offset ?? 0))
+  query.set('limit', String(args.limit ?? 50))
+  const response = await apiFetch(`/api/admin/duplicate-review/merge-plans?${query}`)
+  return parseJson(response)
+}
+
+export async function fetchMergePlan(companyAId: number, companyBId: number): Promise<MergePlanDetail> {
+  const response = await apiFetch(
+    `/api/admin/duplicate-review/pairs/${companyAId}/${companyBId}/merge-plan`,
+  )
+  return parseJson(response)
+}
+
+export async function prepareMergePlans(): Promise<MergePlanPrepareResult> {
+  const response = await apiFetch('/api/admin/duplicate-review/merge-plans/prepare', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+  return parseJson(response)
+}
+
+export async function saveMergePlanDecision(
+  companyAId: number,
+  companyBId: number,
+  body: { exception_key: string; chosen_resolution: string; reason?: string },
+): Promise<{ ok: boolean; plan: MergePlanDetail; approval_created?: boolean; merge_will_occur?: boolean }> {
+  const response = await apiFetch(
+    `/api/admin/duplicate-review/pairs/${companyAId}/${companyBId}/merge-plan/decisions`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  )
+  return parseJson(response)
+}
+
+export async function replanMergePlan(companyAId: number, companyBId: number): Promise<{
+  ok: boolean
+  plan: MergePlanDetail
+  merge_will_occur?: boolean
+  approval_created?: boolean
+}> {
+  const response = await apiFetch(
+    `/api/admin/duplicate-review/pairs/${companyAId}/${companyBId}/merge-plan/replan`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    },
+  )
+  return parseJson(response)
+}
+
 export async function saveDuplicateReview(
   companyAId: number,
   companyBId: number,

@@ -5,8 +5,13 @@ import {
   fetchDuplicateCandidates,
   fetchDuplicatePair,
   fetchDuplicateReviewHistory,
+  fetchMergePlan,
+  fetchMergePlans,
+  prepareMergePlans,
   previewDuplicateBatchReview,
+  replanMergePlan,
   saveDuplicateReview,
+  saveMergePlanDecision,
   type DuplicateAutomatedAssessment,
   type DuplicateBatchPreview,
   type DuplicateCandidate,
@@ -14,6 +19,9 @@ import {
   type DuplicateDisposition,
   type DuplicatePairDetail,
   type DuplicateSummary,
+  type MergePlanDetail,
+  type MergePlanListRow,
+  type MergePlanSummary,
 } from './api/duplicateReview'
 
 const QUEUES: Array<{ id: string; label: string }> = [
@@ -58,6 +66,22 @@ const EMPTY_SUMMARY: DuplicateSummary = {
   INSUFFICIENT_EVIDENCE: 0,
   review_needed: 0,
 }
+
+const EMPTY_PLAN_SUMMARY: MergePlanSummary = {
+  analyzed: 0,
+  ready_for_review: 0,
+  needs_exception_decision: 0,
+  not_safe_to_plan: 0,
+  stale: 0,
+}
+
+const PLAN_QUEUES: Array<{ id: string; label: string }> = [
+  { id: '', label: 'All plans' },
+  { id: 'READY_FOR_HUMAN_APPROVAL', label: 'Ready for Review' },
+  { id: 'NEEDS_EXCEPTION_DECISION', label: 'Needs Decisions' },
+  { id: 'NOT_SAFE_TO_PLAN', label: 'Not Safe' },
+  { id: 'STALE', label: 'Stale' },
+]
 
 function cityState(company: { city?: string; state?: string }) {
   return [company.city, company.state].filter(Boolean).join(', ')
@@ -251,6 +275,264 @@ function AssessmentPanel({
   )
 }
 
+function MergePlanningPanel({
+  busy,
+  error,
+  message,
+  planState,
+  planQuery,
+  planOffset,
+  planPage,
+  selectedPlan,
+  decisionChoices,
+  decisionReason,
+  limit,
+  onPlanState,
+  onPlanQuery,
+  onLoad,
+  onPrepare,
+  onOpen,
+  onChoice,
+  onReason,
+  onSaveDecision,
+  onReplan,
+}: {
+  busy: boolean
+  error: string
+  message: string
+  planState: string
+  planQuery: string
+  planOffset: number
+  planPage: { total: number; plans: MergePlanListRow[]; summary: MergePlanSummary }
+  selectedPlan: MergePlanDetail | null
+  decisionChoices: Record<string, string>
+  decisionReason: string
+  limit: number
+  onPlanState: (value: string) => void
+  onPlanQuery: (value: string) => void
+  onLoad: (offset: number, state: string) => void
+  onPrepare: () => void
+  onOpen: (row: MergePlanListRow) => void
+  onChoice: (key: string, value: string) => void
+  onReason: (value: string) => void
+  onSaveDecision: (key: string) => void
+  onReplan: () => void
+}) {
+  const summary = planPage.summary
+  return (
+    <div className="dup-planning" aria-label="Merge Planning">
+      <h3>Merge Planning</h3>
+      <p className="dup-plan-banner" role="status">
+        PLANNING ONLY — NO MERGE WILL OCCUR
+      </p>
+      <p className="queue-sub">
+        Ready for Review means NorthStar can describe a deterministic proposed future merge. It is
+        not merge approval and does not execute a merge.
+      </p>
+      <div className="dup-cards" role="group" aria-label="Merge planning summary">
+        <button
+          type="button"
+          className="dup-card"
+          aria-label="Ready for Review"
+          onClick={() => onPlanState('READY_FOR_HUMAN_APPROVAL')}
+        >
+          Ready for Review
+          <strong>{summary.ready_for_review || summary.READY_FOR_HUMAN_APPROVAL || 0}</strong>
+        </button>
+        <button
+          type="button"
+          className="dup-card dup-card-primary"
+          aria-label="Needs Decisions"
+          onClick={() => onPlanState('NEEDS_EXCEPTION_DECISION')}
+        >
+          Needs Decisions
+          <strong>{summary.needs_exception_decision || summary.NEEDS_EXCEPTION_DECISION || 0}</strong>
+        </button>
+        <button
+          type="button"
+          className="dup-card"
+          aria-label="Not Safe"
+          onClick={() => onPlanState('NOT_SAFE_TO_PLAN')}
+        >
+          Not Safe
+          <strong>{summary.not_safe_to_plan || summary.NOT_SAFE_TO_PLAN || 0}</strong>
+        </button>
+        <button type="button" className="dup-card" aria-label="Stale" onClick={() => onPlanState('STALE')}>
+          Stale
+          <strong>{summary.stale || summary.STALE || 0}</strong>
+        </button>
+      </div>
+      <div className="dup-toolbar">
+        <button type="button" onClick={onPrepare} disabled={busy}>
+          Prepare Merge Plans
+        </button>
+      </div>
+      <form
+        className="dup-toolbar"
+        onSubmit={(event) => {
+          event.preventDefault()
+          onLoad(0, planState)
+        }}
+      >
+        <label>
+          Search plans
+          <input
+            value={planQuery}
+            onChange={(event) => onPlanQuery(event.target.value)}
+            placeholder="Company name"
+          />
+        </label>
+        <label>
+          Plan queue
+          <select value={planState} onChange={(event) => onPlanState(event.target.value)}>
+            {PLAN_QUEUES.map((row) => (
+              <option key={row.id || 'all'} value={row.id}>
+                {row.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button type="submit">Search</button>
+      </form>
+      {error ? <p className="data-status data-status--error">{error}</p> : null}
+      {message ? <p className="data-status">{message}</p> : null}
+      <p className="queue-sub">
+        {planPage.total} merge plans · showing {planPage.plans.length} · {busy ? 'Loading…' : ''}
+      </p>
+      <table className="dup-table">
+        <thead>
+          <tr>
+            <th>Pair</th>
+            <th>Survivor / source</th>
+            <th>Plan state</th>
+            <th>Exceptions</th>
+            <th>Same-client CCR</th>
+          </tr>
+        </thead>
+        <tbody>
+          {planPage.plans.map((row) => (
+            <tr key={row.pair_key}>
+              <td>
+                <button type="button" onClick={() => onOpen(row)}>
+                  {row.company_a_name} / {row.company_b_name}
+                </button>
+              </td>
+              <td>
+                {row.survivor_company_id || '—'} / {row.source_company_id || '—'}
+              </td>
+              <td>{row.plan_state_label || row.plan_state}</td>
+              <td>{row.exception_count || 0}</td>
+              <td>{row.same_client_ccr_conflict ? 'Yes' : 'No'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="dup-pager">
+        <button type="button" disabled={planOffset <= 0} onClick={() => onLoad(Math.max(0, planOffset - limit), planState)}>
+          Previous
+        </button>
+        <button
+          type="button"
+          disabled={planOffset + limit >= planPage.total}
+          onClick={() => onLoad(planOffset + limit, planState)}
+        >
+          Next
+        </button>
+      </div>
+      {selectedPlan ? (
+        <article className="dup-detail" aria-label="Proposed future merge">
+          <h3>PROPOSED FUTURE MERGE</h3>
+          <p className="dup-plan-banner">PLANNING ONLY — NO MERGE WILL OCCUR</p>
+          <FieldRow label="Plan state" value={selectedPlan.plan_state_label || selectedPlan.plan_state} />
+          <FieldRow label="Survivor" value={selectedPlan.survivor_company_id} />
+          <FieldRow label="Source" value={selectedPlan.source_company_id} />
+          <FieldRow label="Survivor source" value={selectedPlan.survivor_source} />
+          <h4>Master field result</h4>
+          <ul>
+            {(selectedPlan.master_fields || []).map((row) => (
+              <li key={String(row.field)}>
+                {String(row.field)}: {String(row.action)} · survivor {String(row.survivor_value || '—')} ·
+                source {String(row.source_value || '—')}
+              </li>
+            ))}
+          </ul>
+          <h4>CCR result by client</h4>
+          <ul>
+            {(selectedPlan.ccrs || []).map((row, index) => (
+              <li key={index}>
+                {String(row.client_name || row.client_code || row.client_id)} — {String(row.classification)} —{' '}
+                {String(row.action)}
+              </li>
+            ))}
+          </ul>
+          <h4>Contacts</h4>
+          <p>
+            Unique {String((selectedPlan.contacts || {}).unique_to_preserve || 0)} · Exact{' '}
+            {String((selectedPlan.contacts || {}).exact_duplicates || 0)} · Possible{' '}
+            {String((selectedPlan.contacts || {}).possible_duplicates || 0)} · Conflict{' '}
+            {String((selectedPlan.contacts || {}).conflicts || 0)}
+          </p>
+          <h4>Aliases / Locations / Identities</h4>
+          <p>
+            Aliases to preserve {String((selectedPlan.aliases || {}).unique_to_preserve || 0)} · Location
+            concern {selectedPlan.location_concern ? 'Yes' : 'No'} · Identity concern{' '}
+            {selectedPlan.identity_concern ? 'Yes' : 'No'}
+          </p>
+          <h4>Campaigns</h4>
+          <p>
+            Unique memberships {String((selectedPlan.campaigns || {}).unique_memberships_to_preserve || 0)} ·
+            Already on survivor {String((selectedPlan.campaigns || {}).same_campaign_already_on_survivor || 0)}
+          </p>
+          <h4>History / dependencies</h4>
+          <p>
+            Source notes {String(((selectedPlan.history || {}).source as Record<string, number> | undefined)?.notes || 0)}{' '}
+            · Survivor notes{' '}
+            {String(((selectedPlan.history || {}).survivor as Record<string, number> | undefined)?.notes || 0)}
+          </p>
+          <h4>Exceptions</h4>
+          {(selectedPlan.exceptions || []).length === 0 ? <p>No unresolved planning exceptions.</p> : null}
+          {(selectedPlan.exceptions || []).map((row) => (
+            <div key={row.exception_key} className="dup-exception">
+              <p>
+                {row.code}: {row.label}
+              </p>
+              <label>
+                Plan decision
+                <select
+                  aria-label={`Decision for ${row.exception_key}`}
+                  value={decisionChoices[row.exception_key] || ''}
+                  onChange={(event) => onChoice(row.exception_key, event.target.value)}
+                >
+                  <option value="">Select resolution</option>
+                  {(row.options || []).map((option) => (
+                    <option key={option} value={option}>
+                      {option.replace(/_/g, ' ')}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button type="button" onClick={() => onSaveDecision(row.exception_key)} disabled={busy}>
+                Save decision
+              </button>
+            </div>
+          ))}
+          <label>
+            Decision reason
+            <textarea value={decisionReason} onChange={(event) => onReason(event.target.value)} />
+          </label>
+          <button type="button" onClick={onReplan} disabled={busy}>
+            Replan
+          </button>
+          <p className="queue-sub">
+            These are plan decisions only. They are not applied to live companies, CCRs, or contacts.
+            There is no Execute Merge or Merge Now action.
+          </p>
+        </article>
+      ) : null}
+    </div>
+  )
+}
+
 export default function AdministrationDuplicateReview() {
   const [queue, setQueue] = useState('review_needed')
   const [query, setQuery] = useState('')
@@ -273,6 +555,18 @@ export default function AdministrationDuplicateReview() {
   const [batchAction, setBatchAction] = useState('ACCEPT_LIKELY_DUPLICATE')
   const [batchReason, setBatchReason] = useState('')
   const [preview, setPreview] = useState<DuplicateBatchPreview | null>(null)
+  const [workspace, setWorkspace] = useState<'review' | 'planning'>('review')
+  const [planState, setPlanState] = useState('')
+  const [planQuery, setPlanQuery] = useState('')
+  const [planOffset, setPlanOffset] = useState(0)
+  const [planPage, setPlanPage] = useState<{
+    total: number
+    plans: MergePlanListRow[]
+    summary: MergePlanSummary
+  }>({ total: 0, plans: [], summary: EMPTY_PLAN_SUMMARY })
+  const [selectedPlan, setSelectedPlan] = useState<MergePlanDetail | null>(null)
+  const [decisionChoices, setDecisionChoices] = useState<Record<string, string>>({})
+  const [decisionReason, setDecisionReason] = useState('')
   const limit = 50
 
   async function loadList(nextOffset = offset) {
@@ -298,6 +592,11 @@ export default function AdministrationDuplicateReview() {
     void loadList(0)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queue])
+
+  useEffect(() => {
+    if (workspace === 'planning') void loadPlans(0, planState)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspace, planState])
 
   async function openPair(row: DuplicateCandidate) {
     setBusy(true)
@@ -439,6 +738,105 @@ export default function AdministrationDuplicateReview() {
     }
   }
 
+  async function loadPlans(nextOffset = planOffset, nextState = planState) {
+    setBusy(true)
+    setError('')
+    try {
+      const result = await fetchMergePlans({
+        state: nextState,
+        q: planQuery,
+        offset: nextOffset,
+        limit,
+      })
+      setPlanPage({
+        total: result.total,
+        plans: result.plans,
+        summary: result.summary || EMPTY_PLAN_SUMMARY,
+      })
+      setPlanOffset(nextOffset)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load merge plans.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function openPlan(row: MergePlanListRow) {
+    setBusy(true)
+    setError('')
+    try {
+      const detail = await fetchMergePlan(row.company_a_id, row.company_b_id)
+      setSelectedPlan(detail)
+      const next: Record<string, string> = {}
+      ;(detail.exceptions || []).forEach((item) => {
+        next[item.exception_key] = item.options?.[0] || ''
+      })
+      setDecisionChoices(next)
+      setMessage('')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load merge plan.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function runPreparePlans() {
+    setBusy(true)
+    setError('')
+    try {
+      const result = await prepareMergePlans()
+      setMessage(
+        `Analyzed ${result.analyzed}. Ready for Review: ${result.ready_for_review || 0}. Needs Decisions: ${result.needs_exception_decision || 0}. Not Safe: ${result.not_safe_to_plan || 0}. Stale: ${result.stale || 0}. ${result.plan_only_warning || 'PLANNING ONLY — NO MERGE WILL OCCUR'}`,
+      )
+      await loadPlans(0, planState)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not prepare merge plans.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function saveDecision(exceptionKey: string) {
+    if (!selectedPlan) return
+    const chosen = decisionChoices[exceptionKey]
+    if (!chosen) {
+      setError('Choose a resolution before saving the plan decision.')
+      return
+    }
+    setBusy(true)
+    setError('')
+    try {
+      const saved = await saveMergePlanDecision(selectedPlan.company_a_id, selectedPlan.company_b_id, {
+        exception_key: exceptionKey,
+        chosen_resolution: chosen,
+        reason: decisionReason,
+      })
+      setSelectedPlan(saved.plan)
+      setMessage(`Plan decision saved. ${saved.plan.plan_only_warning} No merge approval was created.`)
+      await loadPlans(planOffset, planState)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save plan decision.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function runReplan() {
+    if (!selectedPlan) return
+    setBusy(true)
+    setError('')
+    try {
+      const result = await replanMergePlan(selectedPlan.company_a_id, selectedPlan.company_b_id)
+      setSelectedPlan(result.plan)
+      setMessage(`Plan recalculated. ${result.plan.plan_only_warning}`)
+      await loadPlans(planOffset, planState)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not replan.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const summary = page.summary
   const human = selected?.review
   const assessment = selected?.automated_assessment
@@ -453,6 +851,44 @@ export default function AdministrationDuplicateReview() {
         NorthStar Automated Assessment sorts candidates with explainable evidence. Julie&apos;s human
         disposition remains authoritative. This is not an external AI model.
       </p>
+      <div className="dup-toolbar" role="tablist" aria-label="Duplicate workspace">
+        <button type="button" aria-selected={workspace === 'review'} onClick={() => setWorkspace('review')}>
+          Duplicate Review
+        </button>
+        <button
+          type="button"
+          aria-selected={workspace === 'planning'}
+          onClick={() => setWorkspace('planning')}
+        >
+          Merge Planning
+        </button>
+      </div>
+      {workspace === 'planning' ? (
+        <MergePlanningPanel
+          busy={busy}
+          error={error}
+          message={message}
+          planState={planState}
+          planQuery={planQuery}
+          planOffset={planOffset}
+          planPage={planPage}
+          selectedPlan={selectedPlan}
+          decisionChoices={decisionChoices}
+          decisionReason={decisionReason}
+          limit={limit}
+          onPlanState={setPlanState}
+          onPlanQuery={setPlanQuery}
+          onLoad={(offset, state) => void loadPlans(offset, state)}
+          onPrepare={() => void runPreparePlans()}
+          onOpen={(row) => void openPlan(row)}
+          onChoice={(key, value) => setDecisionChoices((current) => ({ ...current, [key]: value }))}
+          onReason={setDecisionReason}
+          onSaveDecision={(key) => void saveDecision(key)}
+          onReplan={() => void runReplan()}
+        />
+      ) : null}
+      {workspace === 'review' ? (
+      <>
       <div className="dup-cards" role="group" aria-label="Classification summary">
         <button type="button" className="dup-card" onClick={() => setQueue('high_confidence')}>
           High Confidence Duplicate
@@ -760,6 +1196,8 @@ export default function AdministrationDuplicateReview() {
             </section>
           ) : null}
         </div>
+      ) : null}
+      </>
       ) : null}
     </section>
   )

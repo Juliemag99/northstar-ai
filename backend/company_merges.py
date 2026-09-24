@@ -76,6 +76,8 @@ SKIP_REF_TABLES = frozenset(
         "company_duplicate_reviews",
         "company_duplicate_review_events",
         "company_duplicate_classifications",
+        "company_merge_plans",
+        "company_merge_plan_decisions",
         "search_fts",
         "search_fts_data",
         "search_fts_idx",

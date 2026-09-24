@@ -4,6 +4,9 @@ import {
   fetchDuplicatePair,
   saveDuplicateReview,
   analyzeDuplicateCandidates,
+  fetchMergePlans,
+  prepareMergePlans,
+  saveMergePlanDecision,
 } from './duplicateReview'
 
 const fetchMock = vi.fn()
@@ -84,6 +87,56 @@ describe('duplicateReview API', () => {
     expect(result.merge_will_occur).toBe(false)
     expect(String(fetchMock.mock.calls[0]?.[0] || '')).toContain(
       '/api/admin/duplicate-review/analyze',
+    )
+  })
+
+  it('prepares and loads merge plans without creating approvals', async () => {
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          ok: true,
+          analyzed: 16,
+          merge_will_occur: false,
+          approval_created: false,
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          planning_only: true,
+          merge_will_occur: false,
+          approval_created: false,
+          plans: [],
+          summary: { ready_for_review: 0 },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          ok: true,
+          approval_created: false,
+          merge_will_occur: false,
+          plan: { plan_state: 'READY_FOR_HUMAN_APPROVAL' },
+        }),
+      })
+    vi.stubGlobal('fetch', fetchMock)
+    const prepared = await prepareMergePlans()
+    expect(prepared.approval_created).toBe(false)
+    expect(String(fetchMock.mock.calls[0]?.[0] || '')).toContain(
+      '/api/admin/duplicate-review/merge-plans/prepare',
+    )
+    await fetchMergePlans({ state: 'NEEDS_EXCEPTION_DECISION' })
+    expect(String(fetchMock.mock.calls[1]?.[0] || '')).toContain(
+      '/api/admin/duplicate-review/merge-plans',
+    )
+    const saved = await saveMergePlanDecision(22, 28, {
+      exception_key: 'STATUS_DECISION_REQUIRED:1',
+      chosen_resolution: 'KEEP_SURVIVOR',
+    })
+    expect(saved.approval_created).toBe(false)
+    expect(String(fetchMock.mock.calls[2]?.[0] || '')).toContain(
+      '/api/admin/duplicate-review/pairs/22/28/merge-plan/decisions',
     )
   })
 })

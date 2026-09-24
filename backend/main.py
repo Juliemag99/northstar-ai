@@ -2985,12 +2985,14 @@ def data_steward_meta_api(request: Request):
         "merge_enabled": False,
         "duplicate_review_enabled": True,
         "duplicate_classification_enabled": True,
+        "merge_planning_enabled": True,
         "remove_relationship_enabled": ccr_on,
         "restore_enabled": ccr_on,
         "message": (
             "Governed Master Company amend, archive/restore, client relationship "
-            "remove/restore, duplicate review/planning, and automated duplicate "
-            "classification are enabled. Live merge and hard delete remain disabled."
+            "remove/restore, duplicate review/planning, automated duplicate "
+            "classification, and read-only merge planning are enabled. Live merge "
+            "and hard delete remain disabled."
         ),
     }
 
@@ -3059,7 +3061,7 @@ def _steward_http_error(exc: Exception) -> HTTPException:
         )
     if isinstance(exc, DuplicateReviewError):
         code = str(exc)
-        status = 404 if code == "company_not_found" else 400
+        status = 404 if code in {"company_not_found", "plan_not_found"} else 400
         detail = {"code": code, "message": code, **(exc.payload or {})}
         return HTTPException(status_code=status, detail=detail)
     if isinstance(exc, BulkAssignmentError):
@@ -3420,6 +3422,102 @@ def duplicate_review_save_api(company_a_id: int, company_b_id: int, body: dict, 
                 company_a_id=company_a_id,
                 company_b_id=company_b_id,
                 body=parsed,
+            )
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.post("/api/admin/duplicate-review/merge-plans/prepare")
+def duplicate_review_prepare_merge_plans_api(request: Request, body: dict | None = None):
+    actor = require_administrator(request)
+    from merge_plan import MergePlanPrepareRequest, prepare_merge_plans
+
+    MergePlanPrepareRequest.model_validate(body or {})
+    try:
+        with get_connection() as conn:
+            return prepare_merge_plans(conn, actor=actor)
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.get("/api/admin/duplicate-review/merge-plans")
+def duplicate_review_list_merge_plans_api(
+    request: Request,
+    state: str = Query(default=""),
+    q: str = Query(default=""),
+    offset: int = Query(default=0),
+    limit: int = Query(default=50),
+):
+    require_administrator(request)
+    from merge_plan import list_merge_plans
+
+    try:
+        with get_connection() as conn:
+            return list_merge_plans(conn, state=state, q=q, offset=offset, limit=limit)
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.get("/api/admin/duplicate-review/pairs/{company_a_id}/{company_b_id}/merge-plan")
+def duplicate_review_get_merge_plan_api(company_a_id: int, company_b_id: int, request: Request):
+    require_administrator(request)
+    from merge_plan import get_merge_plan
+
+    try:
+        with get_connection() as conn:
+            return get_merge_plan(conn, company_a_id, company_b_id)
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.post("/api/admin/duplicate-review/pairs/{company_a_id}/{company_b_id}/merge-plan/decisions")
+def duplicate_review_save_merge_plan_decision_api(
+    company_a_id: int, company_b_id: int, body: dict, request: Request
+):
+    actor = require_administrator(request)
+    from merge_plan import MergePlanDecisionRequest, save_merge_plan_decision
+
+    parsed = MergePlanDecisionRequest.model_validate(body or {})
+    try:
+        with get_connection() as conn:
+            return save_merge_plan_decision(
+                conn,
+                actor=actor,
+                company_a_id=company_a_id,
+                company_b_id=company_b_id,
+                body=parsed,
+            )
+    except Exception as exc:
+        mapped = _steward_http_error(exc)
+        if mapped:
+            raise mapped from exc
+        raise
+
+
+@app.post("/api/admin/duplicate-review/pairs/{company_a_id}/{company_b_id}/merge-plan/replan")
+def duplicate_review_replan_merge_plan_api(
+    company_a_id: int, company_b_id: int, request: Request, body: dict | None = None
+):
+    actor = require_administrator(request)
+    from merge_plan import MergePlanPrepareRequest, replan_merge_plan
+
+    MergePlanPrepareRequest.model_validate(body or {})
+    try:
+        with get_connection() as conn:
+            return replan_merge_plan(
+                conn, actor=actor, company_a_id=company_a_id, company_b_id=company_b_id
             )
     except Exception as exc:
         mapped = _steward_http_error(exc)
