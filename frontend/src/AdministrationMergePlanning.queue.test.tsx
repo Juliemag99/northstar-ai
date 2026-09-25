@@ -454,4 +454,160 @@ describe('Administration → Data Management → Duplicate Review → Merge Plan
     expect(duplicateReview.saveMergePlanDecision).not.toHaveBeenCalled()
     expect(duplicateReview.saveWorkbenchDisposition).not.toHaveBeenCalled()
   })
+
+  it('highlights the summary card for the queue being viewed and navigates after READY', async () => {
+    const emptySummary = {
+      analyzed: 16,
+      ready_for_review: 1,
+      needs_exception_decision: 13,
+      not_safe_to_plan: 2,
+      stale: 0,
+      simple_decisions: 10,
+      complex_decisions: 3,
+    }
+    const readyKelderman = {
+      ...keldermanRow,
+      plan_state: 'READY_FOR_HUMAN_APPROVAL',
+      plan_state_label: 'READY FOR REVIEW',
+      ready_for_review: true,
+      exception_count: 0,
+      decision_needed: 'Ready for Review',
+    }
+    vi.mocked(duplicateReview.fetchDuplicateCandidates).mockResolvedValue({
+      planning_only: true,
+      merge_will_occur: false,
+      automatic_verdict: false,
+      writes: false,
+      total: 0,
+      offset: 0,
+      limit: 50,
+      pairs: [],
+      summary: {
+        candidates: 0,
+        HIGH_CONFIDENCE_DUPLICATE: 0,
+        LIKELY_DUPLICATE: 0,
+        LIKELY_MULTI_LOCATION: 0,
+        LIKELY_NOT_DUPLICATE: 0,
+        HUMAN_REVIEW_REQUIRED: 0,
+        INSUFFICIENT_EVIDENCE: 0,
+        review_needed: 0,
+      },
+    })
+    vi.mocked(duplicateReview.fetchMergePlans).mockImplementation(async (args) => {
+      const state = String(args?.state || '')
+      const needsPlans = [keldermanRow, kuhnRow, edlRow]
+      const plans =
+        state === 'READY_FOR_HUMAN_APPROVAL'
+          ? [readyKelderman]
+          : state === 'NOT_SAFE_TO_PLAN' || state === 'STALE'
+            ? []
+            : needsPlans
+      return {
+        planning_only: true,
+        merge_will_occur: false,
+        total: plans.length,
+        offset: 0,
+        limit: 50,
+        plans,
+        summary: emptySummary,
+        no_merge_button: true,
+        active_client_does_not_scope: true,
+      }
+    })
+    vi.mocked(duplicateReview.fetchMergePlan).mockResolvedValue(
+      planDetail(readyKelderman, {
+        exceptions: [],
+        preservation: keldermanPreservation(),
+      }),
+    )
+    vi.mocked(duplicateReview.saveMergePlanDecision).mockResolvedValue({
+      ok: true,
+      approval_created: false,
+      merge_will_occur: false,
+      ready_for_review: true,
+      remaining_exception_count: 0,
+      plan: {
+        ...planDetail(readyKelderman, { exceptions: [], preservation: keldermanPreservation() }),
+        plan_state: 'READY_FOR_HUMAN_APPROVAL',
+        plan_state_label: 'READY FOR REVIEW',
+        ready_for_review: true,
+      },
+    })
+
+    renderAdministration()
+    fireEvent.click(screen.getByRole('tab', { name: 'Data Management' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Duplicate Review' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Duplicate Review' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Merge Planning' }))
+    await waitFor(() => expect(screen.getByRole('article', { name: /Record 45 vs .*Record 97/ })).toBeTruthy())
+
+    const needsBtn = screen.getByRole('button', { name: 'Needs Decisions' })
+    const simpleBtn = screen.getByRole('button', { name: 'Simple Decisions' })
+    const complexBtn = screen.getByRole('button', { name: 'Complex Decisions' })
+    const readyBtn = screen.getByRole('button', { name: 'Ready for Review' })
+    const notSafeBtn = screen.getByRole('button', { name: 'Not Safe' })
+    const staleBtn = screen.getByRole('button', { name: 'Stale' })
+    const queueSelect = screen.getByLabelText('Plan queue') as HTMLSelectElement
+
+    expect(needsBtn.getAttribute('aria-pressed')).toBe('true')
+    expect(needsBtn.getAttribute('aria-current')).toBe('true')
+    expect(simpleBtn.getAttribute('aria-pressed')).toBe('false')
+    expect(readyBtn.getAttribute('aria-pressed')).toBe('false')
+    expect(queueSelect.value).toBe('NEEDS_EXCEPTION_DECISION')
+    expect(within(needsBtn).getByText('Viewing')).toBeTruthy()
+    expect(within(readyBtn).queryByText('Viewing')).toBeNull()
+
+    fireEvent.click(readyBtn)
+    await waitFor(() => expect(readyBtn.getAttribute('aria-pressed')).toBe('true'))
+    expect(needsBtn.getAttribute('aria-pressed')).toBe('false')
+    expect(readyBtn.getAttribute('aria-current')).toBe('true')
+    expect(queueSelect.value).toBe('READY_FOR_HUMAN_APPROVAL')
+    expect(within(readyBtn).getByText('Viewing')).toBeTruthy()
+    expect(vi.mocked(duplicateReview.fetchMergePlans).mock.calls.some((call) => call[0]?.state === 'READY_FOR_HUMAN_APPROVAL')).toBe(true)
+
+    fireEvent.click(notSafeBtn)
+    await waitFor(() => expect(notSafeBtn.getAttribute('aria-pressed')).toBe('true'))
+    expect(readyBtn.getAttribute('aria-pressed')).toBe('false')
+    expect(needsBtn.getAttribute('aria-pressed')).toBe('false')
+    expect(queueSelect.value).toBe('NOT_SAFE_TO_PLAN')
+
+    fireEvent.click(staleBtn)
+    await waitFor(() => expect(staleBtn.getAttribute('aria-pressed')).toBe('true'))
+    expect(notSafeBtn.getAttribute('aria-pressed')).toBe('false')
+    expect(queueSelect.value).toBe('STALE')
+
+    fireEvent.click(simpleBtn)
+    await waitFor(() => expect(simpleBtn.getAttribute('aria-pressed')).toBe('true'))
+    expect(needsBtn.getAttribute('aria-pressed')).toBe('false')
+    expect(complexBtn.getAttribute('aria-pressed')).toBe('false')
+    expect(queueSelect.value).toBe('NEEDS_EXCEPTION_DECISION')
+    expect(screen.getByRole('article', { name: /Record 45 vs .*Record 97/ })).toBeTruthy()
+    expect(screen.getByRole('article', { name: /Record 229 vs .*Record 358/ })).toBeTruthy()
+    expect(screen.queryByRole('article', { name: /Record 22 vs .*Record 28/ })).toBeNull()
+
+    fireEvent.click(complexBtn)
+    await waitFor(() => expect(complexBtn.getAttribute('aria-pressed')).toBe('true'))
+    expect(simpleBtn.getAttribute('aria-pressed')).toBe('false')
+    expect(needsBtn.getAttribute('aria-pressed')).toBe('false')
+    expect(queueSelect.value).toBe('NEEDS_EXCEPTION_DECISION')
+    expect(screen.getByRole('article', { name: /Record 22 vs .*Record 28/ })).toBeTruthy()
+    expect(screen.queryByRole('article', { name: /Record 45 vs .*Record 97/ })).toBeNull()
+
+    fireEvent.click(needsBtn)
+    await waitFor(() => expect(needsBtn.getAttribute('aria-pressed')).toBe('true'))
+    expect(simpleBtn.getAttribute('aria-pressed')).toBe('false')
+    expect(complexBtn.getAttribute('aria-pressed')).toBe('false')
+    expect(queueSelect.value).toBe('NEEDS_EXCEPTION_DECISION')
+    expect(screen.getByRole('article', { name: /Record 45 vs .*Record 97/ })).toBeTruthy()
+    expect(screen.getByRole('article', { name: /Record 22 vs .*Record 28/ })).toBeTruthy()
+
+    fireEvent.click(within(screen.getByRole('article', { name: /Record 45 vs .*Record 97/ })).getByRole('button', { name: 'KEEP RECORD 45' }))
+    await waitFor(() => expect(duplicateReview.saveMergePlanDecision).toHaveBeenCalled())
+    await waitFor(() => expect(readyBtn.getAttribute('aria-pressed')).toBe('true'))
+    expect(needsBtn.getAttribute('aria-pressed')).toBe('false')
+    expect(queueSelect.value).toBe('READY_FOR_HUMAN_APPROVAL')
+    expect(within(readyBtn).getByText('Viewing')).toBeTruthy()
+    await waitFor(() => expect(screen.queryByRole('article', { name: /Record 22 vs .*Record 28/ })).toBeNull())
+    expect(screen.getByRole('article', { name: /Record 45 vs .*Record 97/ })).toBeTruthy()
+  })
 })

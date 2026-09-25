@@ -295,6 +295,7 @@ export default function AdministrationDuplicateReview() {
   const [preview, setPreview] = useState<DuplicateBatchPreview | null>(null)
   const [workspace, setWorkspace] = useState<'review' | 'planning'>('review')
   const [planState, setPlanState] = useState('NEEDS_EXCEPTION_DECISION')
+  const [planComplexity, setPlanComplexity] = useState<'' | 'simple' | 'complex'>('')
   const [planQuery, setPlanQuery] = useState('')
   const [planDecisionType, setPlanDecisionType] = useState('')
   const [planSameClient, setPlanSameClient] = useState('')
@@ -565,11 +566,17 @@ export default function AdministrationDuplicateReview() {
             }
           : planPage.plans.find((row) => row.pair_key !== saved.plan.pair_key && row.plan_state === 'NEEDS_EXCEPTION_DECISION') || null,
       )
+      setPlanComplexity('')
+      if (planState !== 'READY_FOR_HUMAN_APPROVAL') {
+        setPlanState('READY_FOR_HUMAN_APPROVAL')
+      } else {
+        await loadPlans(0, 'READY_FOR_HUMAN_APPROVAL')
+      }
     } else {
       setMessage(`${prefix} ${saved.plan.plan_only_warning} Remaining exceptions: ${remaining.length}.`)
       setReadyNextPair(null)
+      await loadPlans(planOffset, planState)
     }
-    await loadPlans(planOffset, planState)
   }
 
   async function saveDecision(row: MergePlanListRow, exceptionKey: string, resolution?: string) {
@@ -638,7 +645,16 @@ export default function AdministrationDuplicateReview() {
       const result = await replanMergePlan(selectedPlan.company_a_id, selectedPlan.company_b_id)
       setSelectedPlan(result.plan)
       setMessage(`Plan recalculated. ${result.plan.plan_only_warning}`)
-      await loadPlans(planOffset, planState)
+      if (result.plan.plan_state === 'READY_FOR_HUMAN_APPROVAL' || result.plan.ready_for_review) {
+        setPlanComplexity('')
+        if (planState !== 'READY_FOR_HUMAN_APPROVAL') {
+          setPlanState('READY_FOR_HUMAN_APPROVAL')
+        } else {
+          await loadPlans(0, 'READY_FOR_HUMAN_APPROVAL')
+        }
+      } else {
+        await loadPlans(planOffset, planState)
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not replan.')
     } finally {
@@ -678,6 +694,7 @@ export default function AdministrationDuplicateReview() {
           error={error}
           message={message}
           planState={planState}
+          planComplexity={planComplexity}
           planQuery={planQuery}
           planDecisionType={planDecisionType}
           planSameClient={planSameClient}
@@ -690,6 +707,7 @@ export default function AdministrationDuplicateReview() {
           readyNextPair={readyNextPair}
           limit={limit}
           onPlanState={setPlanState}
+          onPlanComplexity={setPlanComplexity}
           onPlanQuery={setPlanQuery}
           onDecisionType={setPlanDecisionType}
           onSameClient={setPlanSameClient}

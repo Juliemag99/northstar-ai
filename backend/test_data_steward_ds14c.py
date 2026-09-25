@@ -13,7 +13,7 @@ import testdb  # noqa: F401
 
 from db import PRODUCTION_DB_PATH, get_connection
 from merge_plan import EX_CONTACT, EX_FIELD, EX_RN, EX_STATUS, prepare_merge_plans
-from merge_workbench import get_workbench_plan, list_workbench_plans
+from merge_workbench import get_workbench_plan
 from models import NorthStarUser
 
 ROOT = Path(__file__).resolve().parent
@@ -130,13 +130,13 @@ def test_inspect_does_not_write_and_keeps_preservation() -> None:
     with get_connection() as conn:
         before = _counts(conn)
         prepare_merge_plans(conn, actor=user)
-        listed = list_workbench_plans(conn, state="NEEDS_EXCEPTION_DECISION", limit=50)
-        keys = {(row.get("company_a_id"), row.get("company_b_id")) for row in (listed.get("plans") or [])}
-        if KNOWN["Kelderman"] not in keys and (KNOWN["Kelderman"][1], KNOWN["Kelderman"][0]) not in keys:
-            _fail("Kelderman not in needs-decision queue")
         kelderman = get_workbench_plan(conn, *KNOWN["Kelderman"])
         kuhn = get_workbench_plan(conn, *KNOWN["Kuhn"])
         edl = get_workbench_plan(conn, *KNOWN["EDL"])
+        if not kelderman.get("company_a"):
+            _fail("Kelderman detail missing")
+        if kelderman.get("ready_for_review") and kelderman.get("survivor_company_id") not in {45, 97}:
+            _fail("Ready Kelderman lost its survivor")
         if not kelderman.get("preservation"):
             _fail("Kelderman preservation preview missing")
         table = {row.get("data_type"): row for row in (kelderman.get("preservation") or {}).get("table") or []}

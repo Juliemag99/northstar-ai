@@ -30,6 +30,50 @@ const PLAN_QUEUES: Array<{ id: string; label: string }> = [
   { id: '', label: 'All plans' },
 ]
 
+type PlanComplexity = '' | 'simple' | 'complex'
+
+function activeSummaryCard(planState: string, complexity: PlanComplexity): string {
+  if (planState === 'READY_FOR_HUMAN_APPROVAL') return 'ready'
+  if (planState === 'NOT_SAFE_TO_PLAN') return 'not_safe'
+  if (planState === 'STALE') return 'stale'
+  if (planState === 'NEEDS_EXCEPTION_DECISION' || planState === '') {
+    if (complexity === 'simple') return 'simple'
+    if (complexity === 'complex') return 'complex'
+    if (planState === 'NEEDS_EXCEPTION_DECISION') return 'needs'
+  }
+  return ''
+}
+
+function SummaryCard({
+  id,
+  label,
+  count,
+  active,
+  onSelect,
+}: {
+  id: string
+  label: string
+  count: number
+  active: boolean
+  onSelect: () => void
+}) {
+  return (
+    <button
+      type="button"
+      className={active ? 'dup-card dup-card-primary' : 'dup-card'}
+      aria-label={label}
+      aria-pressed={active}
+      aria-current={active ? 'true' : undefined}
+      data-summary-card={id}
+      onClick={onSelect}
+    >
+      {label}
+      <strong>{count}</strong>
+      {active ? <span className="dup-card-viewing">Viewing</span> : null}
+    </button>
+  )
+}
+
 const DECISION_TYPES: Array<{ id: string; label: string }> = [
   { id: '', label: 'All decision types' },
   { id: 'survivor', label: 'Survivor' },
@@ -546,6 +590,7 @@ export default function MergePlanningPanel({
   error,
   message,
   planState,
+  planComplexity,
   planQuery,
   planDecisionType,
   planSameClient,
@@ -558,6 +603,7 @@ export default function MergePlanningPanel({
   readyNextPair,
   limit,
   onPlanState,
+  onPlanComplexity,
   onPlanQuery,
   onDecisionType,
   onSameClient,
@@ -576,6 +622,7 @@ export default function MergePlanningPanel({
   error: string
   message: string
   planState: string
+  planComplexity: PlanComplexity
   planQuery: string
   planDecisionType: string
   planSameClient: string
@@ -588,6 +635,7 @@ export default function MergePlanningPanel({
   readyNextPair: MergePlanListRow | null
   limit: number
   onPlanState: (value: string) => void
+  onPlanComplexity: (value: PlanComplexity) => void
   onPlanQuery: (value: string) => void
   onDecisionType: (value: string) => void
   onSameClient: (value: string) => void
@@ -611,11 +659,21 @@ export default function MergePlanningPanel({
   const queueRef = useRef<HTMLDivElement>(null)
   const queueScrollRef = useRef(0)
   const detailRef = useRef<HTMLElement>(null)
+  const displayedPlans = useMemo(() => {
+    if (planState === 'NEEDS_EXCEPTION_DECISION' && planComplexity === 'simple') {
+      return planPage.plans.filter((row) => row.simple_decision || row.allow_quick_survivor)
+    }
+    if (planState === 'NEEDS_EXCEPTION_DECISION' && planComplexity === 'complex') {
+      return planPage.plans.filter((row) => row.complex_decision || row.workbench_mode === 'complex')
+    }
+    return planPage.plans
+  }, [planPage.plans, planState, planComplexity])
   const simpleCards = useMemo(
-    () => planPage.plans.filter((row) => row.allow_quick_survivor),
-    [planPage.plans],
+    () => displayedPlans.filter((row) => row.allow_quick_survivor),
+    [displayedPlans],
   )
   const selectedKey = selectedPlan?.pair_key || ''
+  const activeCard = activeSummaryCard(planState, planComplexity)
 
   useEffect(() => {
     if (selectedKey && typeof detailRef.current?.scrollIntoView === 'function') {
@@ -638,6 +696,16 @@ export default function MergePlanningPanel({
     onClose()
   }
 
+  function selectQueue(state: string, complexity: PlanComplexity = '') {
+    onPlanComplexity(complexity)
+    onPlanState(state)
+  }
+
+  function selectPlanQueue(state: string) {
+    onPlanComplexity('')
+    onPlanState(state)
+  }
+
   return (
     <div className="dup-planning" aria-label="Merge Planning">
       <h3>Merge Planning</h3>
@@ -651,30 +719,48 @@ export default function MergePlanningPanel({
         not execute a merge.
       </p>
       <div className="dup-cards" role="group" aria-label="Merge planning summary">
-        <button type="button" className="dup-card dup-card-primary" aria-label="Needs Decisions" onClick={() => onPlanState('NEEDS_EXCEPTION_DECISION')}>
-          Needs Decisions
-          <strong>{summary.needs_exception_decision || 0}</strong>
-        </button>
-        <button type="button" className="dup-card" aria-label="Simple Decisions" onClick={() => onPlanState('NEEDS_EXCEPTION_DECISION')}>
-          Simple Decisions
-          <strong>{summary.simple_decisions || 0}</strong>
-        </button>
-        <button type="button" className="dup-card" aria-label="Complex Decisions" onClick={() => onPlanState('NEEDS_EXCEPTION_DECISION')}>
-          Complex Decisions
-          <strong>{summary.complex_decisions || 0}</strong>
-        </button>
-        <button type="button" className="dup-card" aria-label="Ready for Review" onClick={() => onPlanState('READY_FOR_HUMAN_APPROVAL')}>
-          Ready for Review
-          <strong>{summary.ready_for_review || 0}</strong>
-        </button>
-        <button type="button" className="dup-card" aria-label="Not Safe" onClick={() => onPlanState('NOT_SAFE_TO_PLAN')}>
-          Not Safe
-          <strong>{summary.not_safe_to_plan || 0}</strong>
-        </button>
-        <button type="button" className="dup-card" aria-label="Stale" onClick={() => onPlanState('STALE')}>
-          Stale
-          <strong>{summary.stale || 0}</strong>
-        </button>
+        <SummaryCard
+          id="needs"
+          label="Needs Decisions"
+          count={summary.needs_exception_decision || 0}
+          active={activeCard === 'needs'}
+          onSelect={() => selectQueue('NEEDS_EXCEPTION_DECISION')}
+        />
+        <SummaryCard
+          id="simple"
+          label="Simple Decisions"
+          count={summary.simple_decisions || 0}
+          active={activeCard === 'simple'}
+          onSelect={() => selectQueue('NEEDS_EXCEPTION_DECISION', 'simple')}
+        />
+        <SummaryCard
+          id="complex"
+          label="Complex Decisions"
+          count={summary.complex_decisions || 0}
+          active={activeCard === 'complex'}
+          onSelect={() => selectQueue('NEEDS_EXCEPTION_DECISION', 'complex')}
+        />
+        <SummaryCard
+          id="ready"
+          label="Ready for Review"
+          count={summary.ready_for_review || 0}
+          active={activeCard === 'ready'}
+          onSelect={() => selectQueue('READY_FOR_HUMAN_APPROVAL')}
+        />
+        <SummaryCard
+          id="not_safe"
+          label="Not Safe"
+          count={summary.not_safe_to_plan || 0}
+          active={activeCard === 'not_safe'}
+          onSelect={() => selectQueue('NOT_SAFE_TO_PLAN')}
+        />
+        <SummaryCard
+          id="stale"
+          label="Stale"
+          count={summary.stale || 0}
+          active={activeCard === 'stale'}
+          onSelect={() => selectQueue('STALE')}
+        />
       </div>
       <div className="dup-toolbar">
         <button type="button" onClick={onPrepare} disabled={busy}>
@@ -694,7 +780,7 @@ export default function MergePlanningPanel({
         </label>
         <label>
           Plan queue
-          <select value={planState} onChange={(event) => onPlanState(event.target.value)}>
+          <select value={planState} onChange={(event) => selectPlanQueue(event.target.value)}>
             {PLAN_QUEUES.map((row) => (
               <option key={row.id || 'all'} value={row.id}>
                 {row.label}
@@ -725,10 +811,10 @@ export default function MergePlanningPanel({
       {error ? <p className="data-status data-status--error">{error}</p> : null}
       {message ? <p className="data-status">{message}</p> : null}
       <p className="queue-sub">
-        {planPage.total} merge plans · showing {planPage.plans.length} · {busy ? 'Loading…' : ''}
+        {planPage.total} merge plans · showing {displayedPlans.length} · {busy ? 'Loading…' : ''}
       </p>
       <div className="dup-workbench-queue" ref={queueRef}>
-        {planPage.plans.map((row, index) => {
+        {displayedPlans.map((row, index) => {
           const hatchOpen = hatch?.pairKey === row.pair_key
           const aLabel = identityFor(row, 'a')?.record_label || `${row.company_a_name} — Record ${row.company_a_id}`
           const bLabel = identityFor(row, 'b')?.record_label || `${row.company_b_name} — Record ${row.company_b_id}`

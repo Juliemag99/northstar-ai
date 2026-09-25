@@ -4285,8 +4285,20 @@ a.primary-btn:hover {
 }
 
 .dup-card-primary {
-  border-color: #c9a227;
+  border-color: #8a6d12;
   background: #fff8e5;
+  box-shadow: inset 4px 0 0 #8a6d12;
+  font-weight: 600;
+}
+
+.dup-card-viewing {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #5c4a10;
 }
 
 .dup-assessment,
