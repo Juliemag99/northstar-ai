@@ -4362,6 +4362,25 @@ a.primary-btn:hover {
   cursor: default;
 }
 
+.dup-queue-actions {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: #fff;
+  padding: 0.35rem 0 0.65rem;
+  margin: 0 0 0.65rem;
+  border-bottom: 1px solid #ececec;
+}
+
+.dup-queue-actions button {
+  font-weight: 700;
+}
+
+.dup-disposition label {
+  display: block;
+  margin: 0.35rem 0;
+}
+
 .dup-field-diff,
 .dup-compare.dup-field-diff {
   background: #fff3d6;

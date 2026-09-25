@@ -276,9 +276,9 @@ function IdentityBlock({
       <p>RN {identity?.master_rn_label || 'None'}</p>
       <p>Client(s): {clientNames}</p>
       {allRels.map((row, index) => (
-        <div key={`${row.ccr_id || row.client_id || index}`} className="dup-relationship">
-          <p>{relationshipDisplay(row)}</p>
-          <p>{assignedDisplay(row)}</p>
+        <div key={`${row.ccr_id || row.client_id || index}`} className="dup-relationship" data-queue-relationship="true">
+          <p className="dup-queue-status">{relationshipDisplay(row)}</p>
+          <p className="dup-queue-assigned">{assignedDisplay(row)}</p>
           {detailed ? (
             <>
               <FieldRow label="Hot" value={row.hot ? 'Hot' : 'Not Hot'} />
@@ -619,7 +619,7 @@ export default function MergePlanningPanel({
 
   useEffect(() => {
     if (selectedKey && typeof detailRef.current?.scrollIntoView === 'function') {
-      detailRef.current.scrollIntoView({ block: 'nearest' })
+      detailRef.current.scrollIntoView({ block: 'start', inline: 'nearest' })
     } else if (!selectedKey && queueRef.current) {
       queueRef.current.scrollTop = queueScrollRef.current
     }
@@ -738,6 +738,7 @@ export default function MergePlanningPanel({
               key={row.pair_key}
               className={`dup-workbench-card${row.simple_decision ? ' dup-workbench-simple' : ''}${open ? ' dup-workbench-card-open' : ''}`}
               aria-label={`${aLabel} vs ${bLabel}`}
+              data-queue-card={row.pair_key}
               tabIndex={0}
               onClick={() => openDetails(row)}
               onKeyDown={(event) => {
@@ -756,38 +757,15 @@ export default function MergePlanningPanel({
                 }
               }}
             >
-              <div className="dup-grid">
-                <IdentityBlock identity={row.company_a} fallbackName={row.company_a_name} fallbackId={row.company_a_id} />
-                <IdentityBlock identity={row.company_b} fallbackName={row.company_b_name} fallbackId={row.company_b_id} />
-              </div>
-              <p>
-                <strong>Exact decision needed:</strong> {row.decision_needed || row.plan_state_label}
-              </p>
-              {(row.decision_needed_all || []).length > 1 ? (
-                <ul>
-                  {row.decision_needed_all?.map((label) => (
-                    <li key={label}>{label}</li>
-                  ))}
-                </ul>
-              ) : null}
-              <p>
-                {row.plan_state_label} · {row.exception_count || 0} exception{(row.exception_count || 0) === 1 ? '' : 's'} ·
-                Same-client CCR {row.same_client_ccr_conflict ? 'Yes' : 'No'}
-              </p>
-              {row.workbench_mode === 'not_safe' ? (
-                <>
-                  <p className="dup-conflict">NOT SAFE TO PLAN</p>
-                  <p>{row.not_safe_reason}</p>
-                </>
-              ) : null}
-              <div className="dup-simple-actions" onClick={stopCardOpen} onKeyDown={stopCardOpen}>
-                <button type="button" onClick={() => openDetails(row)} disabled={busy}>
+              <div className="dup-simple-actions dup-queue-actions" onClick={stopCardOpen} onKeyDown={stopCardOpen}>
+                <button type="button" aria-label="REVIEW DETAILS" onClick={() => openDetails(row)}>
                   REVIEW DETAILS
                 </button>
                 {row.allow_quick_survivor ? (
                   <>
                     <button
                       type="button"
+                      aria-label={`KEEP RECORD ${row.company_a_id}`}
                       onClick={() => onSaveDecision(row, 'SURVIVOR_DECISION_REQUIRED', `SURVIVOR:${row.company_a_id}`)}
                       disabled={busy}
                     >
@@ -795,6 +773,7 @@ export default function MergePlanningPanel({
                     </button>
                     <button
                       type="button"
+                      aria-label={`KEEP RECORD ${row.company_b_id}`}
                       onClick={() => onSaveDecision(row, 'SURVIVOR_DECISION_REQUIRED', `SURVIVOR:${row.company_b_id}`)}
                       disabled={busy}
                     >
@@ -819,6 +798,30 @@ export default function MergePlanningPanel({
                   </>
                 ) : null}
               </div>
+              <div className="dup-grid">
+                <IdentityBlock identity={row.company_a} fallbackName={row.company_a_name} fallbackId={row.company_a_id} />
+                <IdentityBlock identity={row.company_b} fallbackName={row.company_b_name} fallbackId={row.company_b_id} />
+              </div>
+              <p>
+                <strong>Exact decision needed:</strong> {row.decision_needed || row.plan_state_label}
+              </p>
+              {(row.decision_needed_all || []).length > 1 ? (
+                <ul>
+                  {row.decision_needed_all?.map((label) => (
+                    <li key={label}>{label}</li>
+                  ))}
+                </ul>
+              ) : null}
+              <p>
+                {row.plan_state_label} · {row.exception_count || 0} exception{(row.exception_count || 0) === 1 ? '' : 's'} ·
+                Same-client CCR {row.same_client_ccr_conflict ? 'Yes' : 'No'}
+              </p>
+              {row.workbench_mode === 'not_safe' ? (
+                <>
+                  <p className="dup-conflict">NOT SAFE TO PLAN</p>
+                  <p>{row.not_safe_reason}</p>
+                </>
+              ) : null}
               {hatchOpen ? (
                 <HumanDispositionForm
                   busy={busy}
