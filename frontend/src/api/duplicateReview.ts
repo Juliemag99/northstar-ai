@@ -502,6 +502,95 @@ export type MergePlanListRow = {
   identity_concern?: boolean
   classification?: string
   human_disposition?: string
+  ready_for_review?: boolean
+  preservation_blocks_ready?: boolean
+  preservation_warnings?: string[]
+}
+
+export type PreservationPreviewRow = {
+  data_type: string
+  before: unknown
+  planned_action?: string
+  expected_after: unknown
+}
+
+export type PreservationPreview = {
+  preview_version?: string
+  planning_only?: boolean
+  merge_will_occur?: boolean
+  provisional_survivor?: boolean
+  table?: PreservationPreviewRow[]
+  leadmaster?: {
+    title?: string
+    record_a?: { company_id?: number; primary_rn?: string }
+    record_b?: { company_id?: number; primary_rn?: string }
+    future_plan?: string
+    never_drop_source_rn?: boolean
+    planned_result_count?: unknown
+    planned_rns?: string[]
+    identities?: Array<Record<string, unknown>>
+  }
+  contacts?: {
+    title?: string
+    before?: { record_a?: number; record_b?: number; total_source_rows?: number }
+    planned?: Record<string, unknown>
+    expected_after?: unknown
+    rows?: Array<Record<string, unknown>>
+    automatic_contacts?: Array<Record<string, unknown>>
+  }
+  ccrs?: {
+    title?: string
+    record_a?: WorkbenchRelationship[]
+    record_b?: WorkbenchRelationship[]
+    rows?: Array<Record<string, unknown>>
+    before?: number
+    expected_after?: unknown
+    planned_action?: string
+  }
+  notes?: {
+    title?: string
+    record_a?: unknown
+    record_b?: unknown
+    exact_normalized_duplicates?: unknown
+    unique_to_preserve?: unknown
+    expected_after?: unknown
+    planned_action?: string
+  }
+  activities?: {
+    title?: string
+    record_a?: unknown
+    record_b?: unknown
+    planned_action?: string
+    expected_after?: unknown
+    warning?: string
+  }
+  campaigns?: {
+    title?: string
+    record_a?: unknown
+    record_b?: unknown
+    planned_action?: string
+    expected_after?: unknown
+  }
+  aliases?: {
+    title?: string
+    record_a?: unknown
+    record_b?: unknown
+    source_canonical_as_alias?: boolean
+    source_canonical_name?: string
+    planned_action?: string
+    expected_after?: unknown
+  }
+  locations?: {
+    title?: string
+    record_a?: unknown
+    record_b?: unknown
+    planned_action?: string
+    expected_after?: unknown
+  }
+  warnings?: string[]
+  blocks_ready?: boolean
+  lines?: string[]
+  automatic_contacts?: Array<Record<string, unknown>>
 }
 
 export type MergePlanPage = {
@@ -546,10 +635,9 @@ export type MergePlanDetail = MergePlanListRow & {
   stale?: boolean
   no_merge_button?: boolean
   no_execute_merge?: boolean
-  preservation?: {
-    lines?: string[]
-    automatic_contacts?: Array<Record<string, unknown>>
-  }
+  preservation?: PreservationPreview
+  preservation_blocks_ready?: boolean
+  preservation_warnings?: string[]
   survivor_comparison?: {
     rows?: Array<{ label: string; company_a: unknown; company_b: unknown; different?: boolean }>
     survivor_reason?: string

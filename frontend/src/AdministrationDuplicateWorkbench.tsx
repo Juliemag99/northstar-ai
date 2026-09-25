@@ -4,6 +4,7 @@ import type {
   MergePlanException,
   MergePlanListRow,
   MergePlanSummary,
+  PreservationPreview,
   WorkbenchIdentity,
   WorkbenchRelationship,
 } from './api/duplicateReview'
@@ -44,6 +45,189 @@ const DECISION_TYPES: Array<{ id: string; label: string }> = [
   { id: 'location', label: 'Location' },
   { id: 'other', label: 'Other' },
 ]
+
+function previewCell(value: unknown) {
+  if (value === null || value === undefined || value === '') return '—'
+  return String(value)
+}
+
+function recordPhrase(ids: unknown, fallbackId?: number) {
+  const list = Array.isArray(ids) ? ids.filter((id) => id !== null && id !== undefined && id !== '') : []
+  if (!list.length && fallbackId) return `Record ${fallbackId}`
+  return list.map((id) => `Record ${id}`).join(' + ')
+}
+
+function namedItems(rows: unknown, keys: string[]) {
+  if (!Array.isArray(rows) || rows.length === 0) return 'None'
+  return rows
+    .map((row) => {
+      if (!row || typeof row !== 'object') return String(row)
+      const rec = row as Record<string, unknown>
+      return keys.map((key) => rec[key]).filter((value) => value !== null && value !== undefined && value !== '').join(' ') || previewCell(rec.label)
+    })
+    .join('; ')
+}
+
+function PreservationPanel({
+  preservation,
+  companyAId,
+  companyBId,
+}: {
+  preservation?: PreservationPreview
+  companyAId: number
+  companyBId: number
+}) {
+  const table = preservation?.table || []
+  const warnings = preservation?.warnings || []
+  const leadmaster = preservation?.leadmaster || {}
+  const contacts = preservation?.contacts || {}
+  const ccrs = preservation?.ccrs || {}
+  const notes = preservation?.notes || {}
+  const activities = preservation?.activities || {}
+  const campaigns = preservation?.campaigns || {}
+  const aliases = preservation?.aliases || {}
+  const locations = preservation?.locations || {}
+  return (
+    <section className="dup-preview">
+      <h4>WHAT NORTHSTAR WILL PRESERVE</h4>
+      <p className="queue-sub">
+        If this plan were eventually approved and executed, this is the data that would exist afterward.
+        Planning preview only — no merge will occur.
+      </p>
+      {warnings.length ? (
+        <div className="dup-preservation-warning" role="alert">
+          <p className="dup-conflict">PRESERVATION WARNING</p>
+          {warnings.map((warning) => (
+            <p key={warning}>{warning}</p>
+          ))}
+          <p>This pair cannot become Ready for Review until preservation warnings are resolved.</p>
+        </div>
+      ) : null}
+      <table className="dup-preserve-table">
+        <thead>
+          <tr>
+            <th>DATA TYPE</th>
+            <th>BEFORE</th>
+            <th>PLANNED ACTION</th>
+            <th>EXPECTED AFTER</th>
+          </tr>
+        </thead>
+        <tbody>
+          {table.map((row) => (
+            <tr key={row.data_type}>
+              <th scope="row">{row.data_type}</th>
+              <td>{previewCell(row.before)}</td>
+              <td>{previewCell(row.planned_action)}</td>
+              <td>{previewCell(row.expected_after)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <h5>{String(leadmaster.title || 'LEADMASTER / SOURCE IDENTITIES')}</h5>
+      <p>
+        Record {previewCell(leadmaster.record_a?.company_id || companyAId)} Primary RN:{' '}
+        {previewCell(leadmaster.record_a?.primary_rn)}
+      </p>
+      <p>
+        Record {previewCell(leadmaster.record_b?.company_id || companyBId)} Primary RN:{' '}
+        {previewCell(leadmaster.record_b?.primary_rn)}
+      </p>
+      <p>Future merge plan: {previewCell(leadmaster.future_plan)}</p>
+      <p>
+        Planned result: {previewCell(leadmaster.planned_result_count)} traceable LeadMaster identities
+        {(leadmaster.planned_rns || []).length ? `: ${(leadmaster.planned_rns || []).join(', ')}` : ''}
+      </p>
+      {(leadmaster.identities || []).map((ident, index) => (
+        <p key={`${String(ident.source_system || '')}-${String(ident.source_record_no || index)}`}>
+          {previewCell(ident.source_system)} {previewCell(ident.source_record_no)}
+          {ident.label ? ` · ${String(ident.label)}` : ''}
+          {ident.treatment ? ` — ${String(ident.treatment)}` : ''}
+        </p>
+      ))}
+      <h5>{String(contacts.title || 'CONTACTS')}</h5>
+      <p>
+        Before: Record {companyAId}: {previewCell(contacts.before?.record_a)} · Record {companyBId}:{' '}
+        {previewCell(contacts.before?.record_b)} · Total source rows: {previewCell(contacts.before?.total_source_rows)}
+      </p>
+      <p>
+        Planned: {previewCell(contacts.planned?.exact_consolidations)} exact contact consolidation ·{' '}
+        {previewCell(contacts.planned?.unique_preserved)} unique preserved
+        {Number(contacts.planned?.decision_required || 0) ? ' · contact decision required' : ''}
+      </p>
+      {(contacts.rows || []).map((row, index) => (
+        <div key={index} className="dup-preserve-item">
+          <strong>{previewCell(row.name || row.source_name || row.survivor_name)}</strong>
+          <p>
+            {recordPhrase(row.record_ids, typeof row.company_id === 'number' ? row.company_id : undefined)}
+            {row.title ? ` · ${String(row.title)}` : ''}
+            {row.phone ? ` · ${String(row.phone)}${row.phone_extension ? ` x${String(row.phone_extension)}` : ''}` : ''}
+          </p>
+          <p>→ {previewCell(row.treatment)}</p>
+          {String(row.treatment || '').startsWith('EXACT') ? <p>→ 1 resulting contact</p> : null}
+        </div>
+      ))}
+      <p>
+        Expected future result:{' '}
+        {contacts.expected_after === 'Pending decision' ? 'Pending contact decision' : previewCell(contacts.expected_after)}
+      </p>
+      <h5>{String(ccrs.title || 'CLIENT RELATIONSHIPS')}</h5>
+      <p>
+        Record {companyAId}: {namedItems(ccrs.record_a, ['display', 'assigned_user_name'])}
+      </p>
+      <p>
+        Record {companyBId}: {namedItems(ccrs.record_b, ['display', 'assigned_user_name'])}
+      </p>
+      {(ccrs.rows || []).map((row, index) => (
+        <div key={String(row.client_id || index)} className="dup-preserve-item">
+          <strong>{previewCell(row.client_name || row.client_code)}</strong>
+          {row.fields && typeof row.fields === 'object'
+            ? Object.entries(row.fields as Record<string, Record<string, unknown>>).map(([field, values]) => (
+                <p key={field}>
+                  {field}: A/source {previewCell(values.source)} · B/survivor {previewCell(values.survivor)} ·{' '}
+                  {previewCell(values.action)}
+                </p>
+              ))
+            : null}
+          <p>PLANNED RESULT: {previewCell(row.planned_result)}</p>
+        </div>
+      ))}
+      <p>Expected future result: {previewCell(ccrs.expected_after)}</p>
+      <h5>{String(notes.title || 'NOTES')}</h5>
+      <p>
+        Record {companyAId}: {previewCell(notes.record_a)} · Record {companyBId}: {previewCell(notes.record_b)}
+      </p>
+      <p>Exact/normalized duplicates to collapse: {previewCell(notes.exact_normalized_duplicates)}</p>
+      <p>Unique notes to preserve: {previewCell(notes.unique_to_preserve)}</p>
+      <p>Expected future result: {previewCell(notes.expected_after)}</p>
+      <h5>{String(activities.title || 'ACTIVITIES / HISTORY')}</h5>
+      <p>
+        Record {companyAId} activities/history: {previewCell(activities.record_a)} · Record {companyBId}{' '}
+        activities/history: {previewCell(activities.record_b)}
+      </p>
+      <p>Planned preservation: {previewCell(activities.planned_action)}</p>
+      <p>Expected future result: {previewCell(activities.expected_after)}</p>
+      {activities.warning ? <p className="dup-conflict">{previewCell(activities.warning)}</p> : null}
+      <h5>{String(campaigns.title || 'CAMPAIGNS')}</h5>
+      <p>Record {companyAId}: {namedItems(campaigns.record_a, ['campaign_name', 'campaign_id'])}</p>
+      <p>Record {companyBId}: {namedItems(campaigns.record_b, ['campaign_name', 'campaign_id'])}</p>
+      <p>{previewCell(campaigns.planned_action)}</p>
+      <p>Expected future result: {previewCell(campaigns.expected_after)}</p>
+      <h5>{String(aliases.title || 'ALIASES')}</h5>
+      <p>Record {companyAId}: {namedItems(aliases.record_a, ['label', 'alias_name'])}</p>
+      <p>Record {companyBId}: {namedItems(aliases.record_b, ['label', 'alias_name'])}</p>
+      {aliases.source_canonical_as_alias ? (
+        <p>Source canonical name preserved as alias: {previewCell(aliases.source_canonical_name)}</p>
+      ) : null}
+      <p>{previewCell(aliases.planned_action)}</p>
+      <p>Expected future result: {previewCell(aliases.expected_after)}</p>
+      <h5>{String(locations.title || 'LOCATIONS')}</h5>
+      <p>Record {companyAId}: {namedItems(locations.record_a, ['label', 'location_name', 'city', 'state'])}</p>
+      <p>Record {companyBId}: {namedItems(locations.record_b, ['label', 'location_name', 'city', 'state'])}</p>
+      <p>{previewCell(locations.planned_action)}</p>
+      <p>Expected future result: {previewCell(locations.expected_after)}</p>
+    </section>
+  )
+}
 
 function FieldRow({ label, value, emphasize }: { label: string; value: unknown; emphasize?: boolean }) {
   return (
@@ -663,7 +847,7 @@ export default function MergePlanningPanel({
           Next
         </button>
       </div>
-      {selectedPlan?.ready_for_review || selectedPlan?.plan_state === 'READY_FOR_HUMAN_APPROVAL' ? (
+      {selectedPlan?.ready_for_review ? (
         <div className="dup-ready" role="status">
           <h3>READY FOR REVIEW</h3>
           <p>All planning exceptions are resolved. This is not merge approval and does not execute a merge.</p>
@@ -776,27 +960,11 @@ export default function MergePlanningPanel({
               </div>
             ))}
           </section>
-          <section>
-            <h4>WHAT NORTHSTAR WILL PRESERVE</h4>
-            <ul>
-              {(selectedPlan.preservation?.lines || []).map((line) => (
-                <li key={line}>{line}</li>
-              ))}
-            </ul>
-            {(selectedPlan.preservation?.automatic_contacts || []).length ? (
-              <>
-                <h5>NorthStar will handle automatically in future merge</h5>
-                <ul>
-                  {(selectedPlan.preservation?.automatic_contacts || []).map((row, index) => (
-                    <li key={index}>
-                      {String(row.survivor_name || row.source_name || 'Exact duplicate contact')} — SAFE CONTACT
-                      CONSOLIDATION
-                    </li>
-                  ))}
-                </ul>
-              </>
-            ) : null}
-          </section>
+          <PreservationPanel
+            preservation={selectedPlan.preservation}
+            companyAId={selectedPlan.company_a_id}
+            companyBId={selectedPlan.company_b_id}
+          />
           <section>
             <h4>Decision history</h4>
             {(selectedPlan.decision_history || []).length === 0 ? <p>No plan decisions yet.</p> : null}

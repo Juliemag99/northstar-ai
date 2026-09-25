@@ -469,6 +469,108 @@ function identity(id: number, name: string, extra: Record<string, unknown> = {})
   }
 }
 
+function preservationFixture(kind: 'kelderman' | 'edl' | 'bw') {
+  if (kind === 'bw') {
+    return {
+      preview_version: 'DS14B_PREVIEW_V1',
+      planning_only: true,
+      table: [
+        { data_type: 'LeadMaster IDs', before: 2, planned_action: 'Preserve both', expected_after: 2 },
+        { data_type: 'Locations', before: 2, planned_action: 'MULTI-LOCATION CONCERN', expected_after: 'Pending decision' },
+      ],
+      leadmaster: {
+        title: 'LEADMASTER / SOURCE IDENTITIES',
+        record_a: { company_id: 151, primary_rn: '111' },
+        record_b: { company_id: 212, primary_rn: '222' },
+        planned_result_count: 2,
+        planned_rns: ['111', '222'],
+        future_plan: 'Preserve both when safe',
+      },
+      contacts: { before: { record_a: 0, record_b: 0, total_source_rows: 0 }, rows: [], expected_after: 0, planned: {} },
+      warnings: ['Possible multi-location identity.'],
+      blocks_ready: true,
+      lines: ['Locations: 2 → Pending decision'],
+    }
+  }
+  if (kind === 'edl') {
+    return {
+      preview_version: 'DS14B_PREVIEW_V1',
+      planning_only: true,
+      table: [
+        { data_type: 'LeadMaster IDs', before: 2, planned_action: 'Preserve both', expected_after: 2 },
+        { data_type: 'Contacts', before: 3, planned_action: 'contact decision required', expected_after: 'Pending decision' },
+        { data_type: 'Client relationships', before: 2, planned_action: 'Pending client-field decisions', expected_after: 'Pending decision' },
+      ],
+      leadmaster: {
+        title: 'LEADMASTER / SOURCE IDENTITIES',
+        record_a: { company_id: 22, primary_rn: '99202' },
+        record_b: { company_id: 28, primary_rn: '101620' },
+        planned_result_count: 2,
+        planned_rns: ['99202', '101620'],
+        future_plan: 'Preserve both LeadMaster RNs as source identities',
+      },
+      contacts: {
+        before: { record_a: 2, record_b: 1, total_source_rows: 3 },
+        planned: { exact_consolidations: 0, unique_preserved: 0, decision_required: 1 },
+        expected_after: 'Pending decision',
+        rows: [
+          { name: 'Pat One', record_ids: [22, 28], treatment: 'DECISION REQUIRED' },
+        ],
+        automatic_contacts: [],
+      },
+      ccrs: {
+        title: 'CLIENT RELATIONSHIPS',
+        rows: [{ client_name: 'Carmeco', planned_result: 'Pending decision', fields: { status: { source: 'New', survivor: 'Left Message', action: 'STATUS_DECISION_REQUIRED' } } }],
+        expected_after: 'Pending decision',
+      },
+      warnings: [],
+      blocks_ready: false,
+      lines: ['Contacts: 3 → Pending decision'],
+    }
+  }
+  return {
+    preview_version: 'DS14B_PREVIEW_V1',
+    planning_only: true,
+    table: [
+      { data_type: 'LeadMaster IDs', before: 2, planned_action: 'Preserve both', expected_after: 2 },
+      { data_type: 'Contacts', before: 3, planned_action: '1 exact contact consolidation · 1 unique preserved', expected_after: 2 },
+      { data_type: 'Client relationships', before: 2, planned_action: 'Preserve unique clients; consolidate same-client CCR', expected_after: 1 },
+    ],
+    leadmaster: {
+      title: 'LEADMASTER / SOURCE IDENTITIES',
+      record_a: { company_id: 45, primary_rn: '138431' },
+      record_b: { company_id: 97, primary_rn: '253832' },
+      planned_result_count: 2,
+      planned_rns: ['138431', '253832'],
+      future_plan: 'Chosen survivor RN becomes/continues as primary where applicable; the non-primary RN is preserved as a source identity',
+    },
+    contacts: {
+      before: { record_a: 2, record_b: 1, total_source_rows: 3 },
+      planned: { exact_consolidations: 1, unique_preserved: 1, decision_required: 0 },
+      expected_after: 2,
+      rows: [
+        {
+          name: 'Gary L Kelderman',
+          record_ids: [45, 97],
+          title: 'President',
+          phone: '(641) 673-0469',
+          treatment: 'EXACT / SAME PERSON — FUTURE CONSOLIDATION',
+        },
+        { name: 'Debbie Unknown', record_ids: [45], phone: '(641) 673-0469', phone_extension: '105', treatment: 'UNIQUE — PRESERVE' },
+      ],
+      automatic_contacts: [{ name: 'Gary L Kelderman' }],
+    },
+    ccrs: {
+      title: 'CLIENT RELATIONSHIPS',
+      rows: [{ client_name: 'Carmeco', planned_result: 'same values → preserve / consolidate to one relationship' }],
+      expected_after: 1,
+    },
+    warnings: [],
+    blocks_ready: false,
+    lines: ['LeadMaster IDs: 2 → 2', 'Contacts: 3 → 2'],
+  }
+}
+
   it('shows workbench identity, exception labels, simple survivor, and complex EDL without merge execution', async () => {
     vi.mocked(duplicateReview.fetchDuplicateCandidates).mockResolvedValue({
       planning_only: true,
@@ -724,7 +826,7 @@ function identity(id: number, name: string, extra: Record<string, unknown> = {})
         why: ['normalized name match'],
         concern_labels: ['phone conflict'],
       },
-      preservation: { lines: ['2 LeadMaster/source identities', '3 contacts'], automatic_contacts: [{ survivor_name: 'Pat Exact' }] },
+      preservation: preservationFixture('edl'),
       survivor_comparison: {
         rows: [
           { label: 'Phone', company_a: '(920) 347-0143', company_b: '(920) 336-7744', different: true },
@@ -794,7 +896,7 @@ function identity(id: number, name: string, extra: Record<string, unknown> = {})
           merge_will_occur: false,
           plan_only_warning: 'PLANNING ONLY — NO MERGE WILL OCCUR',
           exceptions: [],
-          preservation: { lines: [] },
+          preservation: preservationFixture('bw'),
           not_safe_reason: 'Possible multi-location identity.',
         }
       }
@@ -881,8 +983,11 @@ function identity(id: number, name: string, extra: Record<string, unknown> = {})
     expect(screen.getByText('NorthStar Automated Assessment')).toBeTruthy()
     expect(screen.getByText('Human Decision')).toBeTruthy()
     expect(screen.getByText(/WHAT NORTHSTAR WILL PRESERVE/)).toBeTruthy()
-    expect(screen.getByText(/2 LeadMaster\/source identities/)).toBeTruthy()
-    expect(screen.getByText(/NorthStar will handle automatically in future merge/)).toBeTruthy()
+    expect(screen.getByText('DATA TYPE')).toBeTruthy()
+    expect(screen.getByText('EXPECTED AFTER')).toBeTruthy()
+    expect(screen.getAllByText(/Pending decision/).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/99202/).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/101620/).length).toBeGreaterThan(0)
     expect(screen.getByText(/Keep "Hot Prospect"/)).toBeTruthy()
     expect(screen.getByText(/MASTER \/ PRIMARY RN AFTER FUTURE MERGE/)).toBeTruthy()
     expect(screen.getByLabelText('Decision for STATUS_DECISION_REQUIRED:1')).toBeTruthy()
@@ -894,9 +999,13 @@ function identity(id: number, name: string, extra: Record<string, unknown> = {})
     expect(screen.getByRole('button', { name: 'NEXT NEEDS-DECISION PAIR' })).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Replan' }))
     await waitFor(() => expect(duplicateReview.replanMergePlan).toHaveBeenCalled())
+    const planCallCount = vi.mocked(duplicateReview.fetchMergePlans).mock.calls.length
     fireEvent.click(screen.getByRole('button', { name: 'Not Safe' }))
+    await waitFor(() => expect(vi.mocked(duplicateReview.fetchMergePlans).mock.calls.length).toBeGreaterThan(planCallCount))
     fireEvent.click(within(screen.getByRole('article', { name: /Record 151 vs .*Record 212/ })).getByRole('button', { name: 'REVIEW DETAILS' }))
-    await waitFor(() => expect(screen.getAllByText('NOT SAFE TO PLAN').length).toBeGreaterThan(0))
+    await waitFor(() => expect(duplicateReview.fetchMergePlan).toHaveBeenCalledWith(151, 212))
+    expect(await screen.findByText('PRESERVATION WARNING')).toBeTruthy()
+    expect(screen.getAllByText('NOT SAFE TO PLAN').length).toBeGreaterThan(0)
     expect(screen.getAllByText(/Possible multi-location identity/).length).toBeGreaterThan(0)
     expect(screen.queryByRole('button', { name: /Execute Merge/i })).toBeNull()
     expect(screen.queryByRole('button', { name: /Merge Now/i })).toBeNull()
@@ -1031,7 +1140,7 @@ function identity(id: number, name: string, extra: Record<string, unknown> = {})
       plan_only_warning: 'PLANNING ONLY — NO MERGE WILL OCCUR',
       human_review: a === 22 ? { disposition: 'MERGE_CANDIDATE', proposed_survivor_company_id: 22, proposed_source_company_id: 28 } : {},
       automated_assessment: { classification: 'HIGH_CONFIDENCE_DUPLICATE', why: ['name match'], concern_labels: ['phone conflict'] },
-      preservation: { lines: ['2 LeadMaster/source identities'] },
+      preservation: preservationFixture(a === 45 ? 'kelderman' : a === 151 ? 'bw' : 'edl'),
       exceptions: a === 22
         ? [
             { exception_key: 'FIELD_CONFLICT_REVIEW:phone', code: 'FIELD_CONFLICT_REVIEW', decision_needed: 'Resolve phone conflict', why_you: 'phones differ', choices: [], details: {} },
@@ -1074,6 +1183,13 @@ function identity(id: number, name: string, extra: Record<string, unknown> = {})
     expect(duplicateReview.saveMergePlanDecision).not.toHaveBeenCalled()
     expect(screen.getByText('PAIR IDENTITY')).toBeTruthy()
     expect(screen.getByText('Pat Buyer · Buyer · a@example.com · 111 x12 · RN 138431')).toBeTruthy()
+    expect(screen.getByText(/WHAT NORTHSTAR WILL PRESERVE/)).toBeTruthy()
+    expect(screen.getByText(/Record 45 Primary RN:\s*138431/)).toBeTruthy()
+    expect(screen.getByText(/Record 97 Primary RN:\s*253832/)).toBeTruthy()
+    expect(screen.getByText('Gary L Kelderman')).toBeTruthy()
+    expect(screen.getByText('Debbie Unknown')).toBeTruthy()
+    expect(screen.getByText(/EXACT \/ SAME PERSON/)).toBeTruthy()
+    expect(screen.getByText(/UNIQUE — PRESERVE/)).toBeTruthy()
     fireEvent.click(screen.getAllByRole('button', { name: 'CLOSE DETAILS' })[0])
     await waitFor(() => expect(screen.queryByRole('article', { name: 'Exception workbench' })).toBeNull())
     expect(screen.getByLabelText('Search plans')).toBeTruthy()

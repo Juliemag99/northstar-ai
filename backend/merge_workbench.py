@@ -32,7 +32,12 @@ from merge_plan import (
     ACTION_PRESERVE_ALIAS,
     ACTION_PRESERVE_IDENTITY,
     ACTION_PRESERVE_LOCATION,
+    CCR_DECISION,
+    CCR_SAFE,
+    CONTACT_CONFLICT,
     CONTACT_EXACT,
+    CONTACT_POSSIBLE,
+    CONTACT_PRESERVE,
     EX_CAMPAIGN,
     EX_CONTACT,
     EX_FIELD,
@@ -55,6 +60,12 @@ from merge_plan import (
     UI_STATE,
     _as_int,
     _campaigns_for_company,
+    _ccr_plan,
+    _contact_plan,
+    _location_plan,
+    _plan_aliases_safe,
+    _plan_campaigns_safe,
+    _plan_identities_safe,
     _company_row,
     _count_where,
     _existing_plan_row,
@@ -70,9 +81,10 @@ from merge_plan import (
     replan_merge_plan,
     save_merge_plan_decision,
 )
+from company_merges import plan_company_merge
 from models import NorthStarUser
 
-WORKBENCH_VERSION = "DS14_WORKBENCH_V1"
+WORKBENCH_VERSION = "DS14B_WORKBENCH_V1"
 
 HUMAN_DISPOSITIONS = frozenset({DISPOSITION_MULTI, DISPOSITION_NOT, DISPOSITION_RESEARCH})
 
@@ -750,64 +762,500 @@ def _sort_rank(mode: str) -> int:
     return {"simple": 0, "complex": 1, "not_safe": 2, "ready": 3, "stale": 4, "other": 5}.get(mode, 9)
 
 
-def preservation_summary(plan: dict[str, Any]) -> dict[str, Any]:
-    identities = plan.get("identities") or {}
-    contacts = plan.get("contacts") or {}
-    aliases = plan.get("aliases") or {}
-    campaigns = plan.get("campaigns") or {}
-    history = plan.get("history") or {}
-    source_h = history.get("source") or {}
-    survivor_h = history.get("survivor") or {}
-    ident_count = int(identities.get("move_identities") or 0) + int(
-        identities.get("already_on_survivor") or 0
-    )
-    if identities.get("preserve_source_rn_as_identity") or identities.get("never_drop_source_rn"):
-        ident_count = max(ident_count, 1)
-        if identities.get("source_master_rn") and identities.get("survivor_master_rn"):
-            ident_count = max(ident_count, 2)
-    contact_count = int(contacts.get("unique_to_preserve") or 0) + int(
-        contacts.get("exact_duplicates") or 0
-    ) + int(contacts.get("possible_duplicates") or 0) + int(contacts.get("conflicts") or 0)
-    notes = int(source_h.get("notes") or 0) + int(survivor_h.get("notes") or 0)
-    activities = int(source_h.get("activities") or 0) + int(survivor_h.get("activities") or 0)
-    alias_count = int(aliases.get("unique_to_preserve") or 0)
-    location_count = int((plan.get("locations") or {}).get("additional_source_locations") or 0)
-    if not location_count:
-        location_count = len((plan.get("locations") or {}).get("comparisons") or [])
-    campaign_count = int(campaigns.get("unique_memberships_to_preserve") or 0)
-    lines = []
-    if ident_count:
-        lines.append(f"{ident_count} LeadMaster/source identities")
-    if contact_count:
-        lines.append(f"{contact_count} contacts")
-    if notes:
-        lines.append(f"{notes} notes")
-    if activities:
-        lines.append(f"{activities} activities")
-    if alias_count:
-        lines.append(f"{alias_count} aliases")
-    if location_count:
-        lines.append(f"{location_count} additional location{'s' if location_count != 1 else ''}")
-    if campaign_count:
-        lines.append(f"{campaign_count} campaign memberships")
-    if not lines:
-        lines.append("Existing survivor data plus unique source history")
+PENDING = "Pending decision"
+
+
+def _pending_codes(plan: dict[str, Any]) -> set[str]:
+    return {_blank(row.get("code")) for row in (plan.get("exceptions") or [])}
+
+
+def _preview_orientation(plan: dict[str, Any]) -> tuple[int, int, bool]:
+    a_id = int(plan["company_a_id"])
+    b_id = int(plan["company_b_id"])
+    survivor = _as_int(plan.get("survivor_company_id"))
+    source = _as_int(plan.get("source_company_id"))
+    if survivor in {a_id, b_id} and source in {a_id, b_id} and survivor != source:
+        return int(survivor), int(source), False
+    return a_id, b_id, True
+
+
+def _summary_row(data_type: str, before: object, action: str, after: object) -> dict[str, Any]:
     return {
-        "identities": ident_count,
-        "contacts": contact_count,
-        "notes": notes,
-        "activities": activities,
-        "aliases": alias_count,
-        "locations": location_count,
-        "campaigns": campaign_count,
-        "lines": lines,
-        "automatic_contacts": [
-            row
-            for row in (contacts.get("rows") or [])
-            if row.get("consolidation") == "SAFE_CONTACT_CONSOLIDATION"
-            or row.get("classification") == CONTACT_EXACT
-        ],
+        "data_type": data_type,
+        "before": before,
+        "planned_action": action,
+        "expected_after": after,
     }
+
+
+def _contact_treatment(row: dict[str, Any]) -> str:
+    klass = _blank(row.get("classification"))
+    if klass == CONTACT_EXACT or row.get("consolidation") == "SAFE_CONTACT_CONSOLIDATION":
+        return "EXACT / SAME PERSON — FUTURE CONSOLIDATION"
+    if klass == CONTACT_CONFLICT:
+        return "CONFLICT — REVIEW REQUIRED"
+    if klass == CONTACT_POSSIBLE:
+        return "DECISION REQUIRED"
+    if klass == CONTACT_PRESERVE and row.get("survivor_contact_id"):
+        return "KEEP BOTH"
+    return "UNIQUE — PRESERVE"
+
+
+def preservation_preview(conn: sqlite3.Connection, plan: dict[str, Any]) -> dict[str, Any]:
+    """Read-only before / planned / after view of existing DS-13 planner output."""
+    a = plan.get("company_a") or {}
+    b = plan.get("company_b") or {}
+    a_id = int(plan["company_a_id"])
+    b_id = int(plan["company_b_id"])
+    survivor_id, source_id, provisional = _preview_orientation(plan)
+    pending = _pending_codes(plan)
+    warnings: list[str] = []
+    merge = plan_company_merge(conn, source_id, survivor_id)
+    survivor_row = _company_row(conn, survivor_id)
+    source_row = _company_row(conn, source_id)
+    identities_plan, _id_ex = _plan_identities_safe(merge, survivor_row, source_row)
+    contacts_plan, _c_ex = _contact_plan(merge, {})
+    if plan.get("contacts") and (plan.get("contacts") or {}).get("rows") and not provisional:
+        contacts_plan = plan.get("contacts") or contacts_plan
+    aliases_plan = _plan_aliases_safe(merge, _blank(source_row.get("company_name")))
+    locations_plan, _loc_ex, loc_not_safe = _location_plan(merge, survivor_row, source_row, {})
+    campaigns_plan, _camp_ex = _plan_campaigns_safe(merge, {})
+    ccr_rows = plan.get("ccrs") or []
+    if not ccr_rows:
+        ccr_rows, _ccr_ex = _ccr_plan(conn, source_id, survivor_id, {})
+    notes_plan = merge.get("notes") or {}
+    history_plan = merge.get("history_workflow") or {}
+
+    a_rn = _blank(a.get("master_rn"))
+    if not a_rn or a_rn == "None":
+        a_rn = _blank(a.get("master_rn_label"))
+        if a_rn == "None":
+            a_rn = ""
+    b_rn = _blank(b.get("master_rn"))
+    if not b_rn or b_rn == "None":
+        b_rn = _blank(b.get("master_rn_label"))
+        if b_rn == "None":
+            b_rn = ""
+    unique_rns = list(dict.fromkeys(rn for rn in (a_rn, b_rn) if rn))
+    never_drop = bool(identities_plan.get("never_drop_source_rn"))
+    if len(unique_rns) >= 2 and not never_drop:
+        warnings.append(
+            "LeadMaster RN preservation gap: both records have RNs, but the current planner "
+            "does not guarantee both are preserved as identities."
+        )
+    if identities_plan.get("incompatible") or plan.get("identity_concern"):
+        warnings.append("Source identities cannot be combined safely.")
+    if never_drop and unique_rns:
+        rn_after: object = len(unique_rns)
+        rn_action = (
+            "Chosen survivor RN becomes/continues as primary where applicable; "
+            "the non-primary RN is preserved as a source identity"
+            if len(unique_rns) >= 2
+            else "Preserve the LeadMaster RN as a traceable identity"
+        )
+    elif unique_rns:
+        rn_after = len(unique_rns)
+        rn_action = "Keep existing identity"
+    else:
+        rn_after = 0
+        rn_action = "No LeadMaster RN on either record"
+    identity_rows = []
+    for ident in (a.get("identities") or []) + (b.get("identities") or []):
+        identity_rows.append(
+            {
+                "source_system": ident.get("source_system"),
+                "source_record_no": ident.get("source_record_no"),
+                "label": ident.get("label"),
+                "treatment": "Existing source identity — preserve",
+            }
+        )
+    for row in identities_plan.get("move") or []:
+        identity_rows.append(
+            {
+                "source_system": row.get("source_system"),
+                "source_record_no": row.get("source_record_no"),
+                "label": row.get("source_company_name") or row.get("source_record_no"),
+                "treatment": row.get("plan") or "MOVE identity to survivor (do not drop RN)",
+            }
+        )
+    listed_rns = {_blank(row.get("source_record_no")) for row in identity_rows}
+    for company_id, rn in ((a_id, a_rn), (b_id, b_rn)):
+        if rn and rn not in listed_rns:
+            identity_rows.append(
+                {
+                    "source_system": "LEADMASTER",
+                    "source_record_no": rn,
+                    "label": f"Record {company_id} primary RN {rn}",
+                    "treatment": "Preserve as a traceable LeadMaster identity",
+                }
+            )
+            listed_rns.add(rn)
+    rn_section = {
+        "title": "LEADMASTER / SOURCE IDENTITIES",
+        "record_a": {"company_id": a_id, "primary_rn": a_rn or "None"},
+        "record_b": {"company_id": b_id, "primary_rn": b_rn or "None"},
+        "future_plan": rn_action,
+        "never_drop_source_rn": never_drop,
+        "planned_result_count": rn_after,
+        "planned_rns": unique_rns,
+        "identities": identity_rows,
+        "provisional_survivor": provisional,
+    }
+
+    a_contacts = list(a.get("contacts") or [])
+    b_contacts = list(b.get("contacts") or [])
+    by_contact: dict[int, dict[str, Any]] = {}
+    for item in a_contacts + b_contacts:
+        cid = _as_int(item.get("id"))
+        if cid:
+            by_contact[cid] = item
+    planner_rows = list(contacts_plan.get("rows") or [])
+    classified: set[int] = set()
+    contact_display = []
+    exact_n = unique_n = keep_n = pending_n = 0
+    for row in planner_rows:
+        treatment = _contact_treatment(row)
+        src_id = _as_int(row.get("source_contact_id"))
+        tgt_id = _as_int(row.get("survivor_contact_id"))
+        if src_id:
+            classified.add(src_id)
+        if tgt_id:
+            classified.add(tgt_id)
+        if treatment.startswith("EXACT"):
+            exact_n += 1
+        elif treatment == "KEEP BOTH":
+            keep_n += 1
+        elif treatment.startswith("UNIQUE"):
+            unique_n += 1
+        else:
+            pending_n += 1
+        src_snap = by_contact.get(src_id or 0) or {}
+        tgt_snap = by_contact.get(tgt_id or 0) or {}
+        names = [name for name in (_blank(row.get("source_name")) or _blank(src_snap.get("name")), _blank(row.get("survivor_name")) or _blank(tgt_snap.get("name"))) if name]
+        display_name = names[0] if names else "Contact"
+        contact_display.append(
+            {
+                "source_contact_id": src_id,
+                "survivor_contact_id": tgt_id,
+                "source_company_id": source_id,
+                "survivor_company_id": survivor_id,
+                "record_ids": [rid for rid in (source_id if src_id else None, survivor_id if tgt_id else None) if rid],
+                "name": display_name,
+                "source_name": row.get("source_name") or src_snap.get("name"),
+                "survivor_name": row.get("survivor_name") or tgt_snap.get("name"),
+                "title": src_snap.get("title") or tgt_snap.get("title"),
+                "phone": src_snap.get("phone") or tgt_snap.get("phone"),
+                "phone_extension": src_snap.get("phone_extension") or tgt_snap.get("phone_extension"),
+                "classification": row.get("classification"),
+                "treatment": treatment,
+                "reasons": row.get("reasons") or [],
+                "resulting_contacts": 1 if treatment.startswith("EXACT") else (2 if treatment == "KEEP BOTH" else 1),
+            }
+        )
+    for company_id, rows in ((a_id, a_contacts), (b_id, b_contacts)):
+        for item in rows:
+            cid = _as_int(item.get("id"))
+            if cid and cid in classified:
+                continue
+            unique_n += 1
+            if cid:
+                classified.add(cid)
+            contact_display.append(
+                {
+                    "company_id": company_id,
+                    "record_ids": [company_id],
+                    "name": item.get("name"),
+                    "source_name": item.get("name") if company_id == source_id else None,
+                    "survivor_name": item.get("name") if company_id == survivor_id else None,
+                    "title": item.get("title"),
+                    "phone": item.get("phone"),
+                    "phone_extension": item.get("phone_extension"),
+                    "master_rn_label": item.get("master_rn_label"),
+                    "classification": CONTACT_PRESERVE,
+                    "treatment": "UNIQUE — PRESERVE",
+                    "reasons": ["unique_contact"],
+                    "resulting_contacts": 1,
+                }
+            )
+    before_contacts = len(a_contacts) + len(b_contacts)
+    if pending_n or EX_CONTACT in pending:
+        contact_after: object = PENDING
+        contact_action = (
+            f"{exact_n} exact contact consolidation · {unique_n} unique preserved · contact decision required"
+        )
+    else:
+        contact_after = before_contacts - exact_n
+        contact_action = f"{exact_n} exact contact consolidation · {unique_n} unique preserved"
+    contact_section = {
+        "title": "CONTACTS",
+        "before": {"record_a": len(a_contacts), "record_b": len(b_contacts), "total_source_rows": before_contacts},
+        "planned": {
+            "exact_consolidations": exact_n,
+            "unique_preserved": unique_n,
+            "keep_both": keep_n,
+            "decision_required": pending_n,
+        },
+        "expected_after": contact_after,
+        "rows": contact_display,
+        "automatic_contacts": [row for row in contact_display if str(row.get("treatment") or "").startswith("EXACT")],
+    }
+
+    ccr_display = []
+    ccr_pending = False
+    for row in ccr_rows:
+        client = _blank(row.get("client_name")) or _blank(row.get("client_code")) or f"Client {row.get('client_id')}"
+        klass = _blank(row.get("classification"))
+        action = _blank(row.get("action"))
+        fields = row.get("fields") or {}
+        pending_fields = [
+            name
+            for name, field in fields.items()
+            if isinstance(field, dict) and field.get("resolved") is False
+        ]
+        ex_codes = {_blank(code) for code in (row.get("exceptions") or [])}
+        material_pending = [name for name in pending_fields if name != "external_record_no"] or (
+            ex_codes - {EX_RN, ""}
+        )
+        rn_pending = "external_record_no" in pending_fields or EX_RN in ex_codes
+        if material_pending:
+            result = PENDING
+            ccr_pending = True
+        elif rn_pending:
+            result = "different RN → primary/source identity handling; primary RN pending decision"
+        elif action == "REHOME_SOURCE_CCR_TO_SURVIVOR":
+            result = "one-sided relationship — preserve / rehome to survivor"
+        elif action == "KEEP_SURVIVOR_CCR":
+            result = "one-sided relationship — preserve"
+        elif klass == CCR_SAFE:
+            result = "same values → preserve / consolidate to one relationship"
+        else:
+            result = action or "preserve"
+        ccr_display.append(
+            {
+                "client_id": row.get("client_id"),
+                "client_name": client,
+                "classification": klass,
+                "action": action,
+                "planned_result": result,
+                "same_client": bool(row.get("same_client")),
+                "fields": row.get("fields") or {},
+                "exceptions": row.get("exceptions") or [],
+            }
+        )
+    rel_a = list(a.get("active_relationships") or [])
+    rel_b = list(b.get("active_relationships") or [])
+    before_ccr = len(rel_a) + len(rel_b)
+    client_ids = {int(r.get("client_id") or 0) for r in rel_a + rel_b if r.get("client_id")}
+    ccr_after: object = PENDING if ccr_pending else (len(client_ids) or len(ccr_rows) or before_ccr)
+    ccr_section = {
+        "title": "CLIENT RELATIONSHIPS",
+        "record_a": rel_a,
+        "record_b": rel_b,
+        "rows": ccr_display,
+        "before": before_ccr,
+        "expected_after": ccr_after,
+        "planned_action": "Pending client-field decisions" if ccr_pending else "Preserve unique clients; consolidate same-client CCR",
+    }
+
+    notes_plan = notes_plan or {}
+    src_notes = int(notes_plan.get("source_company_notes") or 0)
+    tgt_notes = int(notes_plan.get("survivor_company_notes") or 0)
+    if source_id == b_id:
+        notes_a, notes_b = tgt_notes, src_notes
+    else:
+        notes_a, notes_b = src_notes, tgt_notes
+    if not notes_a:
+        notes_a = int(a.get("notes_count") or 0)
+    if not notes_b:
+        notes_b = int(b.get("notes_count") or 0)
+    dup_notes = int(notes_plan.get("exact_normalized_duplicates") or 0)
+    distinct_notes = int(notes_plan.get("distinct_notes_to_preserve") or 0)
+    notes_before = notes_a + notes_b
+    preview_notes = notes_plan.get("final_consolidated_preview")
+    if preview_notes is not None:
+        notes_after: object = len(preview_notes)
+        notes_action = (
+            f"{dup_notes} exact/normalized duplicates to collapse · {distinct_notes} unique notes to preserve"
+        )
+    elif src_notes or tgt_notes:
+        notes_after = tgt_notes + distinct_notes
+        notes_action = (
+            f"{dup_notes} exact/normalized duplicates to collapse · {distinct_notes} unique notes to preserve"
+        )
+    else:
+        notes_after = notes_before
+        notes_action = "Preserve unique notes; collapse exact normalized duplicates only"
+    notes_section = {
+        "title": "NOTES",
+        "record_a": notes_a,
+        "record_b": notes_b,
+        "exact_normalized_duplicates": dup_notes,
+        "unique_to_preserve": distinct_notes,
+        "expected_after": notes_after,
+        "planned_action": notes_action,
+        "semantics": notes_plan.get("append_without_duplicating")
+        or "KEEP EXISTING NOTES AND ADD NEW DISTINCT NOTES",
+    }
+
+    act_a = int(a.get("activities_count") or 0)
+    act_b = int(b.get("activities_count") or 0)
+    act_before = act_a + act_b
+    history_warning = None
+    for flag in history_plan.get("uniqueness_flags") or []:
+        table = _blank(flag.get("table"))
+        if table == "activities" and "collide" in _blank(flag.get("plan")).lower():
+            history_warning = "activities uniqueness may prevent a simple remapping."
+            warnings.append(history_warning)
+    activities_section = {
+        "title": "ACTIVITIES / HISTORY",
+        "record_a": act_a,
+        "record_b": act_b,
+        "planned_action": "all supported history retained/relinked",
+        "expected_after": act_before,
+        "warning": history_warning,
+        "preserve_all_unique": True,
+    }
+
+    camps_a = list(a.get("campaigns") or [])
+    camps_b = list(b.get("campaigns") or [])
+    unique_camps = int(campaigns_plan.get("unique_memberships_to_preserve") or 0)
+    same_camps = int(campaigns_plan.get("same_campaign_already_on_survivor") or 0)
+    camp_before = len(camps_a) + len(camps_b)
+    if EX_CAMPAIGN in pending:
+        camp_after: object = PENDING
+        camp_action = "Campaign membership decision required"
+    else:
+        camp_keys = {(c.get("campaign_id"), c.get("client_id")) for c in camps_a + camps_b}
+        camp_after = unique_camps + same_camps if (unique_camps or same_camps) else len(camp_keys)
+        camp_action = (
+            f"Preserve {unique_camps} unique memberships · dedupe {same_camps} already on survivor"
+        )
+    campaign_section = {
+        "title": "CAMPAIGNS",
+        "record_a": camps_a,
+        "record_b": camps_b,
+        "union_move": campaigns_plan.get("union_move") or [],
+        "already_member": campaigns_plan.get("already_member") or [],
+        "before": camp_before,
+        "planned_action": camp_action,
+        "expected_after": camp_after,
+    }
+
+    aliases_a = list(a.get("aliases") or [])
+    aliases_b = list(b.get("aliases") or [])
+    alias_move = aliases_plan.get("move") or []
+    alias_skip = aliases_plan.get("skip_duplicate") or []
+    alias_before = len(aliases_a) + len(aliases_b)
+    preserve_name = bool(aliases_plan.get("preserve_source_canonical_as_alias"))
+    survivor_alias_count = len(aliases_a if survivor_id == a_id else aliases_b)
+    alias_after = int(aliases_plan.get("unique_to_preserve") or 0) + survivor_alias_count
+    alias_section = {
+        "title": "ALIASES",
+        "record_a": aliases_a,
+        "record_b": aliases_b,
+        "source_canonical_as_alias": preserve_name,
+        "source_canonical_name": _blank(source_row.get("company_name")),
+        "move": alias_move,
+        "deduplicated": alias_skip,
+        "before": alias_before,
+        "planned_action": (
+            "Preserve unique aliases"
+            + ("; preserve source canonical name as alias" if preserve_name else "")
+            + (f"; skip {len(alias_skip)} exact normalized duplicates" if alias_skip else "")
+        ),
+        "expected_after": alias_after if aliases_plan.get("no_alias_disappears") else PENDING,
+        "supported": bool(aliases_plan.get("no_alias_disappears")),
+    }
+
+    locs_a = list(a.get("locations") or [])
+    locs_b = list(b.get("locations") or [])
+    loc_concern = bool(
+        locations_plan.get("strong_multi_location_concern") or plan.get("location_concern") or loc_not_safe
+    )
+    if loc_concern:
+        warnings.append("Location/identity evidence is not safe to collapse. Distinct locations must not be merged.")
+        loc_after: object = PENDING
+        loc_action = "MULTI-LOCATION CONCERN — decision required; pair is not merge-ready"
+    else:
+        loc_after = max(len(locs_a) + len(locs_b), len(locations_plan.get("intended") or []))
+        loc_action = "Preserve distinct valid locations; do not collapse different sites"
+    location_section = {
+        "title": "LOCATIONS",
+        "record_a": locs_a,
+        "record_b": locs_b,
+        "comparisons": locations_plan.get("comparisons") or [],
+        "intended": locations_plan.get("intended") or [],
+        "strong_multi_location_concern": loc_concern,
+        "before": len(locs_a) + len(locs_b),
+        "planned_action": loc_action,
+        "expected_after": loc_after,
+    }
+
+    if plan.get("plan_state") == STATE_NOT_SAFE:
+        reason = plan.get("not_safe_reason") or _not_safe_reason(plan) or "Pair is NOT SAFE TO PLAN."
+        if reason and reason not in warnings:
+            warnings.append(reason)
+    for blocker in list(merge.get("blockers") or []):
+        text = str(blocker)
+        lower = text.lower()
+        if not text or text in warnings:
+            continue
+        if any(token in lower for token in ("discard", "orphan", "overwrite", "untraceable", "distinct_site", "identity")):
+            warnings.append(text)
+
+    blocks_ready_gate = bool(warnings)
+    table = [
+        _summary_row("LeadMaster IDs", len(unique_rns), rn_action, rn_after),
+        _summary_row("Contacts", before_contacts, contact_action, contact_after),
+        _summary_row("Client relationships", before_ccr, ccr_section["planned_action"], ccr_after),
+        _summary_row("Notes", notes_before, notes_action, notes_after),
+        _summary_row("Activities/history", act_before, activities_section["planned_action"], act_before),
+        _summary_row("Campaigns", camp_before, camp_action, camp_after),
+        _summary_row("Aliases", alias_before, alias_section["planned_action"], alias_section["expected_after"]),
+        _summary_row("Locations", location_section["before"], loc_action, loc_after),
+    ]
+    return {
+        "preview_version": "DS14B_PREVIEW_V1",
+        "planning_only": True,
+        "merge_will_occur": False,
+        "provisional_survivor": provisional,
+        "survivor_company_id": None if provisional else survivor_id,
+        "source_company_id": None if provisional else source_id,
+        "table": table,
+        "leadmaster": rn_section,
+        "contacts": contact_section,
+        "ccrs": ccr_section,
+        "notes": notes_section,
+        "activities": activities_section,
+        "campaigns": campaign_section,
+        "aliases": alias_section,
+        "locations": location_section,
+        "warnings": warnings,
+        "blocks_ready": blocks_ready_gate,
+        "lines": [f"{row['data_type']}: {row['before']} → {row['expected_after']}" for row in table],
+        "automatic_contacts": contact_section["automatic_contacts"],
+        "identities": len(unique_rns),
+        "contact_count": before_contacts,
+        "notes_count": notes_before,
+        "activities_count": act_before,
+        "alias_count": alias_before,
+        "location_count": location_section["before"],
+        "campaign_count": camp_before,
+    }
+
+
+def preservation_summary(conn: sqlite3.Connection, plan: dict[str, Any]) -> dict[str, Any]:
+    return preservation_preview(conn, plan)
+
+
+def _workbench_ready(plan: dict[str, Any]) -> bool:
+    if _blank(plan.get("plan_state")) != STATE_READY:
+        return False
+    if (plan.get("preservation") or {}).get("blocks_ready"):
+        return False
+    if plan.get("preservation_blocks_ready"):
+        return False
+    return True
 
 
 def survivor_comparison(plan: dict[str, Any]) -> dict[str, Any]:
@@ -997,6 +1445,14 @@ def enrich_queue_plan(
     out["merge_will_occur"] = False
     out["no_merge_button"] = True
     out["no_execute_merge"] = True
+    if _blank(out.get("plan_state")) == STATE_READY:
+        preview = preservation_preview(conn, out)
+        out["preservation_blocks_ready"] = bool(preview.get("blocks_ready"))
+        out["preservation_warnings"] = list(preview.get("warnings") or [])
+    else:
+        out["preservation_blocks_ready"] = False
+        out["preservation_warnings"] = []
+    out["ready_for_review"] = _workbench_ready(out)
     return out
 
 
@@ -1005,7 +1461,9 @@ def enrich_plan_detail(conn: sqlite3.Connection, plan: dict[str, Any]) -> dict[s
     out["all_exceptions"] = [
         _enrich_exception(conn, out, row) for row in (plan.get("all_exceptions") or plan.get("exceptions") or [])
     ]
-    out["preservation"] = preservation_summary(out)
+    out["preservation"] = preservation_summary(conn, out)
+    out["preservation_blocks_ready"] = bool((out["preservation"] or {}).get("blocks_ready"))
+    out["preservation_warnings"] = list((out["preservation"] or {}).get("warnings") or [])
     out["survivor_comparison"] = survivor_comparison(out)
     out["automated_assessment"] = _automated_assessment(conn, out)
     out["human_review"] = _human_review_payload(conn, out)
@@ -1021,7 +1479,7 @@ def enrich_plan_detail(conn: sqlite3.Connection, plan: dict[str, Any]) -> dict[s
     out["decision_history"] = history
     out["workbench_version"] = WORKBENCH_VERSION
     out["plan_only_warning"] = PLAN_ONLY_WARNING
-    out["ready_for_review"] = out.get("plan_state") == STATE_READY
+    out["ready_for_review"] = _workbench_ready(out)
     out["not_safe_reason"] = _not_safe_reason(out) if out.get("plan_state") == STATE_NOT_SAFE else out.get("not_safe_reason") or ""
     return out
 
@@ -1079,7 +1537,15 @@ def list_workbench_plans(
     needle = _norm_text(q)
     filtered = []
     for row in plans:
-        if wanted_state and _blank(row.get("plan_state")) != wanted_state:
+        if wanted_state == STATE_READY:
+            if not row.get("ready_for_review"):
+                continue
+        elif wanted_state == STATE_NEEDS:
+            planner_needs = _blank(row.get("plan_state")) == STATE_NEEDS
+            blocked_ready = _blank(row.get("plan_state")) == STATE_READY and not row.get("ready_for_review")
+            if not (planner_needs or blocked_ready):
+                continue
+        elif wanted_state and _blank(row.get("plan_state")) != wanted_state:
             continue
         if not _matches_decision_type(row, decision_type) or not _matches_same_client(row, same_client):
             continue
@@ -1118,8 +1584,13 @@ def list_workbench_plans(
     summary = dict(raw.get("summary") or {})
     summary["simple_decisions"] = sum(1 for row in plans if row.get("workbench_mode") == "simple")
     summary["complex_decisions"] = sum(1 for row in plans if row.get("workbench_mode") == "complex")
-    summary["needs_exception_decision"] = sum(1 for row in plans if row.get("plan_state") == STATE_NEEDS)
-    summary["ready_for_review"] = sum(1 for row in plans if row.get("plan_state") == STATE_READY)
+    summary["needs_exception_decision"] = sum(
+        1
+        for row in plans
+        if row.get("plan_state") == STATE_NEEDS
+        or (row.get("plan_state") == STATE_READY and not row.get("ready_for_review"))
+    )
+    summary["ready_for_review"] = sum(1 for row in plans if row.get("ready_for_review"))
     summary["not_safe_to_plan"] = sum(1 for row in plans if row.get("plan_state") == STATE_NOT_SAFE)
     summary["stale"] = sum(1 for row in plans if row.get("plan_state") == STATE_STALE or row.get("stale"))
     offset = max(int(offset or 0), 0)
@@ -1210,7 +1681,7 @@ def save_workbench_decision(
     )
     plan = enrich_plan_detail(conn, saved["plan"])
     remaining = plan.get("exceptions") or []
-    ready = plan.get("plan_state") == STATE_READY
+    ready = _workbench_ready(plan)
     return {
         **saved,
         "plan": plan,
