@@ -163,15 +163,133 @@ def _identities_for(conn: sqlite3.Connection, company_id: int) -> list[dict[str,
     return out
 
 
+def _client_label(row: dict[str, Any]) -> str:
+    return _blank(row.get("client_name")) or _blank(row.get("client_code")) or (
+        f"Client {row.get('client_id')}" if row.get("client_id") else "Client"
+    )
+
+
+def _campaigns_for_client(campaigns: list[dict[str, Any]], client_id: object) -> list[dict[str, Any]]:
+    wanted = _as_int(client_id)
+    if not wanted:
+        return []
+    out = []
+    for camp in campaigns:
+        if _as_int(camp.get("client_id")) != wanted:
+            continue
+        name = _blank(camp.get("campaign_name")) or f"Campaign {camp.get('campaign_id')}"
+        out.append(
+            {
+                "campaign_id": camp.get("campaign_id"),
+                "client_id": camp.get("client_id"),
+                "campaign_name": name,
+                "notes": _blank(camp.get("notes")),
+            }
+        )
+    return out
+
+
+def _contacts_for_company(conn: sqlite3.Connection, company_id: int) -> list[dict[str, Any]]:
+    if not _table_exists(conn, "contacts"):
+        return []
+    cols = _table_columns(conn, "contacts")
+    select = ["id", "company_id"]
+    for name in (
+        "first_name",
+        "last_name",
+        "title",
+        "email",
+        "phone",
+        "phone_extension",
+        "external_record_no",
+        "source",
+    ):
+        if name in cols:
+            select.append(name)
+    order = "id"
+    if "last_name" in cols and "first_name" in cols:
+        order = "last_name, first_name, id"
+    rows = conn.execute(
+        f"SELECT {', '.join(select)} FROM contacts WHERE company_id=? ORDER BY {order}",
+        (int(company_id),),
+    ).fetchall()
+    out = []
+    for row in rows:
+        item = _row_dict(row)
+        first = _blank(item.get("first_name"))
+        last = _blank(item.get("last_name"))
+        item["name"] = " ".join(part for part in (first, last) if part) or f"Contact {item.get('id')}"
+        item["master_rn_label"] = _blank(item.get("external_record_no")) or "None"
+        out.append(item)
+    return out
+
+
+def _aliases_for_company(conn: sqlite3.Connection, company_id: int) -> list[dict[str, Any]]:
+    if not _table_exists(conn, "company_aliases"):
+        return []
+    cols = _table_columns(conn, "company_aliases")
+    select = ["id"]
+    for name in ("alias_name", "source_system", "source_record_no"):
+        if name in cols:
+            select.append(name)
+    rows = conn.execute(
+        f"SELECT {', '.join(select)} FROM company_aliases WHERE company_id=? ORDER BY id",
+        (int(company_id),),
+    ).fetchall()
+    out = []
+    for row in rows:
+        item = _row_dict(row)
+        item["label"] = _blank(item.get("alias_name")) or f"Alias {item.get('id')}"
+        out.append(item)
+    return out
+
+
+def _locations_for_company(conn: sqlite3.Connection, company_id: int) -> list[dict[str, Any]]:
+    if not _table_exists(conn, "company_locations"):
+        return []
+    cols = _table_columns(conn, "company_locations")
+    select = ["id"]
+    for name in (
+        "location_name",
+        "location_type",
+        "address",
+        "city",
+        "state",
+        "zip",
+        "phone",
+        "is_primary",
+        "is_headquarters",
+    ):
+        if name in cols:
+            select.append(name)
+    rows = conn.execute(
+        f"SELECT {', '.join(select)} FROM company_locations WHERE company_id=? ORDER BY id",
+        (int(company_id),),
+    ).fetchall()
+    out = []
+    for row in rows:
+        item = _row_dict(row)
+        city_state = ", ".join(part for part in (_blank(item.get("city")), _blank(item.get("state"))) if part)
+        item["label"] = _blank(item.get("location_name")) or city_state or f"Location {item.get('id')}"
+        out.append(item)
+    return out
+
+
 def identity_summary(conn: sqlite3.Connection, company_id: int) -> dict[str, Any]:
     row = _company_row(conn, int(company_id))
     name = _blank(row.get("company_name")) or f"Company {company_id}"
     ccrs = _load_ccrs(conn, int(company_id))
+    users = _users(conn)
+    campaigns = _campaigns_for_company(conn, int(company_id))
     clients = []
     seen: set[int] = set()
     active_ccr = 0
     removed_ccr = 0
+    relationships: list[dict[str, Any]] = []
+    active_relationships: list[dict[str, Any]] = []
     for ccr in ccrs:
+        snap = _ccr_snapshot(ccr, users, campaigns)
+        relationships.append(snap)
         cid = int(ccr.get("client_id") or 0)
         if cid and cid not in seen:
             seen.add(cid)
@@ -184,22 +302,29 @@ def identity_summary(conn: sqlite3.Connection, company_id: int) -> dict[str, Any
             )
         if ccr.get("active"):
             active_ccr += 1
+            active_relationships.append(snap)
         else:
             removed_ccr += 1
     identities = _identities_for(conn, int(company_id))
     history = _history_counts(conn, int(company_id))
+    contacts = _contacts_for_company(conn, int(company_id))
+    aliases = _aliases_for_company(conn, int(company_id))
+    locations = _locations_for_company(conn, int(company_id))
     master_rn = _blank(row.get("external_record_no"))
     website = _blank(row.get("website"))
     city = _blank(row.get("city"))
     state = _blank(row.get("state"))
+    zip_code = _blank(row.get("zip"))
+    active_client_names = ", ".join(_client_label(item) for item in active_relationships) or "None"
     return {
         "company_id": int(company_id),
         "company_name": name,
         "record_label": f"{name} — Record {int(company_id)}",
         "city": city,
         "state": state,
-        "zip": _blank(row.get("zip")),
+        "zip": zip_code,
         "city_state": ", ".join(part for part in (city, state) if part),
+        "city_state_zip": ", ".join(part for part in (city, state, zip_code) if part),
         "address": _blank(row.get("address")),
         "phone": _blank(row.get("phone")),
         "phone_extension": _blank(row.get("phone_extension")),
@@ -210,16 +335,19 @@ def identity_summary(conn: sqlite3.Connection, company_id: int) -> dict[str, Any
         "identities": identities,
         "identity_summary": ", ".join(item["label"] for item in identities) or "None",
         "clients": clients,
-        "client_names": ", ".join(
-            item["client_name"] or item["client_code"] or str(item["client_id"]) for item in clients
-        )
-        or "None",
+        "client_names": active_client_names,
+        "relationships": relationships,
+        "active_relationships": active_relationships,
         "active_ccr_count": active_ccr,
         "removed_ccr_count": removed_ccr,
-        "contact_count": history.get("contacts") or 0,
-        "alias_count": _count_where(conn, "company_aliases", "company_id=?", (int(company_id),)),
-        "location_count": _count_where(conn, "company_locations", "company_id=?", (int(company_id),)),
-        "campaign_count": history.get("campaigns") or 0,
+        "contacts": contacts,
+        "contact_count": history.get("contacts") or len(contacts),
+        "aliases": aliases,
+        "alias_count": len(aliases),
+        "locations": locations,
+        "location_count": len(locations),
+        "campaigns": campaigns,
+        "campaign_count": history.get("campaigns") or len(campaigns),
         "notes_count": history.get("notes") or 0,
         "activities_count": history.get("activities") or 0,
         "history": history,
@@ -260,23 +388,38 @@ def _contact_snapshot(conn: sqlite3.Connection, contact_id: object) -> dict[str,
     return item
 
 
-def _ccr_snapshot(ccr: dict[str, Any] | None, users: dict[int, str]) -> dict[str, Any]:
+def _ccr_snapshot(
+    ccr: dict[str, Any] | None,
+    users: dict[int, str],
+    campaigns: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     if not ccr:
         return {}
     uid = _as_int(ccr.get("assigned_user_id"))
+    assigned = users.get(uid, "") if uid else ""
+    if not assigned:
+        assigned = "Unassigned"
+    client = _client_label(ccr)
+    status = _blank(ccr.get("status"))
+    status_label = status if status else "No status"
+    active = bool(ccr.get("active"))
     return {
-        "ccr_id": ccr.get("id"),
+        "ccr_id": ccr.get("id") or ccr.get("ccr_id"),
         "client_id": ccr.get("client_id"),
-        "client_name": _blank(ccr.get("client_name")),
+        "client_name": _blank(ccr.get("client_name")) or client,
         "client_code": _blank(ccr.get("client_code")),
-        "status": _blank(ccr.get("status")),
+        "status": status or None,
+        "status_label": status_label,
+        "display": f"{client} — {status_label}",
         "assigned_user_id": uid,
-        "assigned_user_name": users.get(uid or -1, "") if uid else "Unassigned",
+        "assigned_user_name": assigned,
         "hot": bool(ccr.get("hot")),
         "follow_up_date": _blank(ccr.get("follow_up_date")) or None,
         "next_action": _blank(ccr.get("next_action")),
         "external_record_no": _blank(ccr.get("external_record_no")) or None,
-        "active": bool(ccr.get("active")),
+        "active": active,
+        "state_label": "Active" if active else "Removed",
+        "campaigns": _campaigns_for_client(campaigns or [], ccr.get("client_id")),
     }
 
 
@@ -416,8 +559,8 @@ def workbench_choices(
 
     if code == EX_SURVIVOR:
         return [
-            _choice(f"SURVIVOR:{a_id}", f"KEEP {label_a} AS SURVIVOR"),
-            _choice(f"SURVIVOR:{b_id}", f"KEEP {label_b} AS SURVIVOR"),
+            _choice(f"SURVIVOR:{a_id}", f"Make Record {a_id} the survivor"),
+            _choice(f"SURVIVOR:{b_id}", f"Make Record {b_id} the survivor"),
         ]
 
     if code == EX_FIELD:
@@ -951,6 +1094,14 @@ def list_workbench_plans(
                 str((row.get("company_b") or {}).get("master_rn_label") or ""),
                 str((row.get("company_a") or {}).get("client_names") or ""),
                 str((row.get("company_b") or {}).get("client_names") or ""),
+                " ".join(
+                    str(rel.get("display") or "")
+                    for rel in ((row.get("company_a") or {}).get("active_relationships") or [])
+                ),
+                " ".join(
+                    str(rel.get("display") or "")
+                    for rel in ((row.get("company_b") or {}).get("active_relationships") or [])
+                ),
                 str(row.get("decision_needed") or ""),
             ]
         ).lower()

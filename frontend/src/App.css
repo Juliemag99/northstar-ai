@@ -4326,6 +4326,11 @@ a.primary-btn:hover {
   border: 1px solid #d0d0d0;
   padding: 0.85rem;
   background: #fff;
+  cursor: pointer;
+}
+
+.dup-workbench-card-open {
+  outline: 2px solid #1d4e89;
 }
 
 .dup-workbench-simple {
@@ -4341,6 +4346,10 @@ a.primary-btn:hover {
   margin: 0.15rem 0;
 }
 
+.dup-relationship {
+  margin: 0.35rem 0 0.5rem;
+}
+
 .dup-decision-needed {
   font-weight: 700;
 }
@@ -4350,6 +4359,7 @@ a.primary-btn:hover {
   flex-wrap: wrap;
   gap: 0.5rem;
   margin: 0.6rem 0;
+  cursor: default;
 }
 
 .dup-field-diff,

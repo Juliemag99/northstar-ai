@@ -1,11 +1,25 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   MergePlanDetail,
   MergePlanException,
   MergePlanListRow,
   MergePlanSummary,
   WorkbenchIdentity,
+  WorkbenchRelationship,
 } from './api/duplicateReview'
+
+function stopCardOpen(event: React.SyntheticEvent) {
+  event.stopPropagation()
+}
+
+function relationshipDisplay(row: WorkbenchRelationship) {
+  const client = row.client_name || row.client_code || (row.client_id ? `Client ${row.client_id}` : 'Client')
+  return row.display || `${client} — ${row.status_label || row.status || 'No status'}`
+}
+
+function assignedDisplay(row: WorkbenchRelationship) {
+  return `Assigned: ${row.assigned_user_name || 'Unassigned'}`
+}
 
 const PLAN_QUEUES: Array<{ id: string; label: string }> = [
   { id: 'NEEDS_EXCEPTION_DECISION', label: 'Needs Decisions' },
@@ -44,25 +58,114 @@ function IdentityBlock({
   identity,
   fallbackName,
   fallbackId,
+  detailed,
 }: {
   identity?: WorkbenchIdentity
   fallbackName?: string
   fallbackId: number
+  detailed?: boolean
 }) {
   const label = identity?.record_label || `${fallbackName || 'Company'} — Record ${fallbackId}`
+  const activeRels = (identity?.active_relationships || []).filter((row) => row.active !== false)
+  const allRels = detailed ? identity?.relationships || activeRels : activeRels
+  const clientNames =
+    activeRels
+      .map((row) => row.client_name || row.client_code)
+      .filter(Boolean)
+      .join(', ') ||
+    identity?.client_names ||
+    'None'
   return (
     <div className="dup-identity">
       <strong>{label}</strong>
-      <p>{identity?.city_state || [identity?.city, identity?.state].filter(Boolean).join(', ') || 'City/state unknown'}</p>
+      {detailed ? <FieldRow label="Company ID" value={identity?.company_id || fallbackId} /> : null}
+      {detailed ? <FieldRow label="Company name" value={identity?.company_name || fallbackName} /> : null}
+      <p>
+        {identity?.city_state_zip ||
+          identity?.city_state ||
+          [identity?.city, identity?.state, identity?.zip].filter(Boolean).join(', ') ||
+          'City/state unknown'}
+      </p>
       {identity?.address ? <p>{identity.address}</p> : null}
-      {identity?.phone ? <p>Phone {identity.phone}</p> : null}
+      {identity?.phone ? <p>Phone {identity.phone}{identity.phone_extension ? ` x${identity.phone_extension}` : ''}</p> : null}
       {identity?.website || identity?.domain ? <p>{identity.website || identity.domain}</p> : null}
       <p>RN {identity?.master_rn_label || 'None'}</p>
-      <p>Client(s): {identity?.client_names || 'None'}</p>
+      <p>Client(s): {clientNames}</p>
+      {allRels.map((row, index) => (
+        <div key={`${row.ccr_id || row.client_id || index}`} className="dup-relationship">
+          <p>{relationshipDisplay(row)}</p>
+          <p>{assignedDisplay(row)}</p>
+          {detailed ? (
+            <>
+              <FieldRow label="Hot" value={row.hot ? 'Hot' : 'Not Hot'} />
+              <FieldRow label="Follow-up" value={row.follow_up_date} />
+              <FieldRow label="Next action" value={row.next_action} />
+              <FieldRow label="CCR RN" value={row.external_record_no || 'None'} />
+              <FieldRow
+                label="Campaigns"
+                value={
+                  (row.campaigns || []).map((camp) => camp.campaign_name).filter(Boolean).join(', ') || 'None'
+                }
+              />
+              <FieldRow label="Relationship" value={row.state_label || (row.active === false ? 'Removed' : 'Active')} />
+            </>
+          ) : null}
+        </div>
+      ))}
       <p>
-        CCR {identity?.active_ccr_count ?? 0} active / {identity?.removed_ccr_count ?? 0} removed · Contacts{' '}
-        {identity?.contact_count ?? 0}
+        CCR {identity?.active_ccr_count ?? 0} active / {identity?.removed_ccr_count ?? 0} removed · Contacts:{' '}
+        {identity?.contact_count ?? identity?.contacts?.length ?? 0}
       </p>
+      {detailed ? (
+        <>
+          <p>
+            Counts: contacts {identity?.contact_count ?? 0} · notes {identity?.notes_count ?? 0} · activities/history{' '}
+            {identity?.activities_count ?? 0} · aliases {identity?.alias_count ?? 0} · locations{' '}
+            {identity?.location_count ?? 0} · campaigns {identity?.campaign_count ?? 0}
+          </p>
+          <FieldRow
+            label="Source identities"
+            value={
+              (identity?.identities || []).map((item) => item.label).filter(Boolean).join(', ') ||
+              identity?.identity_summary ||
+              'None'
+            }
+          />
+          <FieldRow
+            label="Aliases"
+            value={(identity?.aliases || []).map((item) => item.label || item.alias_name).filter(Boolean).join(', ') || 'None'}
+          />
+          <FieldRow
+            label="Locations"
+            value={
+              (identity?.locations || [])
+                .map((item) => item.label || item.location_name || item.address)
+                .filter(Boolean)
+                .join(', ') || 'None'
+            }
+          />
+          {(identity?.contacts || []).length ? (
+            <div>
+              <p>
+                <strong>Contacts</strong>
+              </p>
+              {(identity?.contacts || []).map((contact) => (
+                <p key={contact.id || contact.name}>
+                  {contact.name}
+                  {contact.title ? ` · ${contact.title}` : ''}
+                  {contact.email ? ` · ${contact.email}` : ''}
+                  {contact.phone ? ` · ${contact.phone}` : ''}
+                  {contact.phone_extension ? ` x${contact.phone_extension}` : ''}
+                  {contact.master_rn_label ? ` · RN ${contact.master_rn_label}` : ''}
+                  {contact.source ? ` · ${contact.source}` : ''}
+                </p>
+              ))}
+            </div>
+          ) : (
+            <p>Contacts: none</p>
+          )}
+        </>
+      ) : null}
     </div>
   )
 }
@@ -71,12 +174,20 @@ function ExceptionChoices({
   exception,
   value,
   busy,
+  recordAId,
+  recordBId,
+  survivorId,
+  sourceId,
   onChoice,
   onSave,
 }: {
   exception: MergePlanException
   value: string
   busy: boolean
+  recordAId?: number
+  recordBId?: number
+  survivorId?: number | null
+  sourceId?: number | null
   onChoice: (value: string) => void
   onSave: () => void
 }) {
@@ -95,17 +206,17 @@ function ExceptionChoices({
       {exception.code === 'FIELD_CONFLICT_REVIEW' ? (
         <div className="dup-grid">
           <p>
-            Record A: {String(details.record_a_value || details.survivor || '—')}
+            Record {recordAId ?? 'A'}: {String(details.record_a_value || details.survivor || '—')}
           </p>
           <p>
-            Record B: {String(details.record_b_value || details.source || '—')}
+            Record {recordBId ?? 'B'}: {String(details.record_b_value || details.source || '—')}
           </p>
         </div>
       ) : null}
       {sourceCcr || survivorCcr ? (
         <div className="dup-grid">
           <div>
-            <h5>Record A / survivor CCR</h5>
+            <h5>Record {survivorId ?? recordAId ?? 'survivor'} CCR</h5>
             <FieldRow label="Status" value={survivorCcr?.status} />
             <FieldRow label="Rep" value={survivorCcr?.assigned_user_name} />
             <FieldRow label="Hot" value={survivorCcr?.hot ? 'Hot' : 'Not Hot'} />
@@ -114,7 +225,7 @@ function ExceptionChoices({
             <FieldRow label="RN" value={survivorCcr?.external_record_no || 'None'} />
           </div>
           <div>
-            <h5>Record B / source CCR</h5>
+            <h5>Record {sourceId ?? recordBId ?? 'source'} CCR</h5>
             <FieldRow label="Status" value={sourceCcr?.status} />
             <FieldRow label="Rep" value={sourceCcr?.assigned_user_name} />
             <FieldRow label="Hot" value={sourceCcr?.hot ? 'Hot' : 'Not Hot'} />
@@ -196,7 +307,7 @@ function HumanDispositionForm({
   const [reason, setReason] = useState('')
   const [confirm, setConfirm] = useState(false)
   return (
-    <div className="dup-disposition">
+    <div className="dup-disposition" onClick={stopCardOpen} onKeyDown={stopCardOpen}>
       <h4>{title}</h4>
       {title !== 'NEEDS RESEARCH' ? (
         <fieldset>
@@ -269,6 +380,7 @@ export default function MergePlanningPanel({
   onLoad,
   onPrepare,
   onOpen,
+  onClose,
   onChoice,
   onReason,
   onSaveDecision,
@@ -298,6 +410,7 @@ export default function MergePlanningPanel({
   onLoad: (offset: number, state: string) => void
   onPrepare: () => void
   onOpen: (row: MergePlanListRow) => void
+  onClose: () => void
   onChoice: (key: string, value: string) => void
   onReason: (value: string) => void
   onSaveDecision: (row: MergePlanListRow, key: string, resolution?: string) => void
@@ -311,13 +424,34 @@ export default function MergePlanningPanel({
 }) {
   const summary = planPage.summary
   const [hatch, setHatch] = useState<{ pairKey: string; mode: 'separate' | 'research' } | null>(null)
+  const queueRef = useRef<HTMLDivElement>(null)
+  const queueScrollRef = useRef(0)
+  const detailRef = useRef<HTMLElement>(null)
   const simpleCards = useMemo(
     () => planPage.plans.filter((row) => row.allow_quick_survivor),
     [planPage.plans],
   )
+  const selectedKey = selectedPlan?.pair_key || ''
+
+  useEffect(() => {
+    if (selectedKey && typeof detailRef.current?.scrollIntoView === 'function') {
+      detailRef.current.scrollIntoView({ block: 'nearest' })
+    } else if (!selectedKey && queueRef.current) {
+      queueRef.current.scrollTop = queueScrollRef.current
+    }
+  }, [selectedKey])
 
   function identityFor(row: MergePlanListRow, side: 'a' | 'b') {
     return side === 'a' ? row.company_a : row.company_b
+  }
+
+  function openDetails(row: MergePlanListRow) {
+    queueScrollRef.current = queueRef.current?.scrollTop || 0
+    onOpen(row)
+  }
+
+  function closeDetails() {
+    onClose()
   }
 
   return (
@@ -409,25 +543,32 @@ export default function MergePlanningPanel({
       <p className="queue-sub">
         {planPage.total} merge plans · showing {planPage.plans.length} · {busy ? 'Loading…' : ''}
       </p>
-      <div className="dup-workbench-queue">
+      <div className="dup-workbench-queue" ref={queueRef}>
         {planPage.plans.map((row, index) => {
           const hatchOpen = hatch?.pairKey === row.pair_key
           const aLabel = identityFor(row, 'a')?.record_label || `${row.company_a_name} — Record ${row.company_a_id}`
           const bLabel = identityFor(row, 'b')?.record_label || `${row.company_b_name} — Record ${row.company_b_id}`
+          const open = selectedPlan?.pair_key === row.pair_key
           return (
             <article
               key={row.pair_key}
-              className={`dup-workbench-card${row.simple_decision ? ' dup-workbench-simple' : ''}`}
+              className={`dup-workbench-card${row.simple_decision ? ' dup-workbench-simple' : ''}${open ? ' dup-workbench-card-open' : ''}`}
               aria-label={`${aLabel} vs ${bLabel}`}
-              tabIndex={row.allow_quick_survivor ? 0 : undefined}
+              tabIndex={0}
+              onClick={() => openDetails(row)}
               onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  openDetails(row)
+                  return
+                }
                 if (!row.allow_quick_survivor) return
                 if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
                   event.preventDefault()
                   const current = simpleCards.findIndex((item) => item.pair_key === row.pair_key)
                   const next = event.key === 'ArrowDown' ? current + 1 : current - 1
                   const target = simpleCards[next]
-                  if (target) onOpen(target)
+                  if (target) openDetails(target)
                 }
               }}
             >
@@ -455,46 +596,45 @@ export default function MergePlanningPanel({
                   <p>{row.not_safe_reason}</p>
                 </>
               ) : null}
-              {row.allow_quick_survivor ? (
-                <div className="dup-simple-actions">
-                  <button
-                    type="button"
-                    onClick={() => onSaveDecision(row, 'SURVIVOR_DECISION_REQUIRED', `SURVIVOR:${row.company_a_id}`)}
-                    disabled={busy}
-                  >
-                    KEEP A AS SURVIVOR
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onSaveDecision(row, 'SURVIVOR_DECISION_REQUIRED', `SURVIVOR:${row.company_b_id}`)}
-                    disabled={busy}
-                  >
-                    KEEP B AS SURVIVOR
-                  </button>
-                  <button type="button" onClick={() => setHatch({ pairKey: row.pair_key, mode: 'separate' })} disabled={busy}>
-                    THESE ARE SEPARATE RECORDS / LOCATIONS
-                  </button>
-                  <button type="button" onClick={() => setHatch({ pairKey: row.pair_key, mode: 'research' })} disabled={busy}>
-                    NEEDS RESEARCH
-                  </button>
-                </div>
-              ) : (
-                <div className="dup-simple-actions">
-                  <button type="button" onClick={() => onOpen(row)}>
-                    {row.workbench_mode === 'not_safe' ? 'Open Not Safe review' : 'Open exception workbench'}
-                  </button>
-                  {row.workbench_mode === 'not_safe' ? (
-                    <>
-                      <button type="button" onClick={() => setHatch({ pairKey: row.pair_key, mode: 'separate' })}>
-                        Mark as Multi-Location / Not Duplicate
-                      </button>
-                      <button type="button" onClick={() => setHatch({ pairKey: row.pair_key, mode: 'research' })}>
-                        Needs Research
-                      </button>
-                    </>
-                  ) : null}
-                </div>
-              )}
+              <div className="dup-simple-actions" onClick={stopCardOpen} onKeyDown={stopCardOpen}>
+                <button type="button" onClick={() => openDetails(row)} disabled={busy}>
+                  REVIEW DETAILS
+                </button>
+                {row.allow_quick_survivor ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => onSaveDecision(row, 'SURVIVOR_DECISION_REQUIRED', `SURVIVOR:${row.company_a_id}`)}
+                      disabled={busy}
+                    >
+                      KEEP RECORD {row.company_a_id}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onSaveDecision(row, 'SURVIVOR_DECISION_REQUIRED', `SURVIVOR:${row.company_b_id}`)}
+                      disabled={busy}
+                    >
+                      KEEP RECORD {row.company_b_id}
+                    </button>
+                    <button type="button" onClick={() => setHatch({ pairKey: row.pair_key, mode: 'separate' })} disabled={busy}>
+                      THESE ARE SEPARATE RECORDS / LOCATIONS
+                    </button>
+                    <button type="button" onClick={() => setHatch({ pairKey: row.pair_key, mode: 'research' })} disabled={busy}>
+                      NEEDS RESEARCH
+                    </button>
+                  </>
+                ) : null}
+                {row.workbench_mode === 'not_safe' ? (
+                  <>
+                    <button type="button" onClick={() => setHatch({ pairKey: row.pair_key, mode: 'separate' })}>
+                      Mark as Multi-Location / Not Duplicate
+                    </button>
+                    <button type="button" onClick={() => setHatch({ pairKey: row.pair_key, mode: 'research' })}>
+                      Needs Research
+                    </button>
+                  </>
+                ) : null}
+              </div>
               {hatchOpen ? (
                 <HumanDispositionForm
                   busy={busy}
@@ -535,14 +675,29 @@ export default function MergePlanningPanel({
         </div>
       ) : null}
       {selectedPlan ? (
-        <article className="dup-detail" aria-label="Exception workbench">
+        <article className="dup-detail" aria-label="Exception workbench" ref={detailRef}>
           <h3>Exception Workbench</h3>
           <p className="dup-plan-banner">PLANNING ONLY — NO MERGE WILL OCCUR</p>
+          <div className="dup-simple-actions">
+            <button type="button" onClick={closeDetails}>
+              CLOSE DETAILS
+            </button>
+          </div>
           <section>
             <h4>PAIR IDENTITY</h4>
             <div className="dup-grid">
-              <IdentityBlock identity={selectedPlan.company_a} fallbackName={selectedPlan.company_a_name} fallbackId={selectedPlan.company_a_id} />
-              <IdentityBlock identity={selectedPlan.company_b} fallbackName={selectedPlan.company_b_name} fallbackId={selectedPlan.company_b_id} />
+              <IdentityBlock
+                identity={selectedPlan.company_a}
+                fallbackName={selectedPlan.company_a_name}
+                fallbackId={selectedPlan.company_a_id}
+                detailed
+              />
+              <IdentityBlock
+                identity={selectedPlan.company_b}
+                fallbackName={selectedPlan.company_b_name}
+                fallbackId={selectedPlan.company_b_id}
+                detailed
+              />
             </div>
           </section>
           <section>
@@ -611,6 +766,10 @@ export default function MergePlanningPanel({
                   exception={row}
                   value={decisionChoices[row.exception_key] || ''}
                   busy={busy}
+                  recordAId={selectedPlan.company_a_id}
+                  recordBId={selectedPlan.company_b_id}
+                  survivorId={selectedPlan.survivor_company_id}
+                  sourceId={selectedPlan.source_company_id}
                   onChoice={(value) => onChoice(row.exception_key, value)}
                   onSave={() => onSaveDecision(selectedPlan, row.exception_key)}
                 />
@@ -661,6 +820,11 @@ export default function MergePlanningPanel({
             These are plan decisions only. They are not applied to live companies, CCRs, or contacts. There is no Execute
             Merge or Merge Now action.
           </p>
+          <div className="dup-simple-actions">
+            <button type="button" onClick={closeDetails}>
+              CLOSE DETAILS
+            </button>
+          </div>
         </article>
       ) : null}
     </div>

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import AdministrationDuplicateReview from './AdministrationDuplicateReview'
 import * as duplicateReview from './api/duplicateReview'
@@ -156,7 +156,7 @@ const detail = {
 
 afterEach(() => {
   cleanup()
-  vi.clearAllMocks()
+  vi.resetAllMocks()
 })
 
 describe('Duplicate Review workspace', () => {
@@ -419,7 +419,29 @@ describe('Duplicate Review workspace', () => {
     expect(screen.getByText(/MULTI LOCATION/)).toBeTruthy()
   })
 
+function rel(client: string, status: string, assigned: string, extra: Record<string, unknown> = {}) {
+  return {
+    client_name: client,
+    client_code: String(extra.client_code || client.split(' ')[0].toLowerCase()),
+    status: status || null,
+    status_label: status || 'No status',
+    display: `${client} — ${status || 'No status'}`,
+    assigned_user_name: assigned || 'Unassigned',
+    active: extra.active !== false,
+    state_label: extra.active === false ? 'Removed' : 'Active',
+    hot: Boolean(extra.hot),
+    follow_up_date: extra.follow_up_date ?? null,
+    next_action: extra.next_action || '',
+    external_record_no: extra.external_record_no ?? null,
+    campaigns: extra.campaigns || [],
+    ...extra,
+  }
+}
+
 function identity(id: number, name: string, extra: Record<string, unknown> = {}) {
+  const relationships = (extra.active_relationships as unknown[] | undefined)
+    || (extra.relationships as unknown[] | undefined)
+    || [rel('Carmeco', String(extra.status || 'New'), extra.assigned === undefined ? 'Julie Magnani' : String(extra.assigned || 'Unassigned'))]
   return {
     company_id: id,
     company_name: name,
@@ -437,6 +459,12 @@ function identity(id: number, name: string, extra: Record<string, unknown> = {})
     active_ccr_count: extra.active_ccr_count ?? 1,
     removed_ccr_count: extra.removed_ccr_count ?? 0,
     contact_count: extra.contact_count ?? 2,
+    active_relationships: relationships.filter((row) => (row as { active?: boolean }).active !== false),
+    relationships,
+    contacts: extra.contacts || [],
+    aliases: extra.aliases || [],
+    locations: extra.locations || [],
+    identities: extra.identities || [],
     ...extra,
   }
 }
@@ -458,8 +486,17 @@ function identity(id: number, name: string, extra: Record<string, unknown> = {})
       company_b_id: 28,
       company_a_name: 'Edl Packaging Engineers',
       company_b_name: 'Edl Packaging Engineers',
-      company_a: identity(22, 'Edl Packaging Engineers', { master_rn: '99202', phone: '(920) 347-0143' }),
-      company_b: identity(28, 'Edl Packaging Engineers', { master_rn: '101620', phone: '(920) 336-7744', website: 'edlpackaging.com' }),
+      company_a: identity(22, 'Edl Packaging Engineers', {
+        master_rn: '99202',
+        phone: '(920) 347-0143',
+        active_relationships: [rel('Carmeco', 'Left Message', 'Julie Magnani', { external_record_no: '99202' })],
+      }),
+      company_b: identity(28, 'Edl Packaging Engineers', {
+        master_rn: '101620',
+        phone: '(920) 336-7744',
+        website: 'edlpackaging.com',
+        active_relationships: [rel('Carmeco', 'New', 'Julie Magnani', { external_record_no: '101620' })],
+      }),
       source_company_id: 28,
       survivor_company_id: 22,
       plan_state: 'NEEDS_EXCEPTION_DECISION',
@@ -479,8 +516,20 @@ function identity(id: number, name: string, extra: Record<string, unknown> = {})
       company_b_id: 97,
       company_a_name: 'Kelderman',
       company_b_name: 'Kelderman',
-      company_a: identity(45, 'Kelderman', { city: 'Oskaloosa', state: 'IA', master_rn: '1001' }),
-      company_b: identity(97, 'Kelderman', { city: 'Oskaloosa', state: 'IA', master_rn: '1002' }),
+      company_a: identity(45, 'Kelderman', {
+        city: 'Oskaloosa',
+        state: 'IA',
+        address: '2686 Hwy 92',
+        phone: '(641) 673-0469',
+        master_rn: '138431',
+        active_relationships: [rel('Carmeco', 'New', 'Julie Magnani', { external_record_no: '138431' })],
+      }),
+      company_b: identity(97, 'Kelderman', {
+        city: 'Oskaloosa',
+        state: 'IA',
+        master_rn: '253832',
+        active_relationships: [rel('Carmeco', 'New', 'Julie Magnani', { external_record_no: '253832' })],
+      }),
       plan_state: 'NEEDS_EXCEPTION_DECISION',
       plan_state_label: 'NEEDS DECISIONS',
       exception_count: 1,
@@ -498,6 +547,60 @@ function identity(id: number, name: string, extra: Record<string, unknown> = {})
       company_b_name: 'Medtronic',
       company_a: identity(2131, 'Medtronic', { city: 'Minneapolis', state: 'MN', master_rn: '5001', client_names: 'Premier' }),
       company_b: identity(2132, 'Medtronic', { city: 'Fridley', state: 'MN', master_rn: '5002', client_names: 'Carmeco' }),
+      plan_state: 'NEEDS_EXCEPTION_DECISION',
+      plan_state_label: 'NEEDS DECISIONS',
+      exception_count: 1,
+      decision_needed: 'Choose survivor',
+      workbench_mode: 'simple',
+      simple_decision: true,
+      allow_quick_survivor: true,
+    }
+    const kuhnRow = {
+      pair_key: '229:358',
+      company_a_id: 229,
+      company_b_id: 358,
+      company_a_name: 'Kuhn North America',
+      company_b_name: 'Kuhn North America',
+      company_a: identity(229, 'Kuhn North America', {
+        city: 'Brodhead',
+        state: 'WI',
+        master_rn: '1110080',
+        active_relationships: [rel('Carmeco', 'New', 'Julie Magnani')],
+      }),
+      company_b: identity(358, 'Kuhn North America', {
+        city: 'Brodhead',
+        state: 'WI',
+        master_rn: '1285371',
+        active_relationships: [rel('Carmeco', 'New', 'Julie Magnani')],
+      }),
+      plan_state: 'NEEDS_EXCEPTION_DECISION',
+      plan_state_label: 'NEEDS DECISIONS',
+      exception_count: 1,
+      decision_needed: 'Choose survivor',
+      workbench_mode: 'simple',
+      simple_decision: true,
+      allow_quick_survivor: true,
+    }
+    const techMaxRow = {
+      pair_key: '550:591',
+      company_a_id: 550,
+      company_b_id: 591,
+      company_a_name: 'Tech Max Machine',
+      company_b_name: 'Tech-Max Machine',
+      company_a: identity(550, 'Tech Max Machine', {
+        city: 'Green Bay',
+        state: 'WI',
+        master_rn: '87118',
+        client_names: 'Dawson Fabrication',
+        active_relationships: [rel('Dawson Fabrication', 'Disqualified-Not a good fit-No relevant work', 'Julie Magnani')],
+      }),
+      company_b: identity(591, 'Tech-Max Machine', {
+        city: 'Green Bay',
+        state: 'WI',
+        master_rn: '260176',
+        client_names: 'Dawson Fabrication',
+        active_relationships: [rel('Dawson Fabrication', 'Left Message', 'Julie Magnani')],
+      }),
       plan_state: 'NEEDS_EXCEPTION_DECISION',
       plan_state_label: 'NEEDS DECISIONS',
       exception_count: 1,
@@ -584,7 +687,7 @@ function identity(id: number, name: string, extra: Record<string, unknown> = {})
       total: 4,
       offset: 0,
       limit: 50,
-      plans: [keldermanRow, medtronicRow, baxterRow, aldevronRow, leicaRow, edlRow, bwRow],
+      plans: [keldermanRow, medtronicRow, baxterRow, aldevronRow, leicaRow, kuhnRow, techMaxRow, edlRow, bwRow],
       no_merge_button: true,
       active_client_does_not_scope: true,
     })
@@ -745,6 +848,11 @@ function identity(id: number, name: string, extra: Record<string, unknown> = {})
     expect(screen.getAllByText('Simple Decisions').length).toBeGreaterThan(0)
     expect(screen.getAllByText('Complex Decisions').length).toBeGreaterThan(0)
     expect(screen.getAllByText('Not Safe').length).toBeGreaterThan(0)
+    expect(screen.getByText(/Kelderman — Record 45/)).toBeTruthy()
+    expect(screen.getByText(/Kuhn North America — Record 229/)).toBeTruthy()
+    expect(screen.getByText(/Tech Max Machine — Record 550/)).toBeTruthy()
+    expect(screen.getByText(/Dawson Fabrication — Disqualified-Not a good fit-No relevant work/)).toBeTruthy()
+    expect(screen.getByText(/Dawson Fabrication — Left Message/)).toBeTruthy()
     expect(screen.getByText(/Edl Packaging Engineers — Record 22/)).toBeTruthy()
     expect(screen.getByText(/Edl Packaging Engineers — Record 28/)).toBeTruthy()
     expect(screen.getByText(/Baxter — Record 900/)).toBeTruthy()
@@ -761,13 +869,13 @@ function identity(id: number, name: string, extra: Record<string, unknown> = {})
     expect(screen.getAllByText('Resolve phone conflict').length).toBeGreaterThan(0)
     fireEvent.click(screen.getByRole('button', { name: 'Prepare Merge Plans' }))
     await waitFor(() => expect(duplicateReview.prepareMergePlans).toHaveBeenCalled())
-    fireEvent.click(screen.getAllByRole('button', { name: 'KEEP A AS SURVIVOR' })[0])
+    fireEvent.click(screen.getAllByRole('button', { name: 'KEEP RECORD 45' })[0])
     await waitFor(() => expect(duplicateReview.saveMergePlanDecision).toHaveBeenCalled())
     expect(vi.mocked(duplicateReview.saveMergePlanDecision).mock.calls[0]?.[2]).toMatchObject({
       exception_key: 'SURVIVOR_DECISION_REQUIRED',
       chosen_resolution: 'SURVIVOR:45',
     })
-    fireEvent.click(screen.getByRole('button', { name: /Open exception workbench/ }))
+    fireEvent.click(within(screen.getByRole('article', { name: /Record 22 vs .*Record 28/ })).getByRole('button', { name: 'REVIEW DETAILS' }))
     await waitFor(() => expect(screen.getByText('Exception Workbench')).toBeTruthy())
     expect(screen.getByText('PROPOSED FUTURE MERGE')).toBeTruthy()
     expect(screen.getByText('NorthStar Automated Assessment')).toBeTruthy()
@@ -787,11 +895,211 @@ function identity(id: number, name: string, extra: Record<string, unknown> = {})
     fireEvent.click(screen.getByRole('button', { name: 'Replan' }))
     await waitFor(() => expect(duplicateReview.replanMergePlan).toHaveBeenCalled())
     fireEvent.click(screen.getByRole('button', { name: 'Not Safe' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Open Not Safe review' }))
+    fireEvent.click(within(screen.getByRole('article', { name: /Record 151 vs .*Record 212/ })).getByRole('button', { name: 'REVIEW DETAILS' }))
     await waitFor(() => expect(screen.getAllByText('NOT SAFE TO PLAN').length).toBeGreaterThan(0))
     expect(screen.getAllByText(/Possible multi-location identity/).length).toBeGreaterThan(0)
     expect(screen.queryByRole('button', { name: /Execute Merge/i })).toBeNull()
     expect(screen.queryByRole('button', { name: /Merge Now/i })).toBeNull()
     expect(screen.queryByRole('button', { name: /^Merge$/i })).toBeNull()
+  })
+
+  it('opens workbench details from the card without requiring a decision', async () => {
+    vi.mocked(duplicateReview.fetchDuplicateCandidates).mockResolvedValue({
+      planning_only: true,
+      merge_will_occur: false,
+      automatic_verdict: false,
+      writes: false,
+      total: 0,
+      offset: 0,
+      limit: 50,
+      pairs: [],
+    })
+    const kelderman = {
+      pair_key: '45:97',
+      company_a_id: 45,
+      company_b_id: 97,
+      company_a_name: 'Kelderman Manufacturing',
+      company_b_name: 'Kelderman Manufacturing',
+      company_a: identity(45, 'Kelderman Manufacturing', {
+        city: 'Oskaloosa',
+        state: 'IA',
+        address: '2686 Hwy 92',
+        phone: '(641) 673-0469',
+        master_rn: '138431',
+        contacts: [{ id: 1, name: 'Pat Buyer', title: 'Buyer', email: 'a@example.com', phone: '111', phone_extension: '12', master_rn_label: '138431' }],
+        identities: [{ label: 'LeadMaster 138431' }],
+        active_relationships: [rel('Carmeco', 'New', 'Julie Magnani', { external_record_no: '138431', next_action: '' })],
+      }),
+      company_b: identity(97, 'Kelderman Manufacturing', {
+        city: 'Oskaloosa',
+        state: 'IA',
+        master_rn: '253832',
+        active_relationships: [rel('Carmeco', 'New', 'Julie Magnani', { external_record_no: '253832' })],
+      }),
+      plan_state: 'NEEDS_EXCEPTION_DECISION',
+      plan_state_label: 'NEEDS DECISIONS',
+      exception_count: 1,
+      decision_needed: 'Choose survivor',
+      workbench_mode: 'simple',
+      simple_decision: true,
+      allow_quick_survivor: true,
+      same_client_ccr_conflict: false,
+    }
+    const multi = {
+      pair_key: '800:801',
+      company_a_id: 800,
+      company_b_id: 801,
+      company_a_name: 'Multi Client Co',
+      company_b_name: 'Multi Client Co',
+      company_a: identity(800, 'Multi Client Co', {
+        client_names: 'Carmeco, Brown Industries',
+        active_ccr_count: 2,
+        removed_ccr_count: 1,
+        assigned: 'Unassigned',
+        active_relationships: [
+          rel('Carmeco', '', 'Unassigned'),
+          rel('Brown Industries', 'New', 'Julie Magnani'),
+        ],
+        relationships: [
+          rel('Carmeco', '', 'Unassigned'),
+          rel('Brown Industries', 'New', 'Julie Magnani'),
+          rel('Premier', 'Archived Status', 'Julie Magnani', { active: false }),
+        ],
+      }),
+      company_b: identity(801, 'Multi Client Co', {
+        active_relationships: [rel('Carmeco', 'New', 'Unassigned')],
+      }),
+      plan_state: 'NEEDS_EXCEPTION_DECISION',
+      plan_state_label: 'NEEDS DECISIONS',
+      workbench_mode: 'complex',
+      allow_quick_survivor: false,
+      decision_needed: 'Resolve Carmeco status',
+    }
+    const edl = {
+      pair_key: '22:28',
+      company_a_id: 22,
+      company_b_id: 28,
+      company_a_name: 'Edl Packaging Engineers',
+      company_b_name: 'Edl Packaging Engineers',
+      company_a: identity(22, 'Edl Packaging Engineers', {
+        master_rn: '99202',
+        phone: '(920) 347-0143',
+        active_relationships: [rel('Carmeco', 'Left Message', 'Julie Magnani')],
+      }),
+      company_b: identity(28, 'Edl Packaging Engineers', {
+        master_rn: '101620',
+        phone: '(920) 336-7744',
+        active_relationships: [rel('Carmeco', 'New', 'Julie Magnani')],
+      }),
+      source_company_id: 28,
+      survivor_company_id: 22,
+      plan_state: 'NEEDS_EXCEPTION_DECISION',
+      workbench_mode: 'complex',
+      allow_quick_survivor: false,
+      same_client_ccr_conflict: true,
+      decision_needed: 'Resolve phone conflict',
+      decision_needed_all: ['Resolve phone conflict', 'Resolve Carmeco status', 'Resolve Carmeco RN', 'Review possible duplicate contact'],
+    }
+    vi.mocked(duplicateReview.saveMergePlanDecision).mockRejectedValue(new Error('keep must not open details'))
+    vi.mocked(duplicateReview.fetchMergePlans).mockResolvedValue({
+      planning_only: true,
+      merge_will_occur: false,
+      approval_created: false,
+      execute_merge: false,
+      plan_only_warning: 'PLANNING ONLY — NO MERGE WILL OCCUR',
+      summary: {
+        analyzed: 3,
+        ready_for_review: 0,
+        needs_exception_decision: 3,
+        not_safe_to_plan: 0,
+        stale: 0,
+        simple_decisions: 1,
+        complex_decisions: 2,
+      },
+      total: 3,
+      offset: 0,
+      limit: 50,
+      plans: [kelderman, multi, edl],
+      no_merge_button: true,
+      active_client_does_not_scope: true,
+    })
+    vi.mocked(duplicateReview.fetchMergePlan).mockImplementation(async (a: number) => ({
+      ...(a === 45 ? kelderman : a === 800 ? multi : edl),
+      planning_only: true,
+      merge_will_occur: false,
+      approval_created: false,
+      plan_only_warning: 'PLANNING ONLY — NO MERGE WILL OCCUR',
+      human_review: a === 22 ? { disposition: 'MERGE_CANDIDATE', proposed_survivor_company_id: 22, proposed_source_company_id: 28 } : {},
+      automated_assessment: { classification: 'HIGH_CONFIDENCE_DUPLICATE', why: ['name match'], concern_labels: ['phone conflict'] },
+      preservation: { lines: ['2 LeadMaster/source identities'] },
+      exceptions: a === 22
+        ? [
+            { exception_key: 'FIELD_CONFLICT_REVIEW:phone', code: 'FIELD_CONFLICT_REVIEW', decision_needed: 'Resolve phone conflict', why_you: 'phones differ', choices: [], details: {} },
+            { exception_key: 'STATUS_DECISION_REQUIRED:1', code: 'STATUS_DECISION_REQUIRED', decision_needed: 'Resolve Carmeco status', why_you: 'status', choices: [], details: {} },
+            { exception_key: 'EXTERNAL_RN_DECISION_REQUIRED:1', code: 'EXTERNAL_RN_DECISION_REQUIRED', decision_needed: 'Resolve Carmeco RN', why_you: 'rn', choices: [], details: {} },
+            { exception_key: 'CONTACT_DECISION_REQUIRED:1:2', code: 'CONTACT_DECISION_REQUIRED', decision_needed: 'Review possible duplicate contact', why_you: 'contact', choices: [], details: {} },
+          ]
+        : [{ exception_key: 'SURVIVOR_DECISION_REQUIRED', code: 'SURVIVOR_DECISION_REQUIRED', decision_needed: 'Choose survivor', why_you: 'choose', choices: [{ value: 'SURVIVOR:45', label: 'Make Record 45 the survivor' }], details: {} }],
+      no_merge_button: true,
+      no_execute_merge: true,
+    }))
+
+    render(<AdministrationDuplicateReview />)
+    fireEvent.click(screen.getByRole('button', { name: 'Merge Planning' }))
+    await waitFor(() => expect(duplicateReview.fetchMergePlans).toHaveBeenCalled())
+    const planCalls = vi.mocked(duplicateReview.fetchMergePlans).mock.calls.map((call) => call[0] || {})
+    expect(planCalls.some((args) => 'client_id' in (args as object))).toBe(false)
+    expect(screen.getByText(/Active Client selector does not scope/)).toBeTruthy()
+
+    const keldermanCard = screen.getByRole('article', { name: /Record 45 vs .*Record 97/ })
+    expect(within(keldermanCard).getAllByText('Carmeco — New').length).toBe(2)
+    expect(within(keldermanCard).getAllByText('Assigned: Julie Magnani').length).toBeGreaterThan(0)
+    expect(within(keldermanCard).getByRole('button', { name: 'KEEP RECORD 45' })).toBeTruthy()
+    expect(within(keldermanCard).getByRole('button', { name: 'KEEP RECORD 97' })).toBeTruthy()
+    expect(within(keldermanCard).queryByRole('button', { name: 'KEEP A AS SURVIVOR' })).toBeNull()
+
+    const fetchCount = vi.mocked(duplicateReview.fetchMergePlan).mock.calls.length
+    fireEvent.click(within(keldermanCard).getByRole('button', { name: 'KEEP RECORD 45' }))
+    await waitFor(() => expect(duplicateReview.saveMergePlanDecision).toHaveBeenCalled())
+    expect(vi.mocked(duplicateReview.saveMergePlanDecision).mock.calls[0]?.[2]).toMatchObject({
+      exception_key: 'SURVIVOR_DECISION_REQUIRED',
+      chosen_resolution: 'SURVIVOR:45',
+    })
+    expect(vi.mocked(duplicateReview.fetchMergePlan).mock.calls.length).toBe(fetchCount)
+    expect(screen.queryByRole('article', { name: 'Exception workbench' })).toBeNull()
+    vi.mocked(duplicateReview.saveMergePlanDecision).mockClear()
+
+    fireEvent.click(within(keldermanCard).getByText(/Kelderman Manufacturing — Record 45/))
+    await waitFor(() => expect(screen.getByRole('article', { name: 'Exception workbench' })).toBeTruthy())
+    expect(duplicateReview.saveMergePlanDecision).not.toHaveBeenCalled()
+    expect(screen.getByText('PAIR IDENTITY')).toBeTruthy()
+    expect(screen.getByText('Pat Buyer · Buyer · a@example.com · 111 x12 · RN 138431')).toBeTruthy()
+    fireEvent.click(screen.getAllByRole('button', { name: 'CLOSE DETAILS' })[0])
+    await waitFor(() => expect(screen.queryByRole('article', { name: 'Exception workbench' })).toBeNull())
+    expect(screen.getByLabelText('Search plans')).toBeTruthy()
+
+    fireEvent.click(within(screen.getByRole('article', { name: /Record 45 vs .*Record 97/ })).getByRole('button', { name: 'REVIEW DETAILS' }))
+    await waitFor(() => expect(screen.getByRole('article', { name: 'Exception workbench' })).toBeTruthy())
+    expect(screen.getByText('NorthStar Automated Assessment')).toBeTruthy()
+    expect(screen.getByText('Human Decision')).toBeTruthy()
+    expect(screen.getByText('PROPOSED FUTURE MERGE')).toBeTruthy()
+    fireEvent.click(screen.getAllByRole('button', { name: 'CLOSE DETAILS' })[0])
+    await waitFor(() => expect(screen.queryByRole('article', { name: 'Exception workbench' })).toBeNull())
+
+    const multiCard = screen.getByRole('article', { name: /Record 800 vs .*Record 801/ })
+    expect(within(multiCard).getByText('Carmeco — No status')).toBeTruthy()
+    expect(within(multiCard).getByText('Brown Industries — New')).toBeTruthy()
+    expect(within(multiCard).getAllByText('Assigned: Unassigned').length).toBeGreaterThan(0)
+    expect(within(multiCard).queryByText('Premier — Archived Status')).toBeNull()
+    expect(within(multiCard).queryByText('Archived Status')).toBeNull()
+
+    fireEvent.click(within(screen.getByRole('article', { name: /Record 22 vs .*Record 28/ })).getByRole('button', { name: 'REVIEW DETAILS' }))
+    await waitFor(() => expect(screen.getByText('MERGE_CANDIDATE')).toBeTruthy())
+    expect(screen.getAllByText('Resolve phone conflict').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Resolve Carmeco status').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Resolve Carmeco RN').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Review possible duplicate contact').length).toBeGreaterThan(0)
+    expect(duplicateReview.saveMergePlanDecision).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: /Execute Merge/i })).toBeNull()
   })
 })

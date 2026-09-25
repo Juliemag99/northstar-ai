@@ -392,6 +392,43 @@ export type MergePlanSummary = {
   exception_decisions?: number
 }
 
+export type WorkbenchCampaign = {
+  campaign_id?: number
+  client_id?: number
+  campaign_name?: string
+  notes?: string
+}
+
+export type WorkbenchRelationship = {
+  ccr_id?: number
+  client_id?: number
+  client_name?: string
+  client_code?: string
+  status?: string | null
+  status_label?: string
+  display?: string
+  assigned_user_id?: number | null
+  assigned_user_name?: string
+  hot?: boolean
+  follow_up_date?: string | null
+  next_action?: string | null
+  external_record_no?: string | null
+  active?: boolean
+  state_label?: string
+  campaigns?: WorkbenchCampaign[]
+}
+
+export type WorkbenchContact = {
+  id?: number
+  name?: string
+  title?: string
+  email?: string
+  phone?: string
+  phone_extension?: string
+  master_rn_label?: string
+  source?: string
+}
+
 export type WorkbenchIdentity = {
   company_id: number
   company_name: string
@@ -400,20 +437,37 @@ export type WorkbenchIdentity = {
   state?: string
   zip?: string
   city_state?: string
+  city_state_zip?: string
   address?: string
   phone?: string
+  phone_extension?: string
   website?: string
   domain?: string
   master_rn?: string | null
   master_rn_label?: string
   identity_summary?: string
+  identities?: Array<{ label?: string; source_system?: string; source_record_no?: string }>
   client_names?: string
   clients?: Array<{ client_id: number; client_code?: string; client_name?: string }>
+  relationships?: WorkbenchRelationship[]
+  active_relationships?: WorkbenchRelationship[]
   active_ccr_count?: number
   removed_ccr_count?: number
+  contacts?: WorkbenchContact[]
   contact_count?: number
+  aliases?: Array<{ id?: number; alias_name?: string; label?: string; source_system?: string; source_record_no?: string }>
   alias_count?: number
+  locations?: Array<{
+    id?: number
+    label?: string
+    location_name?: string
+    address?: string
+    city?: string
+    state?: string
+    zip?: string
+  }>
   location_count?: number
+  campaigns?: WorkbenchCampaign[]
   campaign_count?: number
   notes_count?: number
   activities_count?: number

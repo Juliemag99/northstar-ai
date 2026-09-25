@@ -696,6 +696,11 @@ export default function AdministrationDuplicateReview() {
           onLoad={(offset, state) => void loadPlans(offset, state)}
           onPrepare={() => void runPreparePlans()}
           onOpen={(row) => void openPlan(row)}
+          onClose={() => {
+            setSelectedPlan(null)
+            setFocusedExceptionKey('')
+            setReadyNextPair(null)
+          }}
           onChoice={(key, value) => setDecisionChoices((current) => ({ ...current, [key]: value }))}
           onReason={setDecisionReason}
           onSaveDecision={(row, key, resolution) => void saveDecision(row, key, resolution)}
