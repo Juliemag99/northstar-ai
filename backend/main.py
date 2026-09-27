@@ -23,10 +23,14 @@ from auth_http import (
 )
 from user_management import (
     CreateStaffUserRequest,
+    ReplaceUserClientsRequest,
     StaffAdminError,
+    UpdateStaffUserRequest,
     create_staff_user,
     get_admin_user,
     list_admin_users,
+    replace_user_clients,
+    update_staff_user,
 )
 from activities_data import (
     create_activity,
@@ -2008,7 +2012,7 @@ def delete_campaign_api(client_id: int, campaign_id: int):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-# --- Administrator User Management (read-only) ---
+# --- Administrator User Management ---
 
 
 @app.get("/api/admin/users")
@@ -2044,6 +2048,43 @@ def admin_users_create_api(body: CreateStaffUserRequest, request: Request):
         )
     except StaffAdminError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.patch("/api/admin/users/{user_id}")
+def admin_user_update_api(user_id: int, body: UpdateStaffUserRequest, request: Request):
+    """Edit account fields. Does not change passwords, clients, or CRM ownership.
+
+    A signed-in administrator who changes their own email has that session
+    revoked. The response still includes sessions_revoked. The client should
+    sign in again instead of keeping the screen open on a dead session.
+    """
+    actor = require_administrator(request)
+    try:
+        return update_staff_user(
+            actor_user_id=int(actor.id),
+            user_id=user_id,
+            changes=body.model_dump(exclude_unset=True),
+        )
+    except StaffAdminError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="User not found.") from exc
+
+
+@app.put("/api/admin/users/{user_id}/clients")
+def admin_user_clients_api(user_id: int, body: ReplaceUserClientsRequest, request: Request):
+    """Replace active client assignments. Does not revoke sessions or reassign CRM work."""
+    actor = require_administrator(request)
+    try:
+        return replace_user_clients(
+            actor_user_id=int(actor.id),
+            user_id=user_id,
+            client_ids=list(body.client_ids),
+        )
+    except StaffAdminError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="User not found.") from exc
 
 
 # --- Administrator Master Data Export ---

@@ -1,12 +1,11 @@
-"""Administrator view of staff users, plus audited non-admin creation.
+"""Administrator view of staff users, plus audited create and edit.
 
-Create does not assign CRM records. assigned_user_id remains workflow
+Create and edit do not assign CRM records. assigned_user_id remains workflow
 ownership, not client authorization.
 
-Future UM-2C last-administrator protection must not treat every active
-is_administrator row as a person who can sign in. An administrator row can
-have no password_hash (login_status no_password). This module does not
-demote or deactivate existing administrators.
+A usable administrator can sign in: is_administrator, active, and a non-empty
+password_hash. Temporary lockout does not remove that status, because lockout
+expires. An active administrator with no password is not a usable fallback.
 """
 
 from __future__ import annotations
@@ -15,10 +14,11 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from auth_http import _is_locked
 from auth_passwords import hash_password
+from auth_sessions import revoke_staff_sessions_for_user
 from db import get_connection
 from staff_provisioning import StaffProvisionError, canonicalize_email
 from staff_rbac import (
@@ -42,6 +42,18 @@ CREATABLE_STAFF_ROLES = frozenset(
 )
 STAFF_EMAIL_SUFFIX = "@n-star.us"
 EVENT_USER_CREATED = "user_created"
+EVENT_NAME_CHANGED = "name_changed"
+EVENT_EMAIL_CHANGED = "email_changed"
+EVENT_ROLE_CHANGED = "role_changed"
+EVENT_ADMINISTRATOR_CHANGED = "administrator_changed"
+EVENT_ACTIVE_CHANGED = "active_changed"
+EVENT_CLIENT_GRANTED = "client_granted"
+EVENT_CLIENT_REMOVED = "client_removed"
+EVENT_SESSIONS_REVOKED = "sessions_revoked"
+
+LAST_USABLE_ADMIN_MESSAGE = "This would leave no administrator who can sign in."
+SELF_DEACTIVATE_MESSAGE = "You cannot deactivate your own account."
+SELF_DEMOTE_MESSAGE = "You cannot remove your own administrator access."
 
 STAFF_ADMIN_EVENTS_DDL = """
 CREATE TABLE IF NOT EXISTS staff_admin_events (
@@ -288,6 +300,39 @@ class CreateStaffUserRequest(BaseModel):
     password: str = ""
 
 
+def _strict_bool(value: object) -> object:
+    if value is None:
+        return None
+    if type(value) is not bool:
+        raise ValueError("Active and administrator must be true or false.")
+    return value
+
+
+class UpdateStaffUserRequest(BaseModel):
+    """Account fields only. Password, clients, and CRM assignment are rejected."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    full_name: str | None = None
+    email: str | None = None
+    staff_role: str | None = None
+    is_administrator: bool | None = None
+    active: bool | None = None
+
+    @field_validator("is_administrator", "active", mode="before")
+    @classmethod
+    def _booleans(cls, value: object) -> object:
+        return _strict_bool(value)
+
+
+class ReplaceUserClientsRequest(BaseModel):
+    """Complete desired set of active client assignments."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    client_ids: list[int] = Field(default_factory=list)
+
+
 def ensure_staff_admin_events_schema(conn) -> None:
     """Create the audit table only. Does not insert events or edit users."""
     conn.execute(STAFF_ADMIN_EVENTS_DDL)
@@ -332,7 +377,7 @@ def _staff_email(value: object) -> str:
     return email
 
 
-def _client_ids(conn, raw_ids: list[int]) -> list[int]:
+def _client_ids(conn, raw_ids: list[int], *, allow_empty: bool = False) -> list[int]:
     chosen: list[int] = []
     seen: set[int] = set()
     for raw in raw_ids:
@@ -347,6 +392,8 @@ def _client_ids(conn, raw_ids: list[int]) -> list[int]:
         seen.add(client_id)
         chosen.append(client_id)
     if not chosen:
+        if allow_empty:
+            return []
         raise StaffAdminError("At least one client is required.")
     found = {
         int(row["id"])
@@ -371,11 +418,12 @@ def _audit_detail(detail: dict[str, object]) -> str:
     return encoded
 
 
-def _record_user_created(
+def _record_admin_event(
     conn,
     *,
     actor_user_id: int,
     target_user_id: int,
+    event_type: str,
     detail: dict[str, object],
 ) -> None:
     conn.execute(
@@ -387,10 +435,26 @@ def _record_user_created(
         (
             int(actor_user_id),
             int(target_user_id),
-            EVENT_USER_CREATED,
+            event_type,
             _stamp(),
             _audit_detail(detail),
         ),
+    )
+
+
+def _record_user_created(
+    conn,
+    *,
+    actor_user_id: int,
+    target_user_id: int,
+    detail: dict[str, object],
+) -> None:
+    _record_admin_event(
+        conn,
+        actor_user_id=actor_user_id,
+        target_user_id=target_user_id,
+        event_type=EVENT_USER_CREATED,
+        detail=detail,
     )
 
 
@@ -496,6 +560,422 @@ def create_staff_user(
                     "An account with that email already exists.",
                     status_code=409,
                 ) from exc
+            raise
+        except Exception:
+            conn.rollback()
+            raise
+    finally:
+        conn.close()
+
+
+def is_usable_administrator(row) -> bool:
+    """True when this row can sign in as an administrator.
+
+    Requires is_administrator, active, and a non-empty password_hash.
+    locked_until is ignored: a temporary lockout expires and must not make
+    the last usable administrator look unprotected. A no-password
+    administrator is not usable.
+    """
+    return (
+        bool(row["is_administrator"])
+        and bool(row["active"])
+        and bool(_text(row, "password_hash").strip())
+    )
+
+
+def _count_other_usable_administrators(conn, user_id: int) -> int:
+    rows = conn.execute(
+        "SELECT id, is_administrator, active, password_hash FROM users"
+    ).fetchall()
+    return sum(
+        1
+        for row in rows
+        if int(row["id"]) != int(user_id) and is_usable_administrator(row)
+    )
+
+
+def _non_admin_role(value: object) -> str:
+    role = normalize_role(value)
+    if role not in CREATABLE_STAFF_ROLES:
+        raise StaffAdminError("Staff role is not valid.")
+    return role
+
+
+def _next_account(row, changes: dict[str, object]) -> dict[str, object]:
+    """Resolve the account fields that should be stored after this edit."""
+    current_admin = bool(row["is_administrator"])
+    current_active = bool(row["active"])
+    stored_role = _text(row, "staff_role")
+    current_role = normalize_role(stored_role)
+    stored_name = _text(row, "full_name")
+    stored_email = _text(row, "email").strip()
+    current_email = stored_email.lower()
+
+    if "full_name" in changes:
+        name = _clean_name(changes["full_name"])
+        if not name:
+            raise StaffAdminError("Full name is required.")
+    else:
+        name = stored_name
+
+    if "email" in changes:
+        candidate = str(changes["email"] or "").strip().lower()
+        if candidate == current_email:
+            email = stored_email
+        else:
+            email = _staff_email(changes["email"])
+    else:
+        email = stored_email
+
+    if "active" in changes:
+        if changes["active"] is None:
+            raise StaffAdminError("Active must be true or false.")
+        active = bool(changes["active"])
+    else:
+        active = current_active
+
+    if "is_administrator" in changes:
+        if changes["is_administrator"] is None:
+            raise StaffAdminError("Administrator must be true or false.")
+        administrator = bool(changes["is_administrator"])
+    else:
+        administrator = current_admin
+
+    if administrator:
+        if not current_admin:
+            role = SYSTEM_ADMINISTRATOR
+        elif "staff_role" in changes:
+            requested = normalize_role(changes["staff_role"])
+            if requested and requested != SYSTEM_ADMINISTRATOR:
+                raise StaffAdminError(
+                    "An administrator's role remains System administrator. "
+                    "Turn administrator access off to assign another role."
+                )
+            role = SYSTEM_ADMINISTRATOR
+        else:
+            role = current_role
+    else:
+        demoting = current_admin and not administrator
+        if demoting and "staff_role" not in changes:
+            raise StaffAdminError(
+                "Choose a non-administrator role when turning administrator access off."
+            )
+        if "staff_role" in changes:
+            role = _non_admin_role(changes["staff_role"])
+        elif demoting:
+            raise StaffAdminError(
+                "Choose a non-administrator role when turning administrator access off."
+            )
+        else:
+            role = current_role
+
+    role_changed = role != current_role
+    if not role_changed:
+        role = stored_role
+    email_changed = email.lower() != current_email
+    if not email_changed:
+        email = stored_email
+
+    return {
+        "full_name": name,
+        "email": email,
+        "staff_role": role,
+        "is_administrator": administrator,
+        "active": active,
+        "name_changed": name != stored_name,
+        "email_changed": email_changed,
+        "role_changed": role_changed,
+        "administrator_changed": administrator != current_admin,
+        "active_changed": active != current_active,
+        "previous_name": stored_name,
+        "previous_email": stored_email,
+        "previous_role": current_role,
+        "previous_administrator": current_admin,
+        "previous_active": current_active,
+    }
+
+
+def update_staff_user(
+    *,
+    actor_user_id: int,
+    user_id: int,
+    changes: dict[str, object],
+) -> dict[str, object]:
+    """Apply one account edit atomically.
+
+    Does not change passwords, client assignments except the stored role on
+    active rows, or any CRM assigned_user_id. Reactivation does not invent a
+    password and does not clear lockout.
+
+    If the actor changes their own email, this revokes their current session
+    along with the target's other sessions. The response still returns
+    sessions_revoked. The caller must sign in again; the session is not kept
+    alive to preserve the screen.
+    """
+    if int(user_id) <= 0:
+        raise LookupError("User not found.")
+
+    conn = get_connection()
+    try:
+        ensure_staff_admin_events_schema(conn)
+        conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM users WHERE id = ?", (int(user_id),)).fetchone()
+        if row is None:
+            raise LookupError("User not found.")
+        account = _next_account(row, changes)
+        if account["email_changed"]:
+            taken = conn.execute(
+                "SELECT id FROM users WHERE lower(email) = ? AND id != ?",
+                (account["email"], int(user_id)),
+            ).fetchone()
+            if taken is not None:
+                raise StaffAdminError(
+                    "An account with that email already exists.",
+                    status_code=409,
+                )
+
+        if int(actor_user_id) == int(user_id):
+            if account["previous_active"] and not account["active"]:
+                raise StaffAdminError(SELF_DEACTIVATE_MESSAGE, status_code=409)
+            if account["previous_administrator"] and not account["is_administrator"]:
+                raise StaffAdminError(SELF_DEMOTE_MESSAGE, status_code=409)
+
+        next_usable = is_usable_administrator(
+            {
+                "is_administrator": account["is_administrator"],
+                "active": account["active"],
+                "password_hash": _text(row, "password_hash"),
+            }
+        )
+        if _count_other_usable_administrators(conn, int(user_id)) + (1 if next_usable else 0) == 0:
+            raise StaffAdminError(LAST_USABLE_ADMIN_MESSAGE, status_code=409)
+
+        changed = any(
+            account[flag]
+            for flag in (
+                "name_changed",
+                "email_changed",
+                "role_changed",
+                "administrator_changed",
+                "active_changed",
+            )
+        )
+        sessions_revoked = 0
+        try:
+            if changed:
+                conn.execute(
+                    """
+                    UPDATE users
+                    SET full_name = ?, email = ?, staff_role = ?,
+                        is_administrator = ?, active = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        account["full_name"],
+                        account["email"],
+                        account["staff_role"],
+                        1 if account["is_administrator"] else 0,
+                        1 if account["active"] else 0,
+                        int(user_id),
+                    ),
+                )
+                if account["role_changed"]:
+                    conn.execute(
+                        """
+                        UPDATE user_client_assignments
+                        SET role = ?
+                        WHERE user_id = ? AND active = 1
+                        """,
+                        (account["staff_role"], int(user_id)),
+                    )
+                audits = (
+                    (
+                        account["name_changed"],
+                        EVENT_NAME_CHANGED,
+                        {"old": account["previous_name"], "new": account["full_name"]},
+                    ),
+                    (
+                        account["email_changed"],
+                        EVENT_EMAIL_CHANGED,
+                        {"old": account["previous_email"], "new": account["email"]},
+                    ),
+                    (
+                        account["role_changed"],
+                        EVENT_ROLE_CHANGED,
+                        {"old": account["previous_role"], "new": account["staff_role"]},
+                    ),
+                    (
+                        account["administrator_changed"],
+                        EVENT_ADMINISTRATOR_CHANGED,
+                        {
+                            "old": account["previous_administrator"],
+                            "new": account["is_administrator"],
+                        },
+                    ),
+                    (
+                        account["active_changed"],
+                        EVENT_ACTIVE_CHANGED,
+                        {"old": account["previous_active"], "new": account["active"]},
+                    ),
+                )
+                for happened, event_type, detail in audits:
+                    if happened:
+                        _record_admin_event(
+                            conn,
+                            actor_user_id=int(actor_user_id),
+                            target_user_id=int(user_id),
+                            event_type=event_type,
+                            detail=detail,
+                        )
+                revoke = (
+                    account["email_changed"]
+                    or account["role_changed"]
+                    or account["administrator_changed"]
+                    or (account["previous_active"] and not account["active"])
+                )
+                if revoke:
+                    sessions_revoked = int(
+                        revoke_staff_sessions_for_user(conn, int(user_id)) or 0
+                    )
+                    if sessions_revoked:
+                        _record_admin_event(
+                            conn,
+                            actor_user_id=int(actor_user_id),
+                            target_user_id=int(user_id),
+                            event_type=EVENT_SESSIONS_REVOKED,
+                            detail={"sessions_revoked": sessions_revoked},
+                        )
+            payload = _read_admin_user(conn, int(user_id))
+            payload["sessions_revoked"] = sessions_revoked
+            conn.commit()
+            return payload
+        except StaffAdminError:
+            conn.rollback()
+            raise
+        except LookupError:
+            conn.rollback()
+            raise
+        except sqlite3.IntegrityError as exc:
+            conn.rollback()
+            if "email" in str(exc).lower():
+                raise StaffAdminError(
+                    "An account with that email already exists.",
+                    status_code=409,
+                ) from exc
+            raise
+        except Exception:
+            conn.rollback()
+            raise
+    finally:
+        conn.close()
+
+
+def replace_user_clients(
+    *,
+    actor_user_id: int,
+    user_id: int,
+    client_ids: list[int],
+) -> dict[str, object]:
+    """Replace the active client-assignment set without deleting rows.
+
+    Administrators may have an empty explicit set; their effective access
+    stays all clients. A non-administrator must keep at least one active
+    client. Sessions are not revoked. CRM assigned_user_id is not written.
+    """
+    if int(user_id) <= 0:
+        raise LookupError("User not found.")
+
+    conn = get_connection()
+    try:
+        ensure_staff_admin_events_schema(conn)
+        conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM users WHERE id = ?", (int(user_id),)).fetchone()
+        if row is None:
+            raise LookupError("User not found.")
+        administrator = bool(row["is_administrator"])
+        chosen = _client_ids(conn, list(client_ids), allow_empty=administrator)
+        if not administrator and not chosen:
+            raise StaffAdminError("At least one client is required.")
+        role = normalize_role(row["staff_role"] if "staff_role" in row.keys() else "")
+        if not role:
+            role = _canonical_role(row, has_staff_role="staff_role" in row.keys())
+        try:
+            existing = {
+                int(item["client_id"]): item
+                for item in conn.execute(
+                    """
+                    SELECT id, client_id, active
+                    FROM user_client_assignments
+                    WHERE user_id = ?
+                    """,
+                    (int(user_id),),
+                ).fetchall()
+            }
+            desired = set(chosen)
+            for client_id in chosen:
+                current = existing.get(client_id)
+                if current is None:
+                    conn.execute(
+                        """
+                        INSERT INTO user_client_assignments (
+                            user_id, client_id, role, active, assigned_at
+                        ) VALUES (?, ?, ?, 1, ?)
+                        """,
+                        (int(user_id), client_id, role, _stamp()),
+                    )
+                    _record_admin_event(
+                        conn,
+                        actor_user_id=int(actor_user_id),
+                        target_user_id=int(user_id),
+                        event_type=EVENT_CLIENT_GRANTED,
+                        detail={"client_id": client_id},
+                    )
+                elif not bool(current["active"]):
+                    conn.execute(
+                        """
+                        UPDATE user_client_assignments
+                        SET active = 1, role = ?
+                        WHERE id = ?
+                        """,
+                        (role, int(current["id"])),
+                    )
+                    _record_admin_event(
+                        conn,
+                        actor_user_id=int(actor_user_id),
+                        target_user_id=int(user_id),
+                        event_type=EVENT_CLIENT_GRANTED,
+                        detail={"client_id": client_id},
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE user_client_assignments
+                        SET role = ?
+                        WHERE id = ?
+                        """,
+                        (role, int(current["id"])),
+                    )
+            for client_id, current in existing.items():
+                if client_id in desired or not bool(current["active"]):
+                    continue
+                conn.execute(
+                    "UPDATE user_client_assignments SET active = 0 WHERE id = ?",
+                    (int(current["id"]),),
+                )
+                _record_admin_event(
+                    conn,
+                    actor_user_id=int(actor_user_id),
+                    target_user_id=int(user_id),
+                    event_type=EVENT_CLIENT_REMOVED,
+                    detail={"client_id": client_id},
+                )
+            payload = _read_admin_user(conn, int(user_id))
+            conn.commit()
+            return payload
+        except StaffAdminError:
+            conn.rollback()
             raise
         except Exception:
             conn.rollback()

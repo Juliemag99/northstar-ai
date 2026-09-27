@@ -11,6 +11,8 @@ vi.mock('./api/userManagement', () => ({
   fetchAdminUsers: vi.fn(),
   fetchAdminUser: vi.fn(),
   createAdminUser: vi.fn(),
+  updateAdminUser: vi.fn(),
+  replaceAdminUserClients: vi.fn(),
 }))
 
 const adminUser: StaffUser = {
@@ -108,6 +110,8 @@ afterEach(() => {
   vi.mocked(userManagement.fetchAdminUsers).mockReset()
   vi.mocked(userManagement.fetchAdminUser).mockReset()
   vi.mocked(userManagement.createAdminUser).mockReset()
+  vi.mocked(userManagement.updateAdminUser).mockReset()
+  vi.mocked(userManagement.replaceAdminUserClients).mockReset()
 })
 
 describe('Administration User Management', () => {
@@ -166,6 +170,8 @@ describe('Administration User Management', () => {
     expect(screen.getByText('Dashboard home')).toBeTruthy()
     expect(userManagement.fetchAdminUsers).not.toHaveBeenCalled()
     expect(userManagement.createAdminUser).not.toHaveBeenCalled()
+    expect(userManagement.updateAdminUser).not.toHaveBeenCalled()
+    expect(userManagement.replaceAdminUserClients).not.toHaveBeenCalled()
   })
 
   it('creates a non-administrator from the Administration user directory', async () => {
@@ -247,5 +253,187 @@ describe('Administration User Management', () => {
       active: true,
       password: secret,
     })
+  })
+
+  const clients = [
+    { client_id: 2, client_name: 'Brown', client_code: 'brown' },
+    { client_id: 4, client_name: 'Dawson', client_code: 'dawson' },
+  ]
+
+  const julieDetail: AdminUserDetail = {
+    ...directory[0],
+    assignments: [],
+    crm_ownership: {
+      client_company_relationships: 5,
+      contact_client_workflows: 0,
+      open_work_queue_items: 0,
+    },
+  }
+
+  it('protects the signed-in administrator from turning off Active or Administrator', async () => {
+    vi.mocked(userManagement.fetchAdminUsers).mockResolvedValue(directory)
+    vi.mocked(userManagement.fetchAdminUser).mockResolvedValue(julieDetail)
+    renderAdministration(authValue({ authenticated: true, user: adminUser }), clients)
+    fireEvent.click(screen.getByRole('tab', { name: 'User Management' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'View Julie Magnani' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit user' }))
+
+    expect((screen.getByRole('checkbox', { name: 'Active' }) as HTMLInputElement).disabled).toBe(true)
+    expect((screen.getByRole('checkbox', { name: 'Administrator' }) as HTMLInputElement).disabled).toBe(true)
+    expect(screen.getByText('You cannot deactivate your own account.')).toBeTruthy()
+    expect(screen.getByText('You cannot remove your own administrator access.')).toBeTruthy()
+    expect(screen.queryByLabelText(/password/i)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Reset password' })).toBeNull()
+    expect(screen.getByRole('heading', { name: 'CRM ownership' })).toBeTruthy()
+  })
+
+  it('requires confirmation before promoting a user to administrator', async () => {
+    vi.mocked(userManagement.fetchAdminUsers).mockResolvedValue(directory)
+    vi.mocked(userManagement.fetchAdminUser).mockResolvedValue(robertDetail)
+    vi.mocked(userManagement.updateAdminUser).mockResolvedValue({
+      user: {
+        ...robertDetail,
+        is_administrator: true,
+        staff_role: 'system_administrator',
+        access_scope: 'all_clients',
+      },
+      sessions_revoked: 1,
+    })
+    renderAdministration(authValue({ authenticated: true, user: adminUser }), clients)
+    fireEvent.click(screen.getByRole('tab', { name: 'User Management' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'View Robert Kirsten' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit user' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Administrator' }))
+    expect(
+      screen.getByText(
+        'This user will receive access to all clients and their role will become System administrator.',
+      ),
+    ).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Save account' }))
+    expect(
+      screen.getByText(
+        'Confirm that this user will become a System administrator with access to all clients.',
+      ),
+    ).toBeTruthy()
+    expect(userManagement.updateAdminUser).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('checkbox', { name: 'I confirm this promotion' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save account' }))
+    expect(await screen.findByText(/Active sessions revoked: 1/)).toBeTruthy()
+    expect(userManagement.updateAdminUser).toHaveBeenCalledWith(42, {
+      full_name: 'Robert Kirsten',
+      email: 'robertk@n-star.us',
+      staff_role: 'system_administrator',
+      is_administrator: true,
+      active: true,
+    })
+    expect(userManagement.replaceAdminUserClients).not.toHaveBeenCalled()
+  })
+
+  it('requires a role and a client before demotion and keeps CRM ownership separate', async () => {
+    const otherAdmin: AdminUserDetail = {
+      ...julieDetail,
+      id: 8,
+      full_name: 'NorthStar Admin',
+      email: 'admin@northstargroup.com',
+      assignments: [],
+      clients: [],
+    }
+    vi.mocked(userManagement.fetchAdminUsers).mockResolvedValue([
+      ...directory,
+      {
+        ...directory[0],
+        id: 8,
+        full_name: 'NorthStar Admin',
+        email: 'admin@northstargroup.com',
+      },
+    ])
+    vi.mocked(userManagement.fetchAdminUser).mockResolvedValue(otherAdmin)
+    vi.mocked(userManagement.replaceAdminUserClients).mockResolvedValue({
+      ...otherAdmin,
+      assignments: [{ client_id: 2, client_code: 'brown', client_name: 'Brown', active: true }],
+    })
+    vi.mocked(userManagement.updateAdminUser).mockResolvedValue({
+      user: {
+        ...otherAdmin,
+        is_administrator: false,
+        staff_role: 'revops_specialist',
+        access_scope: 'assigned',
+        assignments: [{ client_id: 2, client_code: 'brown', client_name: 'Brown', active: true }],
+      },
+      sessions_revoked: 0,
+    })
+    renderAdministration(authValue({ authenticated: true, user: adminUser }), clients)
+    fireEvent.click(screen.getByRole('tab', { name: 'User Management' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'View NorthStar Admin' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit user' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Administrator' }))
+    expect(screen.getByText(/Existing CRM ownership is not changed/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Save account' }))
+    expect(screen.getByText('Select a staff role.')).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('Staff role'), { target: { value: 'revops_specialist' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save account' }))
+    expect(screen.getByText('Select at least one client.')).toBeTruthy()
+    expect(userManagement.updateAdminUser).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Brown' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save account' }))
+    expect(await screen.findByText('User updated.')).toBeTruthy()
+    expect(userManagement.replaceAdminUserClients).toHaveBeenCalledWith(8, [2])
+    expect(userManagement.updateAdminUser).toHaveBeenCalledWith(8, {
+      full_name: 'NorthStar Admin',
+      email: 'admin@northstargroup.com',
+      staff_role: 'revops_specialist',
+      is_administrator: false,
+      active: true,
+    })
+    expect(screen.getByRole('heading', { name: 'CRM ownership' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Reset password' })).toBeNull()
+  })
+
+  it('saves client checkboxes without treating them as CRM ownership', async () => {
+    vi.mocked(userManagement.fetchAdminUsers).mockResolvedValue(directory)
+    vi.mocked(userManagement.fetchAdminUser).mockResolvedValue(robertDetail)
+    vi.mocked(userManagement.replaceAdminUserClients).mockResolvedValue(robertDetail)
+    renderAdministration(authValue({ authenticated: true, user: adminUser }), clients)
+    fireEvent.click(screen.getByRole('tab', { name: 'User Management' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'View Robert Kirsten' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit user' }))
+    expect(screen.getByText('Authorized clients only. Saving client access does not change CRM ownership.')).toBeTruthy()
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Dawson' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save client access' }))
+    expect(await screen.findByText('Client access saved. CRM ownership was not changed.')).toBeTruthy()
+    expect(userManagement.replaceAdminUserClients).toHaveBeenCalledWith(42, [2, 4])
+    expect(userManagement.updateAdminUser).not.toHaveBeenCalled()
+  })
+
+  it('requires deactivation confirmation and shows ownership counts', async () => {
+    vi.mocked(userManagement.fetchAdminUsers).mockResolvedValue(directory)
+    vi.mocked(userManagement.fetchAdminUser).mockResolvedValue(robertDetail)
+    vi.mocked(userManagement.updateAdminUser).mockResolvedValue({
+      user: { ...robertDetail, active: false, login_status: 'inactive' },
+      sessions_revoked: 2,
+    })
+    renderAdministration(authValue({ authenticated: true, user: adminUser }), clients)
+    fireEvent.click(screen.getByRole('tab', { name: 'User Management' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'View Robert Kirsten' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit user' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Active' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save account' }))
+    expect(
+      screen.getByText(
+        'Deactivating this user will prevent sign-in and revoke active sessions. Existing CRM work will remain assigned to this user until separately reassigned.',
+      ),
+    ).toBeTruthy()
+    expect(screen.getAllByText('Company relationships assigned: 3').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Contact workflows assigned: 2').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Open work queue items assigned: 1').length).toBeGreaterThan(0)
+    expect(userManagement.updateAdminUser).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: /reassign/i })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm deactivation' }))
+    expect(await screen.findByText(/Active sessions revoked: 2/)).toBeTruthy()
+    expect(screen.getAllByText('Inactive').length).toBeGreaterThan(0)
+    expect(userManagement.updateAdminUser).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({ active: false }),
+    )
   })
 })

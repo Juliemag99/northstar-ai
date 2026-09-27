@@ -163,6 +163,59 @@ export async function createAdminUser(input: CreateStaffUserInput): Promise<Admi
   return parseDetail(payload)
 }
 
+export type UpdateStaffUserInput = {
+  full_name: string
+  email: string
+  staff_role: string
+  is_administrator: boolean
+  active: boolean
+}
+
+export type AdminUserUpdateResult = {
+  user: AdminUserDetail
+  sessions_revoked: number
+}
+
+export async function updateAdminUser(
+  userId: number,
+  input: UpdateStaffUserInput,
+): Promise<AdminUserUpdateResult> {
+  const response = await apiFetch(`/api/admin/users/${userId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  const payload = await readJson(response)
+  if (!response.ok) {
+    const detail = asRecord(payload).detail
+    throw new Error(typeof detail === 'string' && detail.trim() ? detail : 'Unable to update this user.')
+  }
+  const sessions = Number(asRecord(payload).sessions_revoked)
+  return {
+    user: parseDetail(payload),
+    sessions_revoked: Number.isFinite(sessions) ? sessions : 0,
+  }
+}
+
+export async function replaceAdminUserClients(
+  userId: number,
+  clientIds: number[],
+): Promise<AdminUserDetail> {
+  const response = await apiFetch(`/api/admin/users/${userId}/clients`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ client_ids: clientIds }),
+  })
+  const payload = await readJson(response)
+  if (!response.ok) {
+    const detail = asRecord(payload).detail
+    throw new Error(
+      typeof detail === 'string' && detail.trim() ? detail : 'Unable to update client access.',
+    )
+  }
+  return parseDetail(payload)
+}
+
 export async function fetchAdminUser(userId: number): Promise<AdminUserDetail> {
   const response = await apiFetch(`/api/admin/users/${userId}`)
   if (response.status === 404) {
