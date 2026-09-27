@@ -21,7 +21,13 @@ from auth_http import (
     require_client_setup_editor,
     staff_auth_router,
 )
-from user_management import get_admin_user, list_admin_users
+from user_management import (
+    CreateStaffUserRequest,
+    StaffAdminError,
+    create_staff_user,
+    get_admin_user,
+    list_admin_users,
+)
 from activities_data import (
     create_activity,
     list_activities_due_today,
@@ -2020,6 +2026,24 @@ def admin_user_detail_api(user_id: int, request: Request):
         return get_admin_user(user_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail="User not found.") from exc
+
+
+@app.post("/api/admin/users")
+def admin_users_create_api(body: CreateStaffUserRequest, request: Request):
+    """Create a non-administrator. Password is hashed and never returned."""
+    actor = require_administrator(request)
+    try:
+        return create_staff_user(
+            actor_user_id=int(actor.id),
+            full_name=body.full_name,
+            email=body.email,
+            staff_role=body.staff_role,
+            client_ids=list(body.client_ids),
+            active=body.active,
+            password=body.password,
+        )
+    except StaffAdminError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 # --- Administrator Master Data Export ---

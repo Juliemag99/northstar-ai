@@ -196,10 +196,23 @@ def _fingerprint() -> tuple:
         snapshot = []
         for sql in statements:
             snapshot.append([tuple(row) for row in conn.execute(sql).fetchall()])
-        audit = conn.execute(
+        if conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'staff_admin_events'"
-        ).fetchone()
-        snapshot.append(audit is not None)
+        ).fetchone():
+            snapshot.append(
+                [
+                    tuple(row)
+                    for row in conn.execute(
+                        """
+                        SELECT id, actor_user_id, target_user_id, event_type, detail_json
+                        FROM staff_admin_events
+                        ORDER BY id
+                        """
+                    ).fetchall()
+                ]
+            )
+        else:
+            snapshot.append(None)
     return tuple(snapshot)
 
 
@@ -644,8 +657,6 @@ def test_get_endpoints_do_not_mutate() -> None:
         after = _fingerprint()
         if before != after:
             _fail("GET /api/admin/users changed the isolated database.")
-        if after[-1] is not False:
-            _fail("staff_admin_events must not be created by the read endpoints.")
     finally:
         _delete_user(user_id)
 

@@ -10,6 +10,7 @@ import type { AdminUserDetail, AdminUserSummary } from './api/userManagement'
 vi.mock('./api/userManagement', () => ({
   fetchAdminUsers: vi.fn(),
   fetchAdminUser: vi.fn(),
+  createAdminUser: vi.fn(),
 }))
 
 const adminUser: StaffUser = {
@@ -81,7 +82,10 @@ function authValue(overrides: Partial<AuthContextValue> = {}): AuthContextValue 
   }
 }
 
-function renderAdministration(value: AuthContextValue) {
+function renderAdministration(
+  value: AuthContextValue,
+  availableClients: Array<{ client_id: number; client_name: string; client_code: string }> = [],
+) {
   return render(
     <AuthContext.Provider value={value}>
       <MemoryRouter initialEntries={['/administration']}>
@@ -89,7 +93,9 @@ function renderAdministration(value: AuthContextValue) {
           <Route path="/" element={<div>Dashboard home</div>} />
           <Route
             path="/administration"
-            element={<Administration activeClientId={1} availableClients={[]} />}
+            element={
+              <Administration activeClientId={1} availableClients={availableClients} />
+            }
           />
         </Routes>
       </MemoryRouter>
@@ -101,6 +107,7 @@ afterEach(() => {
   cleanup()
   vi.mocked(userManagement.fetchAdminUsers).mockReset()
   vi.mocked(userManagement.fetchAdminUser).mockReset()
+  vi.mocked(userManagement.createAdminUser).mockReset()
 })
 
 describe('Administration User Management', () => {
@@ -158,5 +165,87 @@ describe('Administration User Management', () => {
     expect(screen.queryByRole('tab', { name: 'User Management' })).toBeNull()
     expect(screen.getByText('Dashboard home')).toBeTruthy()
     expect(userManagement.fetchAdminUsers).not.toHaveBeenCalled()
+    expect(userManagement.createAdminUser).not.toHaveBeenCalled()
+  })
+
+  it('creates a non-administrator from the Administration user directory', async () => {
+    const secret = 'NsPilot9secret'
+    vi.mocked(userManagement.fetchAdminUsers).mockResolvedValue(directory)
+    vi.mocked(userManagement.createAdminUser).mockResolvedValue({
+      ...directory[1],
+      id: 77,
+      full_name: 'Ada Lovelace',
+      email: 'ada@n-star.us',
+      staff_role: 'revops_specialist',
+      is_administrator: false,
+      active: true,
+      login_status: 'can_sign_in',
+      access_scope: 'assigned',
+      clients: [{ client_id: 2, client_code: 'brown', client_name: 'Brown' }],
+      assignments: [{ client_id: 2, client_code: 'brown', client_name: 'Brown', active: true }],
+      crm_ownership: {
+        client_company_relationships: 0,
+        contact_client_workflows: 0,
+        open_work_queue_items: 0,
+      },
+    })
+
+    renderAdministration(authValue({ authenticated: true, user: adminUser }), [
+      { client_id: 2, client_name: 'Brown', client_code: 'brown' },
+      { client_id: 3, client_name: 'Dawson', client_code: 'dawson' },
+    ])
+    fireEvent.click(screen.getByRole('tab', { name: 'User Management' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Create user' }))
+
+    const roleOptions = screen.getAllByRole('option').map((option) => option.textContent)
+    expect(roleOptions).toEqual([
+      'Select a role…',
+      'RevOps specialist',
+      'RevOps manager',
+      'Appointment setter',
+      'Read only',
+    ])
+    expect(screen.queryByRole('option', { name: 'System administrator' })).toBeNull()
+    expect(screen.queryByRole('button', { name: /administrator/i })).toBeNull()
+
+    fireEvent.change(screen.getByLabelText('Full name'), { target: { value: 'Ada Lovelace' } })
+    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'Ada@n-star.us' } })
+    fireEvent.change(screen.getByLabelText('Staff role'), { target: { value: 'revops_specialist' } })
+    fireEvent.change(screen.getByLabelText('Initial password'), { target: { value: secret } })
+    fireEvent.change(screen.getByLabelText('Confirm initial password'), { target: { value: secret } })
+    fireEvent.click(screen.getByRole('button', { name: 'Review user' }))
+    expect(screen.getByText('Select at least one client.')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Brown' }))
+    fireEvent.change(screen.getByLabelText('Confirm initial password'), {
+      target: { value: `${secret}-mismatch` },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Review user' }))
+    expect(screen.getByText('Password confirmation does not match.')).toBeTruthy()
+
+    fireEvent.change(screen.getByLabelText('Confirm initial password'), { target: { value: secret } })
+    fireEvent.click(screen.getByRole('button', { name: 'Review user' }))
+    expect(screen.getByRole('heading', { name: 'Review new user' })).toBeTruthy()
+    expect(screen.getByText('ada@n-star.us')).toBeTruthy()
+    expect(screen.getByText(/The password is not shown/)).toBeTruthy()
+    expect(screen.queryByText(secret)).toBeNull()
+    expect(screen.queryByDisplayValue(secret)).toBeNull()
+    expect(screen.queryByLabelText('Initial password')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm create user' }))
+    expect(await screen.findByRole('heading', { name: 'Ada Lovelace' })).toBeTruthy()
+    expect(screen.getByText('User created. The initial password is not shown again.')).toBeTruthy()
+    expect(screen.queryByText(secret)).toBeNull()
+    expect(screen.queryByLabelText('Initial password')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Reset password' })).toBeNull()
+    expect(userManagement.createAdminUser).toHaveBeenCalledWith({
+      full_name: 'Ada Lovelace',
+      email: 'ada@n-star.us',
+      staff_role: 'revops_specialist',
+      client_ids: [2],
+      active: true,
+      password: secret,
+    })
   })
 })

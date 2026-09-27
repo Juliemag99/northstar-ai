@@ -140,6 +140,29 @@ export async function fetchAdminUsers(): Promise<AdminUserSummary[]> {
     .filter((item): item is AdminUserSummary => item != null)
 }
 
+export type CreateStaffUserInput = {
+  full_name: string
+  email: string
+  staff_role: string
+  client_ids: number[]
+  active: boolean
+  password: string
+}
+
+export async function createAdminUser(input: CreateStaffUserInput): Promise<AdminUserDetail> {
+  const response = await apiFetch('/api/admin/users', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  const payload = await readJson(response)
+  if (!response.ok) {
+    const detail = asRecord(payload).detail
+    throw new Error(typeof detail === 'string' && detail.trim() ? detail : 'Unable to create this user.')
+  }
+  return parseDetail(payload)
+}
+
 export async function fetchAdminUser(userId: number): Promise<AdminUserDetail> {
   const response = await apiFetch(`/api/admin/users/${userId}`)
   if (response.status === 404) {

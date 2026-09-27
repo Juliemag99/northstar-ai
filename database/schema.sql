@@ -1375,6 +1375,34 @@ CREATE INDEX IF NOT EXISTS idx_client_data_import_batches_client
 CREATE INDEX IF NOT EXISTS idx_client_data_import_batches_crm
     ON client_data_import_batches(crm_batch_id);
 
+-- Staff administration audit. Never store passwords, hashes, tokens, or CSRF secrets.
+CREATE TABLE IF NOT EXISTS staff_admin_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_user_id INTEGER,
+    target_user_id INTEGER,
+    event_type TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    CHECK (event_type IN (
+        'user_created',
+        'name_changed',
+        'email_changed',
+        'role_changed',
+        'administrator_changed',
+        'active_changed',
+        'client_granted',
+        'client_removed',
+        'password_reset',
+        'sessions_revoked'
+    )),
+    FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (target_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_staff_admin_events_target
+    ON staff_admin_events(target_user_id, id);
+CREATE INDEX IF NOT EXISTS idx_staff_admin_events_created
+    ON staff_admin_events(created_at);
+
 -- Full-text search index for companies, contacts, legacy notes, and activities
 CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
     doc_type,

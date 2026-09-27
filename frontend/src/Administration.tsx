@@ -318,7 +318,9 @@ export default function Administration({
         </button>
       </div>
 
-      {adminTab === 'users' ? <AdministrationUserManagement /> : null}
+      {adminTab === 'users' ? (
+        <AdministrationUserManagement availableClients={availableClients} />
+      ) : null}
 
       {adminTab === 'import' ? (
         <AdministrationImport

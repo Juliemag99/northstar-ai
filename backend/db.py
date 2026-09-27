@@ -513,6 +513,9 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     from client_data_import import ensure_client_data_import_schema
 
     ensure_client_data_import_schema(conn)
+    from user_management import ensure_staff_admin_events_schema
+
+    ensure_staff_admin_events_schema(conn)
     conn.commit()
 
 

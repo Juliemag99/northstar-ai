@@ -1,16 +1,72 @@
-"""Read-only administrator view of staff users.
+"""Administrator view of staff users, plus audited non-admin creation.
 
-Does not create users, change passwords, edit assignments, or write audit rows.
-CRM assigned_user_id values are counted only. They are not authorization.
+Create does not assign CRM records. assigned_user_id remains workflow
+ownership, not client authorization.
+
+Future UM-2C last-administrator protection must not treat every active
+is_administrator row as a person who can sign in. An administrator row can
+have no password_hash (login_status no_password). This module does not
+demote or deactivate existing administrators.
 """
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from datetime import datetime, timezone
 
+from pydantic import BaseModel, Field
+
 from auth_http import _is_locked
+from auth_passwords import hash_password
 from db import get_connection
-from staff_rbac import SYSTEM_ADMINISTRATOR, normalize_role
+from staff_provisioning import StaffProvisionError, canonicalize_email
+from staff_rbac import (
+    APPOINTMENT_SETTER,
+    OPERATIONS_ADMIN,
+    READ_ONLY,
+    REVOPS_MANAGER,
+    REVOPS_SPECIALIST,
+    SYSTEM_ADMINISTRATOR,
+    normalize_role,
+)
+
+# Creation cannot grant administrator-wide roles. Stored value is canonical.
+CREATABLE_STAFF_ROLES = frozenset(
+    {
+        REVOPS_SPECIALIST,
+        REVOPS_MANAGER,
+        APPOINTMENT_SETTER,
+        READ_ONLY,
+    }
+)
+STAFF_EMAIL_SUFFIX = "@n-star.us"
+EVENT_USER_CREATED = "user_created"
+
+STAFF_ADMIN_EVENTS_DDL = """
+CREATE TABLE IF NOT EXISTS staff_admin_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_user_id INTEGER,
+    target_user_id INTEGER,
+    event_type TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    CHECK (event_type IN (
+        'user_created',
+        'name_changed',
+        'email_changed',
+        'role_changed',
+        'administrator_changed',
+        'active_changed',
+        'client_granted',
+        'client_removed',
+        'password_reset',
+        'sessions_revoked'
+    )),
+    FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (target_user_id) REFERENCES users(id) ON DELETE SET NULL
+)
+"""
 
 LOGIN_INACTIVE = "inactive"
 LOGIN_NO_PASSWORD = "no_password"
@@ -193,21 +249,256 @@ def list_admin_users() -> list[dict[str, object]]:
         ]
 
 
-def get_admin_user(user_id: int) -> dict[str, object]:
+def _read_admin_user(conn, user_id: int) -> dict[str, object]:
     if int(user_id) <= 0:
         raise LookupError("User not found.")
+    has_staff_role = "staff_role" in _columns(conn, "users")
+    row = conn.execute("SELECT * FROM users WHERE id = ?", (int(user_id),)).fetchone()
+    if row is None:
+        raise LookupError("User not found.")
+    assignments = _load_assignments(conn).get(int(row["id"]), [])
+    payload = _summary(
+        row,
+        assignments,
+        has_staff_role=has_staff_role,
+        now=_now(),
+    )
+    payload["assignments"] = assignments
+    payload["crm_ownership"] = _crm_ownership(conn, int(row["id"]))
+    return payload
+
+
+def get_admin_user(user_id: int) -> dict[str, object]:
     with get_connection() as conn:
-        has_staff_role = "staff_role" in _columns(conn, "users")
-        row = conn.execute("SELECT * FROM users WHERE id = ?", (int(user_id),)).fetchone()
-        if row is None:
-            raise LookupError("User not found.")
-        assignments = _load_assignments(conn).get(int(row["id"]), [])
-        payload = _summary(
-            row,
-            assignments,
-            has_staff_role=has_staff_role,
-            now=_now(),
+        return _read_admin_user(conn, user_id)
+
+
+class StaffAdminError(ValueError):
+    def __init__(self, message: str, status_code: int = 400):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class CreateStaffUserRequest(BaseModel):
+    full_name: str = ""
+    email: str = ""
+    staff_role: str = ""
+    client_ids: list[int] = Field(default_factory=list)
+    active: bool = True
+    password: str = ""
+
+
+def ensure_staff_admin_events_schema(conn) -> None:
+    """Create the audit table only. Does not insert events or edit users."""
+    conn.execute(STAFF_ADMIN_EVENTS_DDL)
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_staff_admin_events_target
+            ON staff_admin_events(target_user_id, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_staff_admin_events_created
+            ON staff_admin_events(created_at)
+        """
+    )
+
+
+def _stamp(now: datetime | None = None) -> str:
+    return (now or _now()).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _clean_name(value: object) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _creation_role(value: object) -> str:
+    role = normalize_role(value)
+    if role in {SYSTEM_ADMINISTRATOR, OPERATIONS_ADMIN}:
+        raise StaffAdminError("Administrator access cannot be granted when creating a user.")
+    if role not in CREATABLE_STAFF_ROLES:
+        raise StaffAdminError("Staff role is not valid for a new user.")
+    return role
+
+
+def _staff_email(value: object) -> str:
+    try:
+        email = canonicalize_email(str(value or "").strip())
+    except StaffProvisionError as exc:
+        raise StaffAdminError(str(exc)) from exc
+    if not email.endswith(STAFF_EMAIL_SUFFIX):
+        raise StaffAdminError("Email must use @n-star.us.")
+    return email
+
+
+def _client_ids(conn, raw_ids: list[int]) -> list[int]:
+    chosen: list[int] = []
+    seen: set[int] = set()
+    for raw in raw_ids:
+        try:
+            client_id = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise StaffAdminError("A selected client does not exist.") from exc
+        if client_id <= 0:
+            raise StaffAdminError("A selected client does not exist.")
+        if client_id in seen:
+            continue
+        seen.add(client_id)
+        chosen.append(client_id)
+    if not chosen:
+        raise StaffAdminError("At least one client is required.")
+    found = {
+        int(row["id"])
+        for row in conn.execute(
+            f"SELECT id FROM clients WHERE id IN ({','.join('?' for _ in chosen)})",
+            chosen,
+        ).fetchall()
+    }
+    if found != set(chosen):
+        raise StaffAdminError("A selected client does not exist.")
+    return chosen
+
+
+def _audit_detail(detail: dict[str, object]) -> str:
+    for key in detail:
+        lowered = str(key).lower()
+        if "password" in lowered or "csrf" in lowered or "token" in lowered or "hash" in lowered:
+            raise StaffAdminError("Audit detail cannot include a credential.")
+    encoded = json.dumps(detail, sort_keys=True, separators=(",", ":"))
+    if "$argon2" in encoded.lower():
+        raise StaffAdminError("Audit detail cannot include a credential.")
+    return encoded
+
+
+def _record_user_created(
+    conn,
+    *,
+    actor_user_id: int,
+    target_user_id: int,
+    detail: dict[str, object],
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO staff_admin_events (
+            actor_user_id, target_user_id, event_type, created_at, detail_json
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            int(actor_user_id),
+            int(target_user_id),
+            EVENT_USER_CREATED,
+            _stamp(),
+            _audit_detail(detail),
+        ),
+    )
+
+
+def _insert_assignments(conn, user_id: int, client_ids: list[int], role: str) -> None:
+    for client_id in client_ids:
+        conn.execute(
+            """
+            INSERT INTO user_client_assignments (
+                user_id, client_id, role, active, assigned_at
+            ) VALUES (?, ?, ?, 1, ?)
+            """,
+            (int(user_id), int(client_id), role, _stamp()),
         )
-        payload["assignments"] = assignments
-        payload["crm_ownership"] = _crm_ownership(conn, int(row["id"]))
-        return payload
+
+
+def create_staff_user(
+    *,
+    actor_user_id: int,
+    full_name: str,
+    email: str,
+    staff_role: str,
+    client_ids: list[int],
+    password: str,
+    active: bool = True,
+) -> dict[str, object]:
+    """Create one non-administrator and the user_created audit row together.
+
+    The request cannot set is_administrator. CRM assigned_user_id is not written.
+    locked_until stays the empty string: that column is NOT NULL, and login
+    treats blank as not locked.
+    """
+    name = _clean_name(full_name)
+    if not name:
+        raise StaffAdminError("Full name is required.")
+    email_norm = _staff_email(email)
+    role = _creation_role(staff_role)
+    try:
+        digest = hash_password(password, email=email_norm)
+    except ValueError as exc:
+        raise StaffAdminError(str(exc)) from exc
+    is_active = bool(active)
+
+    conn = get_connection()
+    try:
+        ensure_staff_admin_events_schema(conn)
+        conn.commit()
+        chosen = _client_ids(conn, list(client_ids))
+        existing = conn.execute(
+            "SELECT id FROM users WHERE lower(email) = ?",
+            (email_norm,),
+        ).fetchone()
+        if existing is not None:
+            raise StaffAdminError(
+                "An account with that email already exists.",
+                status_code=409,
+            )
+        detail = {
+            "full_name": name,
+            "email": email_norm,
+            "staff_role": role,
+            "active": is_active,
+            "client_ids": chosen,
+            "is_administrator": False,
+            "is_internal_northstar": True,
+        }
+        try:
+            conn.execute(
+                """
+                INSERT INTO users (
+                    email, full_name, is_administrator, is_internal_northstar, active,
+                    password_hash, password_updated_at, failed_login_count, locked_until,
+                    staff_role
+                ) VALUES (?, ?, 0, 1, ?, ?, ?, 0, '', ?)
+                """,
+                (
+                    email_norm,
+                    name,
+                    1 if is_active else 0,
+                    digest,
+                    _stamp(),
+                    role,
+                ),
+            )
+            user_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            _insert_assignments(conn, user_id, chosen, role)
+            _record_user_created(
+                conn,
+                actor_user_id=int(actor_user_id),
+                target_user_id=user_id,
+                detail=detail,
+            )
+            payload = _read_admin_user(conn, user_id)
+            payload["has_password"] = True
+            conn.commit()
+            return payload
+        except StaffAdminError:
+            conn.rollback()
+            raise
+        except sqlite3.IntegrityError as exc:
+            conn.rollback()
+            if "email" in str(exc).lower():
+                raise StaffAdminError(
+                    "An account with that email already exists.",
+                    status_code=409,
+                ) from exc
+            raise
+        except Exception:
+            conn.rollback()
+            raise
+    finally:
+        conn.close()
