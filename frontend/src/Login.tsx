@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { GENERIC_LOGIN_ERROR } from './api/auth'
+import { takePasswordResetNotice } from './auth/passwordResetNotice'
 import { useAuth } from './auth/useAuth'
 import { safeReturnPath } from './auth/safeReturnPath'
 
@@ -12,6 +13,7 @@ export default function Login() {
   const [password, setPassword] = useState('')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [resetNotice] = useState(() => takePasswordResetNotice())
 
   function continueWithoutSigningIn() {
     navigate('/')
@@ -39,6 +41,11 @@ export default function Login() {
       <div className="login-card">
         <p className="login-brand">NorthStar AI</p>
         <h1>Staff sign in</h1>
+        {resetNotice ? (
+          <p className="login-notice" role="status">
+            {resetNotice}
+          </p>
+        ) : null}
         {!authAvailable && (
           <p className="login-notice" role="status">
             Staff sign-in is not configured yet. You can continue without signing in.

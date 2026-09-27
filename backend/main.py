@@ -24,12 +24,14 @@ from auth_http import (
 from user_management import (
     CreateStaffUserRequest,
     ReplaceUserClientsRequest,
+    ResetStaffPasswordRequest,
     StaffAdminError,
     UpdateStaffUserRequest,
     create_staff_user,
     get_admin_user,
     list_admin_users,
     replace_user_clients,
+    reset_staff_password,
     update_staff_user,
 )
 from activities_data import (
@@ -2080,6 +2082,30 @@ def admin_user_clients_api(user_id: int, body: ReplaceUserClientsRequest, reques
             actor_user_id=int(actor.id),
             user_id=user_id,
             client_ids=list(body.client_ids),
+        )
+    except StaffAdminError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="User not found.") from exc
+
+
+@app.post("/api/admin/users/{user_id}/reset-password")
+def admin_user_reset_password_api(
+    user_id: int, body: ResetStaffPasswordRequest, request: Request
+):
+    """Replace a password, clear lockout, and revoke that user's sessions.
+
+    The password is hashed before it is stored and is never returned. Resetting
+    the signed-in administrator's own password revokes the current session.
+    The response still succeeds; the client must sign in again with the new
+    password. Inactive accounts stay inactive.
+    """
+    actor = require_administrator(request)
+    try:
+        return reset_staff_password(
+            actor_user_id=int(actor.id),
+            user_id=user_id,
+            password=body.password,
         )
     except StaffAdminError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc

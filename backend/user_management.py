@@ -50,6 +50,7 @@ EVENT_ACTIVE_CHANGED = "active_changed"
 EVENT_CLIENT_GRANTED = "client_granted"
 EVENT_CLIENT_REMOVED = "client_removed"
 EVENT_SESSIONS_REVOKED = "sessions_revoked"
+EVENT_PASSWORD_RESET = "password_reset"
 
 LAST_USABLE_ADMIN_MESSAGE = "This would leave no administrator who can sign in."
 SELF_DEACTIVATE_MESSAGE = "You cannot deactivate your own account."
@@ -333,6 +334,21 @@ class ReplaceUserClientsRequest(BaseModel):
     client_ids: list[int] = Field(default_factory=list)
 
 
+class ResetStaffPasswordRequest(BaseModel):
+    """Write-only replacement password. Extra fields are rejected."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    password: str
+
+    @field_validator("password", mode="before")
+    @classmethod
+    def _password_text(cls, value: object) -> object:
+        if type(value) is not str:
+            raise ValueError("Password is required.")
+        return value
+
+
 def ensure_staff_admin_events_schema(conn) -> None:
     """Create the audit table only. Does not insert events or edit users."""
     conn.execute(STAFF_ADMIN_EVENTS_DDL)
@@ -410,6 +426,8 @@ def _client_ids(conn, raw_ids: list[int], *, allow_empty: bool = False) -> list[
 def _audit_detail(detail: dict[str, object]) -> str:
     for key in detail:
         lowered = str(key).lower()
+        if lowered == "password_updated_at":
+            continue
         if "password" in lowered or "csrf" in lowered or "token" in lowered or "hash" in lowered:
             raise StaffAdminError("Audit detail cannot include a credential.")
     encoded = json.dumps(detail, sort_keys=True, separators=(",", ":"))
@@ -975,6 +993,101 @@ def replace_user_clients(
             conn.commit()
             return payload
         except StaffAdminError:
+            conn.rollback()
+            raise
+        except Exception:
+            conn.rollback()
+            raise
+    finally:
+        conn.close()
+
+
+def reset_staff_password(
+    *,
+    actor_user_id: int,
+    user_id: int,
+    password: str,
+) -> dict[str, object]:
+    """Replace one password and revoke that user's sessions together.
+
+    Does not activate the account, change role or administrator status, or
+    touch client access or CRM assigned_user_id. locked_until is cleared with
+    the empty string, which is how the current NOT NULL column means unlocked.
+    A weak password is rejected before any write. If the actor resets their
+    own password, this revokes the current session and does not recreate it.
+    """
+    if int(user_id) <= 0:
+        raise LookupError("User not found.")
+    if type(password) is not str:
+        raise StaffAdminError("Password is required.")
+
+    conn = get_connection()
+    try:
+        ensure_staff_admin_events_schema(conn)
+        conn.commit()
+        row = conn.execute(
+            "SELECT id, email, active FROM users WHERE id = ?",
+            (int(user_id),),
+        ).fetchone()
+        if row is None:
+            raise LookupError("User not found.")
+        email = _text(row, "email")
+        conn.commit()
+        try:
+            digest = hash_password(password, email=email)
+        except ValueError as exc:
+            raise StaffAdminError(str(exc)) from exc
+        updated_at = _stamp()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            current = conn.execute(
+                "SELECT id, active FROM users WHERE id = ?",
+                (int(user_id),),
+            ).fetchone()
+            if current is None:
+                raise LookupError("User not found.")
+            was_active = bool(current["active"])
+            conn.execute(
+                """
+                UPDATE users
+                SET password_hash = ?,
+                    password_updated_at = ?,
+                    failed_login_count = 0,
+                    locked_until = ''
+                WHERE id = ?
+                """,
+                (digest, updated_at, int(user_id)),
+            )
+            _record_admin_event(
+                conn,
+                actor_user_id=int(actor_user_id),
+                target_user_id=int(user_id),
+                event_type=EVENT_PASSWORD_RESET,
+                detail={
+                    "password_updated_at": updated_at,
+                    "active": was_active,
+                },
+            )
+            sessions_revoked = int(revoke_staff_sessions_for_user(conn, int(user_id)) or 0)
+            if sessions_revoked:
+                _record_admin_event(
+                    conn,
+                    actor_user_id=int(actor_user_id),
+                    target_user_id=int(user_id),
+                    event_type=EVENT_SESSIONS_REVOKED,
+                    detail={"sessions_revoked": sessions_revoked},
+                )
+            conn.commit()
+            return {
+                "user_id": int(user_id),
+                "has_password": True,
+                "password_updated_at": updated_at,
+                "sessions_revoked": sessions_revoked,
+            }
+        except StaffAdminError:
+            conn.rollback()
+            raise
+        except LookupError:
             conn.rollback()
             raise
         except Exception:

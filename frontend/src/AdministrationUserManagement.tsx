@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useAuth } from './auth/useAuth'
+import { stagePasswordResetNotice } from './auth/passwordResetNotice'
 import {
   createAdminUser,
   fetchAdminUser,
   fetchAdminUsers,
   replaceAdminUserClients,
+  resetAdminUserPassword,
   updateAdminUser,
   type AdminUserDetail,
   type AdminUserSummary,
@@ -81,6 +84,7 @@ export default function AdministrationUserManagement({
   availableClients: DirectoryClient[]
 }) {
   const auth = useAuth()
+  const navigate = useNavigate()
   const signedInUserId = auth.user?.id ?? null
   const [users, setUsers] = useState<AdminUserSummary[]>([])
   const [detail, setDetail] = useState<AdminUserDetail | null>(null)
@@ -93,6 +97,10 @@ export default function AdministrationUserManagement({
   const [saving, setSaving] = useState(false)
   const [form, setForm] = useState(blankCreateForm)
   const [editing, setEditing] = useState(false)
+  const [resettingPassword, setResettingPassword] = useState(false)
+  const [reviewingPassword, setReviewingPassword] = useState(false)
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmNewPassword, setConfirmNewPassword] = useState('')
   const [showDeactivation, setShowDeactivation] = useState(false)
   const [account, setAccount] = useState({
     fullName: '',
@@ -187,6 +195,78 @@ export default function AdministrationUserManagement({
     } catch (err: unknown) {
       setSuccess(null)
       setError(err instanceof Error ? err.message : 'Unable to create this user.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function clearPasswordReset() {
+    setNewPassword('')
+    setConfirmNewPassword('')
+    setResettingPassword(false)
+    setReviewingPassword(false)
+  }
+
+  function passwordResetError(): string | null {
+    if (!newPassword) return 'Enter a new password.'
+    if (newPassword !== confirmNewPassword) return 'Password confirmation does not match.'
+    return null
+  }
+
+  function openPasswordReview() {
+    const issue = passwordResetError()
+    if (issue) {
+      setError(issue)
+      setReviewingPassword(false)
+      return
+    }
+    setError(null)
+    setReviewingPassword(true)
+  }
+
+  async function submitPasswordReset() {
+    if (!detail) return
+    const issue = passwordResetError()
+    if (issue) {
+      setError(issue)
+      setReviewingPassword(false)
+      return
+    }
+    const password = newPassword
+    const isSelf = signedInUserId === detail.id
+    const staysInactive = !detail.active
+    setSaving(true)
+    setError(null)
+    try {
+      const result = await resetAdminUserPassword(detail.id, password)
+      setNewPassword('')
+      setConfirmNewPassword('')
+      setReviewingPassword(false)
+      setResettingPassword(false)
+      if (isSelf) {
+        stagePasswordResetNotice()
+        try {
+          await auth.logout()
+        } catch {
+          // The current session is already revoked.
+        }
+        navigate('/login', { replace: true })
+        return
+      }
+      const refreshed = await fetchAdminUser(detail.id)
+      setDetail(refreshed)
+      const inactiveNote = staysInactive
+        ? 'Password updated, but this account remains inactive.'
+        : 'Password updated.'
+      setSuccess(`${inactiveNote} Existing sessions were revoked: ${result.sessions_revoked}.`)
+      try {
+        setUsers(await fetchAdminUsers())
+      } catch {
+        // Detail already shows the refreshed account.
+      }
+    } catch (err: unknown) {
+      setSuccess(null)
+      setError(err instanceof Error ? err.message : 'Unable to update this password.')
     } finally {
       setSaving(false)
     }
@@ -341,6 +421,7 @@ export default function AdministrationUserManagement({
     setSuccess(null)
     setEditing(false)
     setShowDeactivation(false)
+    clearPasswordReset()
     resetCreate()
     try {
       setDetail(await fetchAdminUser(userId))
@@ -412,8 +493,91 @@ export default function AdministrationUserManagement({
           <p>
             <button type="button" className="primary-btn" onClick={() => startEdit(detail)}>
               Edit user
+            </button>{' '}
+            <button
+              type="button"
+              className="primary-btn"
+              onClick={() => {
+                clearPasswordReset()
+                setError(null)
+                setSuccess(null)
+                setResettingPassword(true)
+              }}
+            >
+              Set new password
             </button>
           </p>
+          {resettingPassword ? (
+            <form
+              onSubmit={(event) => {
+                event.preventDefault()
+                if (reviewingPassword) {
+                  void submitPasswordReset()
+                } else {
+                  openPasswordReview()
+                }
+              }}
+            >
+              <h3>{reviewingPassword ? 'Review password reset' : 'Set new password'}</h3>
+              {reviewingPassword ? (
+                <div>
+                  <p className="queue-sub">
+                    This replaces the password for {detail.full_name} and revokes their active
+                    sessions. The new password is not shown.
+                    {detail.active
+                      ? ''
+                      : ' This account will remain inactive until it is activated separately.'}
+                  </p>
+                  <p>
+                    <button
+                      type="button"
+                      className="link-btn"
+                      onClick={() => setReviewingPassword(false)}
+                    >
+                      Back
+                    </button>{' '}
+                    <button type="submit" className="primary-btn" disabled={saving}>
+                      Confirm password reset
+                    </button>
+                  </p>
+                </div>
+              ) : (
+                <div>
+                  <p className="queue-sub">
+                    Password must be at least 12 characters and include letters and numbers.
+                  </p>
+                  <label className="setup-field">
+                    <span className="setup-field-label">New password</span>
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      aria-label="New password"
+                      value={newPassword}
+                      onChange={(event) => setNewPassword(event.target.value)}
+                    />
+                  </label>
+                  <label className="setup-field">
+                    <span className="setup-field-label">Confirm new password</span>
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      aria-label="Confirm new password"
+                      value={confirmNewPassword}
+                      onChange={(event) => setConfirmNewPassword(event.target.value)}
+                    />
+                  </label>
+                  <p>
+                    <button type="button" className="link-btn" onClick={clearPasswordReset}>
+                      Cancel
+                    </button>{' '}
+                    <button type="submit" className="primary-btn">
+                      Review password reset
+                    </button>
+                  </p>
+                </div>
+              )}
+            </form>
+          ) : null}
           {editing ? (
             <form
               onSubmit={(event) => {

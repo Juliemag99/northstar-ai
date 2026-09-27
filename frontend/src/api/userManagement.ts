@@ -216,6 +216,37 @@ export async function replaceAdminUserClients(
   return parseDetail(payload)
 }
 
+export type PasswordResetResult = {
+  user_id: number
+  has_password: boolean
+  password_updated_at: string
+  sessions_revoked: number
+}
+
+export async function resetAdminUserPassword(
+  userId: number,
+  password: string,
+): Promise<PasswordResetResult> {
+  const response = await apiFetch(`/api/admin/users/${userId}/reset-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password }),
+  })
+  const payload = await readJson(response)
+  if (!response.ok) {
+    const detail = asRecord(payload).detail
+    throw new Error(typeof detail === 'string' && detail.trim() ? detail : 'Unable to update this password.')
+  }
+  const raw = asRecord(payload)
+  const sessions = Number(raw.sessions_revoked)
+  return {
+    user_id: Number(raw.user_id) || userId,
+    has_password: raw.has_password === true,
+    password_updated_at: text(raw.password_updated_at),
+    sessions_revoked: Number.isFinite(sessions) ? sessions : 0,
+  }
+}
+
 export async function fetchAdminUser(userId: number): Promise<AdminUserDetail> {
   const response = await apiFetch(`/api/admin/users/${userId}`)
   if (response.status === 404) {

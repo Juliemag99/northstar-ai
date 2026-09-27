@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import Administration from './Administration'
+import Login from './Login'
 import { AuthContext, type AuthContextValue } from './auth/useAuth'
 import type { StaffUser } from './api/auth'
 import * as userManagement from './api/userManagement'
@@ -13,6 +14,7 @@ vi.mock('./api/userManagement', () => ({
   createAdminUser: vi.fn(),
   updateAdminUser: vi.fn(),
   replaceAdminUserClients: vi.fn(),
+  resetAdminUserPassword: vi.fn(),
 }))
 
 const adminUser: StaffUser = {
@@ -93,6 +95,7 @@ function renderAdministration(
       <MemoryRouter initialEntries={['/administration']}>
         <Routes>
           <Route path="/" element={<div>Dashboard home</div>} />
+          <Route path="/login" element={<Login />} />
           <Route
             path="/administration"
             element={
@@ -112,6 +115,8 @@ afterEach(() => {
   vi.mocked(userManagement.createAdminUser).mockReset()
   vi.mocked(userManagement.updateAdminUser).mockReset()
   vi.mocked(userManagement.replaceAdminUserClients).mockReset()
+  vi.mocked(userManagement.resetAdminUserPassword).mockReset()
+  sessionStorage.clear()
 })
 
 describe('Administration User Management', () => {
@@ -172,6 +177,7 @@ describe('Administration User Management', () => {
     expect(userManagement.createAdminUser).not.toHaveBeenCalled()
     expect(userManagement.updateAdminUser).not.toHaveBeenCalled()
     expect(userManagement.replaceAdminUserClients).not.toHaveBeenCalled()
+    expect(userManagement.resetAdminUserPassword).not.toHaveBeenCalled()
   })
 
   it('creates a non-administrator from the Administration user directory', async () => {
@@ -435,5 +441,110 @@ describe('Administration User Management', () => {
       42,
       expect.objectContaining({ active: false }),
     )
+  })
+
+  it('resets another user password without showing it and reports revoked sessions', async () => {
+    const secret = 'NsPilot9secret'
+    vi.mocked(userManagement.fetchAdminUsers).mockResolvedValue(directory)
+    vi.mocked(userManagement.fetchAdminUser).mockResolvedValue(robertDetail)
+    vi.mocked(userManagement.resetAdminUserPassword).mockResolvedValue({
+      user_id: 42,
+      has_password: true,
+      password_updated_at: '2026-09-27T18:00:00Z',
+      sessions_revoked: 3,
+    })
+    renderAdministration(authValue({ authenticated: true, user: adminUser }), clients)
+    fireEvent.click(screen.getByRole('tab', { name: 'User Management' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'View Robert Kirsten' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Set new password' }))
+
+    const passwordInput = screen.getByLabelText('New password') as HTMLInputElement
+    const confirmInput = screen.getByLabelText('Confirm new password') as HTMLInputElement
+    expect(passwordInput.type).toBe('password')
+    expect(confirmInput.type).toBe('password')
+    expect(passwordInput.value).toBe('')
+    expect(confirmInput.value).toBe('')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Review password reset' }))
+    expect(screen.getByText('Enter a new password.')).toBeTruthy()
+
+    fireEvent.change(passwordInput, { target: { value: secret } })
+    fireEvent.change(confirmInput, { target: { value: `${secret}-no` } })
+    fireEvent.click(screen.getByRole('button', { name: 'Review password reset' }))
+    expect(screen.getByText('Password confirmation does not match.')).toBeTruthy()
+    expect(userManagement.resetAdminUserPassword).not.toHaveBeenCalled()
+
+    fireEvent.change(screen.getByLabelText('Confirm new password'), { target: { value: secret } })
+    fireEvent.click(screen.getByRole('button', { name: 'Review password reset' }))
+    expect(screen.getByRole('heading', { name: 'Review password reset' })).toBeTruthy()
+    expect(screen.getByText(/The new password is not shown/)).toBeTruthy()
+    expect(screen.queryByText(secret)).toBeNull()
+    expect(screen.queryByDisplayValue(secret)).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm password reset' }))
+    expect(await screen.findByText('Password updated. Existing sessions were revoked: 3.')).toBeTruthy()
+    expect(screen.queryByLabelText('New password')).toBeNull()
+    expect(screen.queryByText(secret)).toBeNull()
+    expect(userManagement.resetAdminUserPassword).toHaveBeenCalledWith(42, secret)
+  })
+
+  it('says an inactive account remains inactive after a password reset', async () => {
+    const secret = 'NsPilot9secret'
+    const inactive = { ...robertDetail, active: false, login_status: 'inactive' as const }
+    vi.mocked(userManagement.fetchAdminUsers).mockResolvedValue(directory)
+    vi.mocked(userManagement.fetchAdminUser).mockResolvedValue(inactive)
+    vi.mocked(userManagement.resetAdminUserPassword).mockResolvedValue({
+      user_id: 42,
+      has_password: true,
+      password_updated_at: '2026-09-27T18:00:00Z',
+      sessions_revoked: 0,
+    })
+    renderAdministration(authValue({ authenticated: true, user: adminUser }), clients)
+    fireEvent.click(screen.getByRole('tab', { name: 'User Management' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'View Robert Kirsten' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Set new password' }))
+    fireEvent.change(screen.getByLabelText('New password'), { target: { value: secret } })
+    fireEvent.change(screen.getByLabelText('Confirm new password'), { target: { value: secret } })
+    fireEvent.click(screen.getByRole('button', { name: 'Review password reset' }))
+    expect(screen.getByText(/This account will remain inactive/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm password reset' }))
+    expect(
+      await screen.findByText(
+        'Password updated, but this account remains inactive. Existing sessions were revoked: 0.',
+      ),
+    ).toBeTruthy()
+    expect(screen.queryByText(secret)).toBeNull()
+  })
+
+  it('signs the administrator out after they reset their own password', async () => {
+    const secret = 'NsPilot9secret'
+    const logout = vi.fn(async () => undefined)
+    vi.mocked(userManagement.fetchAdminUsers).mockResolvedValue(directory)
+    vi.mocked(userManagement.fetchAdminUser).mockResolvedValue(julieDetail)
+    vi.mocked(userManagement.resetAdminUserPassword).mockResolvedValue({
+      user_id: 1,
+      has_password: true,
+      password_updated_at: '2026-09-27T18:00:00Z',
+      sessions_revoked: 1,
+    })
+    renderAdministration(
+      authValue({ authenticated: true, user: adminUser, logout }),
+      clients,
+    )
+    fireEvent.click(screen.getByRole('tab', { name: 'User Management' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'View Julie Magnani' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Set new password' }))
+    fireEvent.change(screen.getByLabelText('New password'), { target: { value: secret } })
+    fireEvent.change(screen.getByLabelText('Confirm new password'), { target: { value: secret } })
+    fireEvent.click(screen.getByRole('button', { name: 'Review password reset' }))
+    expect(screen.queryByText(secret)).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm password reset' }))
+    expect(await screen.findByRole('heading', { name: 'Staff sign in' })).toBeTruthy()
+    expect(
+      screen.getByText('Your password was updated. Sign in with the new password.'),
+    ).toBeTruthy()
+    expect(logout).toHaveBeenCalled()
+    expect(screen.queryByText(secret)).toBeNull()
+    expect(screen.queryByDisplayValue(secret)).toBeNull()
   })
 })
