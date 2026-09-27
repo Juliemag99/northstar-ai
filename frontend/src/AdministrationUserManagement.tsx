@@ -5,10 +5,12 @@ import { stagePasswordResetNotice } from './auth/passwordResetNotice'
 import {
   createAdminUser,
   fetchAdminUser,
+  fetchAdminUserHistory,
   fetchAdminUsers,
   replaceAdminUserClients,
   resetAdminUserPassword,
   updateAdminUser,
+  type AdminHistoryEvent,
   type AdminUserDetail,
   type AdminUserSummary,
   type LoginStatus,
@@ -46,6 +48,99 @@ const LOGIN_LABELS: Record<LoginStatus, string> = {
 function roleLabel(role: string): string {
   if (!role) return 'None'
   return ROLE_LABELS[role] || role
+}
+
+function historyScalar(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return ''
+}
+
+function historyClients(detail: Record<string, unknown>): string {
+  if (Array.isArray(detail.clients)) {
+    const names = detail.clients
+      .map((item) => {
+        const client = item && typeof item === 'object' ? (item as Record<string, unknown>) : {}
+        return historyScalar(client.client_name) || historyScalar(client.client_code)
+      })
+      .filter(Boolean)
+    if (names.length > 0) return names.join(', ')
+  }
+  const name = historyScalar(detail.client_name)
+  if (name) return name
+  const clientId = Number(detail.client_id)
+  if (Number.isFinite(clientId) && clientId > 0) return `Client ${clientId}`
+  return 'None'
+}
+
+function historyActor(event: AdminHistoryEvent): string {
+  return event.actor_full_name || event.actor_email || 'an unknown administrator'
+}
+
+function historyChange(event: AdminHistoryEvent, labelFor: (value: string) => string): string[] {
+  const oldValue = historyScalar(event.detail.old)
+  const newValue = historyScalar(event.detail.new)
+  return [`${labelFor(oldValue)} → ${labelFor(newValue)}`, `Changed by ${historyActor(event)}`]
+}
+
+function historyLines(event: AdminHistoryEvent): string[] {
+  const actor = historyActor(event)
+  const detail = event.detail
+  if (!event.detail_available) {
+    return ['ADMINISTRATION EVENT', 'Details are unavailable.']
+  }
+  switch (event.event_type) {
+    case 'user_created':
+      return [
+        'USER CREATED',
+        `Created by ${actor}`,
+        `Role: ${roleLabel(historyScalar(detail.staff_role))}`,
+        `Clients: ${historyClients(detail)}`,
+        `Active: ${detail.active === true ? 'Yes' : 'No'}`,
+      ]
+    case 'name_changed':
+      return ['NAME CHANGED', ...historyChange(event, (value) => value || 'None')]
+    case 'email_changed':
+      return ['EMAIL CHANGED', ...historyChange(event, (value) => value || 'None')]
+    case 'role_changed':
+      return ['ROLE CHANGED', ...historyChange(event, roleLabel)]
+    case 'administrator_changed':
+      return [
+        'ADMINISTRATOR CHANGED',
+        ...historyChange(event, (value) => (value === 'true' ? 'Yes' : 'No')),
+      ]
+    case 'active_changed':
+      return [
+        'ACTIVE CHANGED',
+        ...historyChange(event, (value) => (value === 'true' ? 'Active' : 'Inactive')),
+      ]
+    case 'client_granted':
+      return ['CLIENT GRANTED', historyClients(detail), `Changed by ${actor}`]
+    case 'client_removed':
+      return ['CLIENT REMOVED', historyClients(detail), `Changed by ${actor}`]
+    case 'password_reset':
+      return ['PASSWORD RESET', 'Password updated', `Changed by ${actor}`]
+    case 'sessions_revoked': {
+      const count = Number(detail.sessions_revoked)
+      const sessions = Number.isFinite(count) ? count : 0
+      return ['SESSIONS REVOKED', `${sessions} ${sessions === 1 ? 'session' : 'sessions'} revoked`]
+    }
+    default: {
+      const labels: Array<[string, string]> = [
+        ['full_name', 'Full name'],
+        ['email', 'Email'],
+        ['staff_role', 'Role'],
+        ['client_name', 'Client'],
+      ]
+      const lines = ['ADMINISTRATION EVENT']
+      for (const [key, label] of labels) {
+        const value = historyScalar(detail[key])
+        if (value) lines.push(`${label}: ${value}`)
+      }
+      lines.push(`Changed by ${actor}`)
+      return lines
+    }
+  }
 }
 
 function allowedClientsLabel(user: AdminUserSummary): string {
@@ -88,6 +183,7 @@ export default function AdministrationUserManagement({
   const signedInUserId = auth.user?.id ?? null
   const [users, setUsers] = useState<AdminUserSummary[]>([])
   const [detail, setDetail] = useState<AdminUserDetail | null>(null)
+  const [history, setHistory] = useState<AdminHistoryEvent[]>([])
   const [loading, setLoading] = useState(true)
   const [detailLoading, setDetailLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -111,6 +207,25 @@ export default function AdministrationUserManagement({
     clientIds: [] as number[],
     promotionConfirmed: false,
   })
+
+  useEffect(() => {
+    if (detail == null) {
+      setHistory([])
+      return
+    }
+    const userId = detail.id
+    let cancelled = false
+    void fetchAdminUserHistory(userId)
+      .then((payload) => {
+        if (!cancelled) setHistory(payload.events)
+      })
+      .catch(() => {
+        if (!cancelled) setHistory([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [detail?.id])
 
   useEffect(() => {
     let cancelled = false
@@ -493,91 +608,12 @@ export default function AdministrationUserManagement({
           <p>
             <button type="button" className="primary-btn" onClick={() => startEdit(detail)}>
               Edit user
-            </button>{' '}
-            <button
-              type="button"
-              className="primary-btn"
-              onClick={() => {
-                clearPasswordReset()
-                setError(null)
-                setSuccess(null)
-                setResettingPassword(true)
-              }}
-            >
-              Set new password
             </button>
           </p>
-          {resettingPassword ? (
-            <form
-              onSubmit={(event) => {
-                event.preventDefault()
-                if (reviewingPassword) {
-                  void submitPasswordReset()
-                } else {
-                  openPasswordReview()
-                }
-              }}
-            >
-              <h3>{reviewingPassword ? 'Review password reset' : 'Set new password'}</h3>
-              {reviewingPassword ? (
-                <div>
-                  <p className="queue-sub">
-                    This replaces the password for {detail.full_name} and revokes their active
-                    sessions. The new password is not shown.
-                    {detail.active
-                      ? ''
-                      : ' This account will remain inactive until it is activated separately.'}
-                  </p>
-                  <p>
-                    <button
-                      type="button"
-                      className="link-btn"
-                      onClick={() => setReviewingPassword(false)}
-                    >
-                      Back
-                    </button>{' '}
-                    <button type="submit" className="primary-btn" disabled={saving}>
-                      Confirm password reset
-                    </button>
-                  </p>
-                </div>
-              ) : (
-                <div>
-                  <p className="queue-sub">
-                    Password must be at least 12 characters and include letters and numbers.
-                  </p>
-                  <label className="setup-field">
-                    <span className="setup-field-label">New password</span>
-                    <input
-                      type="password"
-                      autoComplete="new-password"
-                      aria-label="New password"
-                      value={newPassword}
-                      onChange={(event) => setNewPassword(event.target.value)}
-                    />
-                  </label>
-                  <label className="setup-field">
-                    <span className="setup-field-label">Confirm new password</span>
-                    <input
-                      type="password"
-                      autoComplete="new-password"
-                      aria-label="Confirm new password"
-                      value={confirmNewPassword}
-                      onChange={(event) => setConfirmNewPassword(event.target.value)}
-                    />
-                  </label>
-                  <p>
-                    <button type="button" className="link-btn" onClick={clearPasswordReset}>
-                      Cancel
-                    </button>{' '}
-                    <button type="submit" className="primary-btn">
-                      Review password reset
-                    </button>
-                  </p>
-                </div>
-              )}
-            </form>
-          ) : null}
+          <h3>Account</h3>
+          <p className="queue-sub">
+            Identity, role, administrator status, and whether the account is active.
+          </p>
           {editing ? (
             <form
               onSubmit={(event) => {
@@ -585,10 +621,6 @@ export default function AdministrationUserManagement({
                 void saveAccount(false)
               }}
             >
-              <h3>Account</h3>
-              <p className="queue-sub">
-                Identity, role, administrator access, and whether this person can sign in.
-              </p>
               <label className="setup-field">
                 <span className="setup-field-label">Full name</span>
                 <input
@@ -750,23 +782,117 @@ export default function AdministrationUserManagement({
                 <dd>{detail.active ? 'Active' : 'Inactive'}</dd>
               </div>
               <div>
-                <dt>Login status</dt>
-                <dd>{LOGIN_LABELS[detail.login_status]}</dd>
-              </div>
-              <div>
                 <dt>Created</dt>
                 <dd>{detail.created_at || 'Not recorded'}</dd>
-              </div>
-              <div>
-                <dt>Password last updated</dt>
-                <dd>{detail.password_updated_at || 'Not set'}</dd>
               </div>
             </dl>
           )}
 
+          <h3>Security</h3>
+          <p className="queue-sub">
+            Login state and password reset. Resetting a password does not change client access or
+            CRM ownership.
+          </p>
+          <dl className="queue-sub">
+            <div>
+              <dt>Login status</dt>
+              <dd>{LOGIN_LABELS[detail.login_status]}</dd>
+            </div>
+            <div>
+              <dt>Password last updated</dt>
+              <dd>{detail.password_updated_at || 'Not set'}</dd>
+            </div>
+          </dl>
+          <p>
+            <button
+              type="button"
+              className="primary-btn"
+              onClick={() => {
+                clearPasswordReset()
+                setError(null)
+                setSuccess(null)
+                setResettingPassword(true)
+              }}
+            >
+              Set new password
+            </button>
+          </p>
+          {resettingPassword ? (
+            <form
+              onSubmit={(event) => {
+                event.preventDefault()
+                if (reviewingPassword) {
+                  void submitPasswordReset()
+                } else {
+                  openPasswordReview()
+                }
+              }}
+            >
+              <h3>{reviewingPassword ? 'Review password reset' : 'Set new password'}</h3>
+              {reviewingPassword ? (
+                <div>
+                  <p className="queue-sub">
+                    This replaces the password for {detail.full_name} and revokes their active
+                    sessions. The new password is not shown.
+                    {detail.active
+                      ? ''
+                      : ' This account will remain inactive until it is activated separately.'}
+                  </p>
+                  <p>
+                    <button
+                      type="button"
+                      className="link-btn"
+                      onClick={() => setReviewingPassword(false)}
+                    >
+                      Back
+                    </button>{' '}
+                    <button type="submit" className="primary-btn" disabled={saving}>
+                      Confirm password reset
+                    </button>
+                  </p>
+                </div>
+              ) : (
+                <div>
+                  <p className="queue-sub">
+                    Password must be at least 12 characters and include letters and numbers.
+                  </p>
+                  <label className="setup-field">
+                    <span className="setup-field-label">New password</span>
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      aria-label="New password"
+                      value={newPassword}
+                      onChange={(event) => setNewPassword(event.target.value)}
+                    />
+                  </label>
+                  <label className="setup-field">
+                    <span className="setup-field-label">Confirm new password</span>
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      aria-label="Confirm new password"
+                      value={confirmNewPassword}
+                      onChange={(event) => setConfirmNewPassword(event.target.value)}
+                    />
+                  </label>
+                  <p>
+                    <button type="button" className="link-btn" onClick={clearPasswordReset}>
+                      Cancel
+                    </button>{' '}
+                    <button type="submit" className="primary-btn">
+                      Review password reset
+                    </button>
+                  </p>
+                </div>
+              )}
+            </form>
+          ) : null}
+
           <h3>Client access</h3>
           <p className="queue-sub">
-            Authorized clients only. Saving client access does not change CRM ownership.
+            Which clients this person may access. Saving client access does not change CRM
+            ownership.
           </p>
           {detail.access_scope === 'all_clients' ? (
             <p className="queue-sub">
@@ -830,15 +956,33 @@ export default function AdministrationUserManagement({
 
           <h3>CRM ownership</h3>
           <p className="queue-sub">
-            CRM ownership is separate from client access. These counts show work still assigned
-            to this person. This screen does not change assigned reps, company relationships, or
-            activity history.
+            Existing CRM work assigned to this person. These counts are read-only. This screen does
+            not change assigned reps, company relationships, or activity history.
           </p>
           <ul>
             <li>Company relationships assigned: {detail.crm_ownership.client_company_relationships}</li>
             <li>Contact workflows assigned: {detail.crm_ownership.contact_client_workflows}</li>
             <li>Open work queue items assigned: {detail.crm_ownership.open_work_queue_items}</li>
           </ul>
+
+          <h3>Administration history</h3>
+          <p className="queue-sub">
+            Who changed account, client access, or security settings, and when.
+          </p>
+          {history.length === 0 ? (
+            <p className="queue-sub">No administration history yet.</p>
+          ) : (
+            <ol>
+              {history.map((event) => (
+                <li key={event.id}>
+                  {historyLines(event).map((line, index) => (
+                    <p key={`${event.id}-${index}`}>{line}</p>
+                  ))}
+                  {event.created_at ? <p className="queue-sub">{event.created_at}</p> : null}
+                </li>
+              ))}
+            </ol>
+          )}
         </div>
       ) : null}
 

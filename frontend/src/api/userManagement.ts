@@ -257,3 +257,131 @@ export async function fetchAdminUser(userId: number): Promise<AdminUserDetail> {
   }
   return parseDetail(await readJson(response))
 }
+
+const SAFE_HISTORY_KEYS = new Set([
+  'old',
+  'new',
+  'full_name',
+  'email',
+  'staff_role',
+  'active',
+  'is_administrator',
+  'is_internal_northstar',
+  'client_id',
+  'client_ids',
+  'client_code',
+  'client_name',
+  'clients',
+  'sessions_revoked',
+  'password_updated_at',
+])
+
+function secretHistoryKey(key: string): boolean {
+  const lowered = key.trim().toLowerCase().replace(/-/g, '_')
+  if (lowered === 'password_updated_at') return false
+  return (
+    lowered.includes('password') ||
+    lowered.includes('token') ||
+    lowered.includes('csrf') ||
+    lowered.includes('secret') ||
+    lowered.includes('credential') ||
+    lowered.includes('cookie') ||
+    lowered.includes('hash')
+  )
+}
+
+function sanitizeHistoryValue(value: unknown, depth = 0): unknown {
+  if (depth > 6 || value == null) return undefined
+  if (typeof value === 'boolean' || typeof value === 'number') return value
+  if (typeof value === 'string') {
+    if (value.toLowerCase().includes('$argon2') || value.toLowerCase().includes('password_hash')) {
+      return undefined
+    }
+    return value
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => sanitizeHistoryValue(item, depth + 1))
+      .filter((item) => item !== undefined)
+  }
+  if (typeof value === 'object') return sanitizeHistoryRecord(value, depth + 1)
+  return undefined
+}
+
+function sanitizeHistoryRecord(value: unknown, depth = 0): Record<string, unknown> {
+  const raw = asRecord(value)
+  const cleaned: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(raw)) {
+    if (!SAFE_HISTORY_KEYS.has(key) || secretHistoryKey(key)) continue
+    const safe = sanitizeHistoryValue(item, depth)
+    if (safe === undefined) continue
+    if (Array.isArray(safe) && safe.length === 0) continue
+    if (typeof safe === 'object' && safe && !Array.isArray(safe) && Object.keys(safe).length === 0) {
+      continue
+    }
+    cleaned[key] = safe
+  }
+  return cleaned
+}
+
+export type AdminHistoryClient = {
+  client_id: number
+  client_code: string
+  client_name: string
+}
+
+export type AdminHistoryEvent = {
+  id: number
+  event_type: string
+  created_at: string
+  actor_user_id: number | null
+  actor_full_name: string
+  actor_email: string
+  target_user_id: number
+  detail_available: boolean
+  detail: Record<string, unknown>
+}
+
+export type AdminHistory = {
+  user_id: number
+  events: AdminHistoryEvent[]
+}
+
+function parseHistoryEvent(value: unknown): AdminHistoryEvent | null {
+  const raw = asRecord(value)
+  const id = Number(raw.id)
+  if (!Number.isFinite(id) || id <= 0) return null
+  const actorId = Number(raw.actor_user_id)
+  return {
+    id,
+    event_type: text(raw.event_type),
+    created_at: text(raw.created_at),
+    actor_user_id: Number.isFinite(actorId) && actorId > 0 ? actorId : null,
+    actor_full_name: text(raw.actor_full_name),
+    actor_email: text(raw.actor_email),
+    target_user_id: Number(raw.target_user_id) || 0,
+    detail_available: raw.detail_available !== false,
+    detail: sanitizeHistoryRecord(raw.detail),
+  }
+}
+
+export async function fetchAdminUserHistory(userId: number): Promise<AdminHistory> {
+  const response = await apiFetch(`/api/admin/users/${userId}/history`)
+  if (response.status === 404) {
+    throw new Error('User not found.')
+  }
+  if (!response.ok) {
+    throw new Error('Unable to load administration history.')
+  }
+  const payload = asRecord(await readJson(response))
+  const events = Array.isArray(payload.events)
+    ? payload.events
+        .map(parseHistoryEvent)
+        .filter((item): item is AdminHistoryEvent => item != null)
+    : []
+  events.sort((left, right) => {
+    if (left.created_at !== right.created_at) return left.created_at < right.created_at ? 1 : -1
+    return right.id - left.id
+  })
+  return { user_id: Number(payload.user_id) || userId, events }
+}

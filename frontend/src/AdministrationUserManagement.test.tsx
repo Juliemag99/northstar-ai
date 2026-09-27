@@ -15,6 +15,7 @@ vi.mock('./api/userManagement', () => ({
   updateAdminUser: vi.fn(),
   replaceAdminUserClients: vi.fn(),
   resetAdminUserPassword: vi.fn(),
+  fetchAdminUserHistory: vi.fn(async () => ({ user_id: 0, events: [] })),
 }))
 
 const adminUser: StaffUser = {
@@ -116,6 +117,8 @@ afterEach(() => {
   vi.mocked(userManagement.updateAdminUser).mockReset()
   vi.mocked(userManagement.replaceAdminUserClients).mockReset()
   vi.mocked(userManagement.resetAdminUserPassword).mockReset()
+  vi.mocked(userManagement.fetchAdminUserHistory).mockReset()
+  vi.mocked(userManagement.fetchAdminUserHistory).mockResolvedValue({ user_id: 0, events: [] })
   sessionStorage.clear()
 })
 
@@ -140,7 +143,9 @@ describe('Administration User Management', () => {
     fireEvent.click(screen.getByRole('button', { name: 'View Robert Kirsten' }))
 
     expect(await screen.findByRole('heading', { name: 'Robert Kirsten' })).toBeTruthy()
-    expect(screen.getByText('CRM ownership is separate from client access. These counts show work still assigned to this person. This screen does not change assigned reps, company relationships, or activity history.')).toBeTruthy()
+    expect(screen.getByText('Existing CRM work assigned to this person. These counts are read-only. This screen does not change assigned reps, company relationships, or activity history.')).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Administration history' })).toBeTruthy()
+    expect(screen.getByText('No administration history yet.')).toBeTruthy()
     expect(screen.getByText('Company relationships assigned: 3')).toBeTruthy()
     expect(screen.getByText('Contact workflows assigned: 2')).toBeTruthy()
     expect(screen.getByText('Open work queue items assigned: 1')).toBeTruthy()
@@ -178,6 +183,7 @@ describe('Administration User Management', () => {
     expect(userManagement.updateAdminUser).not.toHaveBeenCalled()
     expect(userManagement.replaceAdminUserClients).not.toHaveBeenCalled()
     expect(userManagement.resetAdminUserPassword).not.toHaveBeenCalled()
+    expect(userManagement.fetchAdminUserHistory).not.toHaveBeenCalled()
   })
 
   it('creates a non-administrator from the Administration user directory', async () => {
@@ -403,7 +409,7 @@ describe('Administration User Management', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'User Management' }))
     fireEvent.click(await screen.findByRole('button', { name: 'View Robert Kirsten' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Edit user' }))
-    expect(screen.getByText('Authorized clients only. Saving client access does not change CRM ownership.')).toBeTruthy()
+    expect(screen.getByText('Which clients this person may access. Saving client access does not change CRM ownership.')).toBeTruthy()
     fireEvent.click(screen.getByRole('checkbox', { name: 'Dawson' }))
     fireEvent.click(screen.getByRole('button', { name: 'Save client access' }))
     expect(await screen.findByText('Client access saved. CRM ownership was not changed.')).toBeTruthy()
@@ -546,5 +552,155 @@ describe('Administration User Management', () => {
     expect(logout).toHaveBeenCalled()
     expect(screen.queryByText(secret)).toBeNull()
     expect(screen.queryByDisplayValue(secret)).toBeNull()
+  })
+
+  it('shows administration history in readable form and hides secrets', async () => {
+    vi.mocked(userManagement.fetchAdminUsers).mockResolvedValue(directory)
+    vi.mocked(userManagement.fetchAdminUser).mockResolvedValue(robertDetail)
+    vi.mocked(userManagement.fetchAdminUserHistory).mockResolvedValue({
+      user_id: 42,
+      events: [
+        {
+          id: 9,
+          event_type: 'sessions_revoked',
+          created_at: '2026-09-27T18:00:00Z',
+          actor_user_id: 1,
+          actor_full_name: 'Julie Magnani',
+          actor_email: 'juliem@n-star.us',
+          target_user_id: 42,
+          detail_available: true,
+          detail: { sessions_revoked: 2, password: 'NsHidden9secret', token: 'session-token' },
+        },
+        {
+          id: 8,
+          event_type: 'password_reset',
+          created_at: '2026-09-27T17:00:00Z',
+          actor_user_id: 1,
+          actor_full_name: 'Julie Magnani',
+          actor_email: 'juliem@n-star.us',
+          target_user_id: 42,
+          detail_available: true,
+          detail: { password_updated_at: '2026-09-27T17:00:00Z', password_hash: '$argon2id$secret' },
+        },
+        {
+          id: 7,
+          event_type: 'client_removed',
+          created_at: '2026-09-27T16:00:00Z',
+          actor_user_id: 1,
+          actor_full_name: 'Julie Magnani',
+          actor_email: 'juliem@n-star.us',
+          target_user_id: 42,
+          detail_available: true,
+          detail: { client_name: 'Dawson', csrf_secret: 'csrf-value' },
+        },
+        {
+          id: 6,
+          event_type: 'client_granted',
+          created_at: '2026-09-27T15:00:00Z',
+          actor_user_id: 1,
+          actor_full_name: 'Julie Magnani',
+          actor_email: 'juliem@n-star.us',
+          target_user_id: 42,
+          detail_available: true,
+          detail: { client_name: 'Brown Industries' },
+        },
+        {
+          id: 5,
+          event_type: 'active_changed',
+          created_at: '2026-09-27T14:00:00Z',
+          actor_user_id: 1,
+          actor_full_name: 'Julie Magnani',
+          actor_email: 'juliem@n-star.us',
+          target_user_id: 42,
+          detail_available: true,
+          detail: { old: false, new: true },
+        },
+        {
+          id: 4,
+          event_type: 'administrator_changed',
+          created_at: '2026-09-27T13:00:00Z',
+          actor_user_id: 1,
+          actor_full_name: 'Julie Magnani',
+          actor_email: 'juliem@n-star.us',
+          target_user_id: 42,
+          detail_available: true,
+          detail: { old: false, new: true },
+        },
+        {
+          id: 3,
+          event_type: 'role_changed',
+          created_at: '2026-09-27T12:00:00Z',
+          actor_user_id: 1,
+          actor_full_name: 'Julie Magnani',
+          actor_email: 'juliem@n-star.us',
+          target_user_id: 42,
+          detail_available: true,
+          detail: { old: 'revops_specialist', new: 'revops_manager' },
+        },
+        {
+          id: 2,
+          event_type: 'future_event',
+          created_at: '2026-09-27T11:00:00Z',
+          actor_user_id: 1,
+          actor_full_name: 'Julie Magnani',
+          actor_email: 'juliem@n-star.us',
+          target_user_id: 42,
+          detail_available: false,
+          detail: { raw: 'not-json credential-secret' },
+        },
+        {
+          id: 1,
+          event_type: 'user_created',
+          created_at: '2026-09-27T10:00:00Z',
+          actor_user_id: 1,
+          actor_full_name: 'Julie Magnani',
+          actor_email: 'juliem@n-star.us',
+          target_user_id: 42,
+          detail_available: true,
+          detail: {
+            staff_role: 'revops_specialist',
+            active: true,
+            clients: [{ client_id: 2, client_code: 'brown', client_name: 'Brown Industries' }],
+          },
+        },
+      ],
+    })
+    renderAdministration(authValue({ authenticated: true, user: adminUser }), clients)
+    fireEvent.click(screen.getByRole('tab', { name: 'User Management' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'View Robert Kirsten' }))
+    expect(await screen.findByText('SESSIONS REVOKED')).toBeTruthy()
+    const historyText = screen.getByRole('heading', { name: 'Administration history' }).parentElement?.textContent || ''
+    expect(historyText.indexOf('SESSIONS REVOKED')).toBeLessThan(historyText.indexOf('USER CREATED'))
+    expect(screen.getByText('2 sessions revoked')).toBeTruthy()
+    expect(screen.getByText('PASSWORD RESET')).toBeTruthy()
+    expect(screen.getByText('Password updated')).toBeTruthy()
+    expect(screen.getByText('CLIENT GRANTED')).toBeTruthy()
+    expect(screen.getByText('CLIENT REMOVED')).toBeTruthy()
+    expect(screen.getByText('Brown Industries')).toBeTruthy()
+    expect(screen.getAllByText('Dawson').length).toBeGreaterThan(0)
+    expect(screen.getByText('ADMINISTRATOR CHANGED')).toBeTruthy()
+    expect(screen.getByText('ACTIVE CHANGED')).toBeTruthy()
+    expect(screen.getByText('Inactive → Active')).toBeTruthy()
+    expect(screen.getByText('ROLE CHANGED')).toBeTruthy()
+    expect(screen.getByText('RevOps specialist → RevOps manager')).toBeTruthy()
+    expect(screen.getByText('USER CREATED')).toBeTruthy()
+    expect(screen.getByText('Created by Julie Magnani')).toBeTruthy()
+    expect(screen.getByText('Role: RevOps specialist')).toBeTruthy()
+    expect(screen.getByText('Clients: Brown Industries')).toBeTruthy()
+    expect(screen.getByText('Active: Yes')).toBeTruthy()
+    expect(screen.getByText('ADMINISTRATION EVENT')).toBeTruthy()
+    expect(screen.getByText('Details are unavailable.')).toBeTruthy()
+    expect(screen.getAllByText(/Changed by Julie Magnani/).length).toBeGreaterThan(0)
+    expect(screen.queryByText('NsHidden9secret')).toBeNull()
+    expect(screen.queryByText('$argon2id$secret')).toBeNull()
+    expect(screen.queryByText('session-token')).toBeNull()
+    expect(screen.queryByText('csrf-value')).toBeNull()
+    expect(screen.queryByText('credential-secret')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Edit user' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Set new password' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Account' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Security' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Client access' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'CRM ownership' })).toBeTruthy()
   })
 })

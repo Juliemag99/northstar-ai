@@ -423,6 +423,109 @@ def _client_ids(conn, raw_ids: list[int], *, allow_empty: bool = False) -> list[
     return chosen
 
 
+_SAFE_DETAIL_KEYS = frozenset(
+    {
+        "old",
+        "new",
+        "full_name",
+        "email",
+        "staff_role",
+        "active",
+        "is_administrator",
+        "is_internal_northstar",
+        "client_id",
+        "client_ids",
+        "client_code",
+        "client_name",
+        "clients",
+        "sessions_revoked",
+        "password_updated_at",
+    }
+)
+_SECRET_KEY_MARKERS = (
+    "password_hash",
+    "token_hash",
+    "csrf_secret",
+    "credential",
+    "cookie",
+    "secret",
+    "csrf",
+    "token",
+    "password",
+    "hash",
+)
+
+
+def _secret_detail_key(key: object) -> bool:
+    lowered = str(key).strip().lower().replace("-", "_")
+    if lowered == "password_updated_at":
+        return False
+    return any(marker in lowered for marker in _SECRET_KEY_MARKERS)
+
+
+def _secret_detail_text(value: str) -> bool:
+    lowered = value.lower()
+    return "$argon2" in lowered or "password_hash" in lowered
+
+
+def _sanitize_detail_value(value: object, depth: int) -> object:
+    if depth > 6:
+        return None
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        if _secret_detail_text(value):
+            return None
+        return value
+    if isinstance(value, list):
+        cleaned = []
+        for item in value:
+            safe = _sanitize_detail_value(item, depth + 1)
+            if safe is not None:
+                cleaned.append(safe)
+        return cleaned
+    if isinstance(value, dict):
+        return _sanitize_detail_mapping(value, depth + 1)
+    return None
+
+
+def _sanitize_detail_mapping(value: dict, depth: int) -> dict[str, object]:
+    cleaned: dict[str, object] = {}
+    for key, item in value.items():
+        name = str(key)
+        if name not in _SAFE_DETAIL_KEYS or _secret_detail_key(name):
+            continue
+        safe = _sanitize_detail_value(item, depth)
+        if safe is None or safe == {} or safe == []:
+            continue
+        cleaned[name] = safe
+    return cleaned
+
+
+def sanitize_staff_admin_detail(raw: object) -> tuple[dict[str, object], bool]:
+    """Return a safe detail object and whether the stored JSON could be read.
+
+    Malformed text becomes an empty detail. The original text is not returned.
+    Secret-bearing keys are dropped at every nesting level.
+    """
+    if isinstance(raw, dict):
+        return _sanitize_detail_mapping(raw, 0), True
+    if not isinstance(raw, str):
+        return {}, False
+    text = raw.strip()
+    if not text:
+        return {}, True
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return {}, False
+    if not isinstance(parsed, dict):
+        return {}, False
+    return _sanitize_detail_mapping(parsed, 0), True
+
+
 def _audit_detail(detail: dict[str, object]) -> str:
     for key in detail:
         lowered = str(key).lower()
@@ -1095,3 +1198,98 @@ def reset_staff_password(
             raise
     finally:
         conn.close()
+
+
+def _detail_client_ids(detail: dict[str, object]) -> list[int]:
+    found: list[int] = []
+    raw_one = detail.get("client_id")
+    raw_many = detail.get("client_ids")
+    values: list[object] = []
+    if isinstance(raw_many, list):
+        values.extend(raw_many)
+    if raw_one is not None:
+        values.append(raw_one)
+    for value in values:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            continue
+        if value not in found:
+            found.append(value)
+    return found
+
+
+def _with_client_names(conn, detail: dict[str, object]) -> dict[str, object]:
+    client_ids = _detail_client_ids(detail)
+    if not client_ids or not _table_exists(conn, "clients"):
+        return detail
+    rows = conn.execute(
+        f"SELECT id, code, name FROM clients WHERE id IN ({','.join('?' for _ in client_ids)})",
+        client_ids,
+    ).fetchall()
+    by_id = {
+        int(row["id"]): {
+            "client_id": int(row["id"]),
+            "client_code": _text(row, "code"),
+            "client_name": _text(row, "name"),
+        }
+        for row in rows
+    }
+    clients = [by_id[client_id] for client_id in client_ids if client_id in by_id]
+    if not clients:
+        return detail
+    enriched = dict(detail)
+    enriched["clients"] = clients
+    single = detail.get("client_id")
+    if isinstance(single, int) and not isinstance(single, bool) and single in by_id:
+        enriched["client_code"] = by_id[single]["client_code"]
+        enriched["client_name"] = by_id[single]["client_name"]
+    return enriched
+
+
+def list_admin_user_history(user_id: int) -> dict[str, object]:
+    """Read administration events for one user. Does not write."""
+    if int(user_id) <= 0:
+        raise LookupError("User not found.")
+    with get_connection() as conn:
+        row = conn.execute("SELECT id FROM users WHERE id = ?", (int(user_id),)).fetchone()
+        if row is None:
+            raise LookupError("User not found.")
+        if not _table_exists(conn, "staff_admin_events"):
+            return {"user_id": int(user_id), "events": []}
+        events = conn.execute(
+            """
+            SELECT
+                e.id,
+                e.event_type,
+                e.created_at,
+                e.actor_user_id,
+                e.target_user_id,
+                e.detail_json,
+                actor.full_name AS actor_full_name,
+                actor.email AS actor_email
+            FROM staff_admin_events e
+            LEFT JOIN users actor ON actor.id = e.actor_user_id
+            WHERE e.target_user_id = ?
+            ORDER BY e.created_at DESC, e.id DESC
+            """,
+            (int(user_id),),
+        ).fetchall()
+        payload: list[dict[str, object]] = []
+        for event in events:
+            detail, available = sanitize_staff_admin_detail(_text(event, "detail_json"))
+            if available:
+                detail = _with_client_names(conn, detail)
+            actor_id = event["actor_user_id"]
+            payload.append(
+                {
+                    "id": int(event["id"]),
+                    "event_type": _text(event, "event_type"),
+                    "created_at": _text(event, "created_at"),
+                    "actor_user_id": None if actor_id is None else int(actor_id),
+                    "actor_full_name": _text(event, "actor_full_name"),
+                    "actor_email": _text(event, "actor_email"),
+                    "target_user_id": int(user_id),
+                    "detail_available": available,
+                    "detail": detail,
+                }
+            )
+        return {"user_id": int(user_id), "events": payload}

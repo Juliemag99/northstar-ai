@@ -29,6 +29,7 @@ from user_management import (
     UpdateStaffUserRequest,
     create_staff_user,
     get_admin_user,
+    list_admin_user_history,
     list_admin_users,
     replace_user_clients,
     reset_staff_password,
@@ -2085,6 +2086,16 @@ def admin_user_clients_api(user_id: int, body: ReplaceUserClientsRequest, reques
         )
     except StaffAdminError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="User not found.") from exc
+
+
+@app.get("/api/admin/users/{user_id}/history")
+def admin_user_history_api(user_id: int, request: Request):
+    """Read-only administration history for one staff user."""
+    require_administrator(request)
+    try:
+        return list_admin_user_history(user_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail="User not found.") from exc
 
