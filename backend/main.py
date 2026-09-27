@@ -21,6 +21,7 @@ from auth_http import (
     require_client_setup_editor,
     staff_auth_router,
 )
+from user_management import get_admin_user, list_admin_users
 from activities_data import (
     create_activity,
     list_activities_due_today,
@@ -1999,6 +2000,26 @@ def delete_campaign_api(client_id: int, campaign_id: int):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# --- Administrator User Management (read-only) ---
+
+
+@app.get("/api/admin/users")
+def admin_users_list_api(request: Request):
+    """Read-only staff directory. Administrator session required."""
+    require_administrator(request)
+    return {"users": list_admin_users()}
+
+
+@app.get("/api/admin/users/{user_id}")
+def admin_user_detail_api(user_id: int, request: Request):
+    """Read-only staff detail. Does not change the user or CRM assignments."""
+    require_administrator(request)
+    try:
+        return get_admin_user(user_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="User not found.") from exc
 
 
 # --- Administrator Master Data Export ---

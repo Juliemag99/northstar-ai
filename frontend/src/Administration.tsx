@@ -21,6 +21,7 @@ import AdministrationLeadmasterRefresh from './AdministrationLeadmasterRefresh'
 import AdministrationDataSteward from './AdministrationDataSteward'
 import AdministrationDuplicateReview from './AdministrationDuplicateReview'
 import AdministrationResearchImport from './AdministrationResearchImport'
+import AdministrationUserManagement from './AdministrationUserManagement'
 
 type AssignedClient = {
   client_id: number
@@ -87,7 +88,12 @@ export default function Administration({
   )
   const loadGen = useRef(0)
   const [adminTab, setAdminTab] = useState<
-    'email' | 'import' | 'client-data-import' | 'research-import' | 'data-management'
+    | 'email'
+    | 'users'
+    | 'import'
+    | 'client-data-import'
+    | 'research-import'
+    | 'data-management'
   >('email')
   const [dataMgmtTab, setDataMgmtTab] = useState<
     'export' | 'leadmaster-refresh' | 'master-data' | 'duplicate-review'
@@ -248,6 +254,19 @@ export default function Administration({
         <button
           type="button"
           role="tab"
+          aria-selected={adminTab === 'users'}
+          className={
+            adminTab === 'users'
+              ? 'setup-campaign-tab setup-campaign-tab--active'
+              : 'setup-campaign-tab'
+          }
+          onClick={() => setAdminTab('users')}
+        >
+          User Management
+        </button>
+        <button
+          type="button"
+          role="tab"
           aria-selected={adminTab === 'import'}
           className={
             adminTab === 'import'
@@ -298,6 +317,8 @@ export default function Administration({
           Data Management
         </button>
       </div>
+
+      {adminTab === 'users' ? <AdministrationUserManagement /> : null}
 
       {adminTab === 'import' ? (
         <AdministrationImport
