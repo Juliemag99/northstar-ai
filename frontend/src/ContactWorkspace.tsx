@@ -49,6 +49,7 @@ import {
 import { SELECT_CLIENT_FOR_WRITE, requireWriteClientId } from './writeClient'
 import ZoomInfoUpdateModal from './ZoomInfoUpdateModal'
 import { useAuth } from './auth/useAuth'
+import { staffCanManageCampaigns } from './auth/campaignAccess'
 import { authenticatedActorName } from './auth/reportDefaults'
 import {
   digitsOnlyExtension,
@@ -89,6 +90,7 @@ export default function ContactWorkspacePage({
   activeClientId = null,
   activeClientName = '',
   onWorkflowSaved,
+  onFeedbackContext,
 }: {
   contactId: number
   activeClientId?: number | null
@@ -100,8 +102,10 @@ export default function ContactWorkspacePage({
     next_action: string
     follow_up_date: string
   }) => void
+  onFeedbackContext?: (context: { companyId: number | null; contactId: number | null }) => void
 }) {
   const { user } = useAuth()
+  const canManageCampaigns = staffCanManageCampaigns(user)
   const actorName = authenticatedActorName(user)
   const navigate = useNavigate()
   const location = useLocation()
@@ -171,6 +175,16 @@ export default function ContactWorkspacePage({
   const [phoneExt, setPhoneExt] = useState('')
   const [phoneSaving, setPhoneSaving] = useState(false)
   const [phoneError, setPhoneError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!onFeedbackContext) return
+    const companyId = data?.company_id != null && data.company_id > 0 ? data.company_id : null
+    onFeedbackContext({
+      companyId,
+      contactId: companyId != null ? contactId : null,
+    })
+    return () => onFeedbackContext({ companyId: null, contactId: null })
+  }, [contactId, data?.company_id, onFeedbackContext])
 
   useEffect(() => {
     let cancelled = false
@@ -324,7 +338,7 @@ export default function ContactWorkspacePage({
       notifyClientViews(result.workspace)
       setWorkflowMsg(result.message || 'Workflow saved.')
       setEditingWorkflow(false)
-      if (isCampaignRouteStatus(status) && data?.company_id && writeId > 0) {
+      if (canManageCampaigns && isCampaignRouteStatus(status) && data?.company_id && writeId > 0) {
         setCampaignRouteOffer({
           clientId: writeId,
           companyId: data.company_id ?? 0,
@@ -444,6 +458,7 @@ export default function ContactWorkspacePage({
       setRescheduleDate('')
       setRescheduleTime('')
       if (
+        canManageCampaigns &&
         data?.company_id &&
         writeId > 0 &&
         (routedKind === 'call' || routedKind === 'call-complete') &&
@@ -769,7 +784,7 @@ export default function ContactWorkspacePage({
               <button type="button" className="ghost-btn" onClick={() => setZoomInfoOpen(true)}>
                 Update from ZoomInfo
               </button>
-              {data.company_id ? (
+              {canManageCampaigns && data.company_id ? (
                 <button
                   type="button"
                   className="ghost-btn"

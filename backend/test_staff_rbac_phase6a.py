@@ -25,7 +25,7 @@ from auth_passwords import hash_password
 from company_merge_approvals import MergeApprovalError, create_merge_approval
 from db import PRODUCTION_DB_PATH, get_connection
 from main import app
-from staff_feedback import submit_staff_feedback
+from staff_feedback import ensure_staff_feedback_schema, submit_staff_feedback
 from staff_rbac import (
     APPOINTMENT_SETTER,
     OPERATIONS_ADMIN,
@@ -454,12 +454,14 @@ def test_feedback_isolated_no_secrets() -> None:
     )
     _assign(user_id, allowed)
     with get_connection() as conn:
+        ensure_staff_feedback_schema(conn)
         row = submit_staff_feedback(
             conn,
             user_id=user_id,
             page_route="/prospects?client_id=2",
             body="Call outcome is hard to find.",
-            category="Workflow",
+            category="Problem",
+            impact="Minor",
             client_id=allowed,
             user_agent="Phase6ATest",
         )
@@ -473,6 +475,8 @@ def test_feedback_isolated_no_secrets() -> None:
             _fail(f"Feedback row leaked {needle}.")
     if int(stored["user_id"]) != user_id:
         _fail("Feedback did not store authenticated user id.")
+    if stored["category"] != "Problem" or stored["impact"] != "Minor" or stored["status"] != "New":
+        _fail("Feedback did not store the submitted category, impact, and New status.")
 
 
 def test_three_client_workflow_surface() -> None:

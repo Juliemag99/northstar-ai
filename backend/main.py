@@ -56,6 +56,15 @@ from carmeco_data import (
     update_relationship_status,
 )
 from db import ensure_schema, get_connection
+from staff_feedback import (
+    StaffFeedbackCreate,
+    StaffFeedbackItem,
+    StaffFeedbackList,
+    StaffFeedbackStatusUpdate,
+    list_staff_feedback,
+    submit_staff_feedback,
+    update_staff_feedback_status,
+)
 from milestones_data import (
     create_milestone,
     list_milestones_for_company,
@@ -1164,6 +1173,63 @@ def defer_campaign_route_api(body: CampaignRouteDeferRequest):
         return defer_campaign_route(body)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/feedback")
+def submit_staff_feedback_api(body: StaffFeedbackCreate, request: Request):
+    user = require_authenticated_staff(request)
+    if not user_has_permission(int(user.id), "feedback.submit"):
+        raise HTTPException(status_code=403, detail="Not authorized to submit feedback.")
+    agent = (request.headers.get("user-agent") or "").strip()[:300]
+    try:
+        with get_connection() as conn:
+            row = submit_staff_feedback(
+                conn,
+                user_id=int(user.id),
+                page_route=body.page_route,
+                body=body.body,
+                category=body.category,
+                impact=body.impact,
+                client_id=body.client_id,
+                company_id=body.company_id,
+                contact_id=body.contact_id,
+                user_agent=agent,
+            )
+            conn.commit()
+        return row
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/feedback", response_model=StaffFeedbackList)
+def list_staff_feedback_api(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    require_administrator(request)
+    with get_connection() as conn:
+        return list_staff_feedback(conn, limit=limit, offset=offset)
+
+
+@app.patch("/api/feedback/{feedback_id}", response_model=StaffFeedbackItem)
+def update_staff_feedback_status_api(
+    feedback_id: int,
+    body: StaffFeedbackStatusUpdate,
+    request: Request,
+):
+    require_administrator(request)
+    try:
+        with get_connection() as conn:
+            row = update_staff_feedback_status(conn, feedback_id, body.status)
+            conn.commit()
+        return row
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

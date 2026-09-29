@@ -10,6 +10,8 @@ import {
   type CrmAddPreviewResponse,
 } from './api/carmeco'
 import CampaignRoutePrompt, { type CampaignRouteOffer } from './CampaignRoutePrompt'
+import { useAuth } from './auth/useAuth'
+import { staffCanManageCampaigns } from './auth/campaignAccess'
 
 export type AddToNorthStarProps = {
   open: boolean
@@ -53,6 +55,8 @@ export default function AddToNorthStar({
   mode = 'full',
 }: AddToNorthStarProps) {
   const navigate = useNavigate()
+  const { user } = useAuth()
+  const canManageCampaigns = staffCanManageCampaigns(user)
   const [company, setCompany] = useState<CrmAddCompanyInput>(initialCompany)
   const [preview, setPreview] = useState<CrmAddPreviewResponse | null>(null)
   const [rows, setRows] = useState<ContactRowState[]>([])
@@ -220,14 +224,19 @@ export default function AddToNorthStar({
       const firstContact = (result.contacts || []).find(
         (row) => row && typeof row === 'object' && Number((row as { contact_id?: number }).contact_id) > 0,
       ) as { contact_id?: number } | undefined
-      setPendingWorkspacePath(result.workspace_path || null)
-      setCampaignRouteOffer({
-        clientId,
-        companyId: result.company_id,
-        contactId: firstContact?.contact_id ?? null,
-        researchRunId: researchRunId ?? null,
-        source: 'research',
-      })
+      if (canManageCampaigns) {
+        setPendingWorkspacePath(result.workspace_path || null)
+        setCampaignRouteOffer({
+          clientId,
+          companyId: result.company_id,
+          contactId: firstContact?.contact_id ?? null,
+          researchRunId: researchRunId ?? null,
+          source: 'research',
+        })
+      } else {
+        onClose()
+        if (result.workspace_path) navigate(result.workspace_path)
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Confirm failed.')
     } finally {

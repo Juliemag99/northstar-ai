@@ -10,6 +10,8 @@ import {
   markOpportunityReviewed,
 } from './api/carmeco'
 import CampaignRoutePrompt, { type CampaignRouteOffer } from './CampaignRoutePrompt'
+import { useAuth } from './auth/useAuth'
+import { staffCanManageCampaigns } from './auth/campaignAccess'
 import type { ActiveClient, CrossClientOpportunity } from './types/carmeco'
 
 type TargetClient = { id: number; name: string }
@@ -127,6 +129,8 @@ function loadTargetClients(activeClient: ActiveClient | null): Promise<TargetCli
 }
 
 export default function CrossClientOpportunities({ client }: { client: ActiveClient | null }) {
+  const { user } = useAuth()
+  const canManageCampaigns = staffCanManageCampaigns(user)
   const [searchParams, setSearchParams] = useSearchParams()
   const [clients, setClients] = useState<TargetClient[]>([])
   const [targetClientId, setTargetClientId] = useState<number | null>(null)
@@ -268,11 +272,13 @@ export default function CrossClientOpportunities({ client }: { client: ActiveCli
       setMessage(result.message || 'Added to Work Queue')
       setDismissingId(null)
       await refreshAfterAction()
-      setCampaignRouteOffer({
-        clientId: targetClientId,
-        companyId: opportunity.company_id,
-        source: 'cross-client',
-      })
+      if (canManageCampaigns) {
+        setCampaignRouteOffer({
+          clientId: targetClientId,
+          companyId: opportunity.company_id,
+          source: 'cross-client',
+        })
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not add to Work Queue.')
     }

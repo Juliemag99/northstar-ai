@@ -1627,6 +1627,20 @@ def suggest_campaign_route(
     allowed = _authorized_client_ids(client_id)
     if int(client_id) not in allowed:
         raise PermissionError("Not authorized for this client.")
+    actor = resolve_staff_actor()
+    if actor is None or not user_has_permission(
+        int(actor.id),
+        "campaigns.manage",
+        client_id=int(client_id),
+    ):
+        return CampaignRouteSuggestion(
+            client_id=int(client_id),
+            company_id=int(company_id),
+            contact_id=contact_id,
+            should_prompt=False,
+            auto_unassigned=False,
+            message="",
+        )
     ensure_campaigns_schema()
     with get_connection() as conn:
         company = conn.execute(

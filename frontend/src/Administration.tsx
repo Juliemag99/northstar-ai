@@ -22,6 +22,7 @@ import AdministrationDataSteward from './AdministrationDataSteward'
 import AdministrationDuplicateReview from './AdministrationDuplicateReview'
 import AdministrationResearchImport from './AdministrationResearchImport'
 import AdministrationUserManagement from './AdministrationUserManagement'
+import AdministrationFeedback from './AdministrationFeedback'
 
 type AssignedClient = {
   client_id: number
@@ -94,6 +95,7 @@ export default function Administration({
     | 'client-data-import'
     | 'research-import'
     | 'data-management'
+    | 'feedback'
   >('email')
   const [dataMgmtTab, setDataMgmtTab] = useState<
     'export' | 'leadmaster-refresh' | 'master-data' | 'duplicate-review'
@@ -316,11 +318,26 @@ export default function Administration({
         >
           Data Management
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={adminTab === 'feedback'}
+          className={
+            adminTab === 'feedback'
+              ? 'setup-campaign-tab setup-campaign-tab--active'
+              : 'setup-campaign-tab'
+          }
+          onClick={() => setAdminTab('feedback')}
+        >
+          Feedback
+        </button>
       </div>
 
       {adminTab === 'users' ? (
         <AdministrationUserManagement availableClients={availableClients} />
       ) : null}
+
+      {adminTab === 'feedback' ? <AdministrationFeedback /> : null}
 
       {adminTab === 'import' ? (
         <AdministrationImport

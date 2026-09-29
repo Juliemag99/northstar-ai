@@ -195,6 +195,10 @@ CREATE TABLE IF NOT EXISTS staff_feedback (
     category TEXT NOT NULL DEFAULT 'Other',
     body TEXT NOT NULL,
     user_agent TEXT NOT NULL DEFAULT '',
+    impact TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'New',
+    company_id INTEGER,
+    contact_id INTEGER,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
 )
 """

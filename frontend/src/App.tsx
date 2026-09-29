@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Link,
   matchPath,
@@ -119,6 +119,12 @@ import SendEmailCompose from './SendEmailCompose'
 import AppointmentDetailsFields from './AppointmentDetailsFields'
 import { useAuth } from './auth/useAuth'
 import { staffCanAdminister } from './auth/staffCanAdminister'
+import {
+  shouldStayOnCompanyAfterCallSave,
+  staffCanManageCampaigns,
+  workQueueCallShouldRoute,
+} from './auth/campaignAccess'
+import FeedbackButton from './FeedbackButton'
 import {
   dashboardStartHereMessage,
   isSingleAssignedClient,
@@ -796,6 +802,7 @@ function App() {
   const [searchParams, setSearchParams] = useSearchParams()
   const { authenticated, user, authAvailable, authEnforced, logout } = useAuth()
   const canAdminister = staffCanAdminister(authenticated, user)
+  const canManageCampaigns = staffCanManageCampaigns(user)
   const visibleNavItems = navItems.filter((item) =>
     staffNavItemVisible(item.id, canAdminister),
   )
@@ -919,6 +926,18 @@ function App() {
   const [addCompanyOpen, setAddCompanyOpen] = useState(false)
   const [sendEmailOpen, setSendEmailOpen] = useState(false)
   const [campaignRouteOffer, setCampaignRouteOffer] = useState<CampaignRouteOffer | null>(null)
+  const [contactFeedbackContext, setContactFeedbackContext] = useState<{
+    companyId: number | null
+    contactId: number | null
+  }>({ companyId: null, contactId: null })
+  const reportContactFeedbackContext = useCallback(
+    (next: { companyId: number | null; contactId: number | null }) => {
+      setContactFeedbackContext((prev) =>
+        prev.companyId === next.companyId && prev.contactId === next.contactId ? prev : next,
+      )
+    },
+    [],
+  )
   const [sendEmailPreferredContactId, setSendEmailPreferredContactId] = useState<
     number | null
   >(null)
@@ -1910,6 +1929,7 @@ function App() {
       setStatusSaveMsg('Saved')
       setQueueRefreshKey((key) => key + 1)
       if (
+        canManageCampaigns &&
         workspace?.id &&
         workspaceClientId != null &&
         workspaceClientId > 0 &&
@@ -2066,10 +2086,12 @@ function App() {
       setCallOutcome('')
       setCallAppointmentDetails(emptyAppointmentDetails())
 
-      const shouldRoute =
-        Boolean(workspace?.id) &&
-        workQueueContext.client_id > 0 &&
-        (isAppointmentSetStatus(callStatus) || isCampaignRouteStatus(callStatus))
+      const shouldRoute = workQueueCallShouldRoute(
+        user,
+        callStatus,
+        Boolean(workspace?.id),
+        workQueueContext.client_id,
+      )
       if (shouldRoute && workspace) {
         setCampaignRouteOffer({
           clientId: workQueueContext.client_id,
@@ -2079,7 +2101,7 @@ function App() {
         })
       }
 
-      if (!andNext || shouldRoute) {
+      if (shouldStayOnCompanyAfterCallSave(andNext, shouldRoute)) {
         // Remain on Company Workspace; refresh queue context counts/position.
         const refreshed = await fetchWorkQueue(workQueueFetchFilters())
         if (saveSeq !== workQueueSaveSeq.current) return
@@ -2352,6 +2374,7 @@ function App() {
       clearMilestoneForm()
       setMilestoneSaveMsg(`${milestoneType} added`)
       if (
+        canManageCampaigns &&
         milestoneType === 'Appointment Set' &&
         workspace?.id &&
         workspaceClientId != null &&
@@ -2396,6 +2419,7 @@ function App() {
       }
       setMilestoneSaveMsg(workspace.is_hot ? 'Hot flag removed' : 'Marked hot')
       if (
+        canManageCampaigns &&
         !workspace.is_hot &&
         workspace.id &&
         workspaceClientId != null &&
@@ -2730,6 +2754,23 @@ function App() {
           </div>
 
           <div className="topbar-actions">
+            <FeedbackButton
+              clientId={
+                workspaceClientId != null && workspaceClientId > 0 ? workspaceClientId : null
+              }
+              companyId={
+                showCompanyWorkspace && workspace?.id
+                  ? workspace.id
+                  : showContactWorkspace
+                    ? contactFeedbackContext.companyId
+                    : null
+              }
+              contactId={
+                showContactWorkspace && contactFeedbackContext.companyId
+                  ? contactFeedbackContext.contactId
+                  : null
+              }
+            />
             <button type="button" className="icon-btn" aria-label="Notifications" title="Notifications">
               <span className="icon-bell" aria-hidden="true" />
             </button>
@@ -2795,6 +2836,7 @@ function App() {
               activeClientId={activeClientId}
               activeClientName={clientName}
               onWorkflowSaved={applyContactWorkflowToClientViews}
+              onFeedbackContext={reportContactFeedbackContext}
             />
           )}
 
@@ -2861,7 +2903,7 @@ function App() {
                       >
                         Research This Company
                       </Link>
-                      {workspace.id ? (
+                      {canManageCampaigns && workspace.id ? (
                         <button
                           type="button"
                           className="ghost-btn"
