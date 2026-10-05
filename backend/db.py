@@ -633,27 +633,6 @@ def seed_default_users(conn: sqlite3.Connection) -> None:
             """,
             (user_id, client_id, role),
         )
-        # Backfill relationship ownership when unset
-        conn.execute(
-            """
-            UPDATE client_company_relationships
-            SET assigned_user_id = ?
-            WHERE client_id = ? AND assigned_user_id IS NULL
-            """,
-            (user_id, client_id),
-        )
-        # Backfill activity user_id when unset
-        if _table_exists(conn, "activities") and "user_id" in _table_columns(
-            conn, "activities"
-        ):
-            conn.execute(
-                """
-                UPDATE activities
-                SET user_id = ?
-                WHERE client_id = ? AND user_id IS NULL
-                """,
-                (user_id, client_id),
-            )
     conn.commit()
 
 
