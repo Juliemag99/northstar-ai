@@ -365,12 +365,20 @@ def ensure_client_knowledge_schema(conn=None) -> None:
 
 
 def _require_access(user_id: int, client_id: int) -> None:
-    from access import require_write_client_id
+    """Read Client Knowledge for one granted client. Does not grant edit."""
+    from access import user_can_access_client
+    from staff_rbac import user_has_permission
 
-    require_write_client_id(client_id, user_id=user_id)
+    if int(client_id) <= 0:
+        raise PermissionError("Not authorized to view client knowledge.")
+    if not user_has_permission(int(user_id), "client_knowledge.view", client_id=int(client_id)):
+        raise PermissionError("Not authorized to view client knowledge.")
+    if not user_can_access_client(int(user_id), int(client_id)):
+        raise PermissionError("Not authorized for this client.")
 
 
 def _require_edit(user_id: int, client_id: int) -> None:
+    _require_access(user_id, client_id)
     if not user_can_edit_client_setup(user_id, client_id):
         raise PermissionError("Not authorized to edit client knowledge.")
 

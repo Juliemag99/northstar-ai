@@ -197,7 +197,7 @@ const EMPTY_CONTACT_FORM = {
 export default function ClientKnowledge({ clientId }: { clientId: number }) {
   const navigate = useNavigate()
   const [hub, setHub] = useState<ClientKnowledgeHub | null>(null)
-  const [tab, setTab] = useState<TabId>('documents')
+  const [tab, setTab] = useState<TabId>('profile')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [msg, setMsg] = useState<string | null>(null)

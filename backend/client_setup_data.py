@@ -419,13 +419,18 @@ def _ensure_profile_row(conn, client_id: int) -> None:
 
 
 def user_can_edit_client_setup(user_id: int, client_id: int) -> bool:
-    """Admin / management / Rev Ops (and authorized setup editors) can edit; others view-only."""
+    """Administrators, operations admins, and RevOps managers can edit. Specialists cannot."""
     user = get_user_by_id(user_id)
     if user is None or not user.active:
         return False
     if user.is_administrator:
         return True
     if not user_can_access_client(user_id, client_id):
+        return False
+    # "ops" appears inside revops_specialist. That substring must not grant setup or knowledge edits.
+    from staff_rbac import REVOPS_SPECIALIST, load_user_staff_role
+
+    if load_user_staff_role(user_id) == REVOPS_SPECIALIST:
         return False
     # Explicit authorized Client Setup editors (ICP config — not CRM mutation)
     email = _blank(user.email).lower()

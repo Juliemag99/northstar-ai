@@ -21,8 +21,22 @@ export function staffRoleLabel(
   return 'Staff'
 }
 
+/** Client Knowledge is a normal workspace page, not the Administration/Clients area. */
+export function staffCanViewClientKnowledge(
+  user: { permissions?: string[] } | null | undefined,
+): boolean {
+  const permissions = user?.permissions
+  if (!Array.isArray(permissions)) return false
+  return permissions.includes('client_knowledge.view')
+}
+
 /** Hide Administration, Client Setup, and Cross-Client from non-admins. Backend still enforces. */
-export function staffNavItemVisible(navId: string, canAdminister: boolean): boolean {
+export function staffNavItemVisible(
+  navId: string,
+  canAdminister: boolean,
+  canViewClientKnowledge = false,
+): boolean {
+  if (navId === 'client-knowledge') return canViewClientKnowledge
   if (navId === 'administration' || navId === 'clients') return canAdminister
   if (navId === 'cross-client-opportunities') return canAdminister
   return true

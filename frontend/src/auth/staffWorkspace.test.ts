@@ -4,6 +4,7 @@ import {
   dashboardStartHereMessage,
   isSingleAssignedClient,
   resolveActiveClientId,
+  staffCanViewClientKnowledge,
   staffNavItemVisible,
   staffRoleLabel,
 } from './staffWorkspace'
@@ -48,6 +49,16 @@ describe('staffNavItemVisible', () => {
     expect(staffNavItemVisible('administration', true)).toBe(true)
     expect(staffNavItemVisible('clients', true)).toBe(true)
     expect(staffNavItemVisible('cross-client-opportunities', true)).toBe(true)
+  })
+
+  it('shows Client Knowledge only with the view permission and keeps Clients hidden', () => {
+    expect(staffCanViewClientKnowledge(specialist)).toBe(false)
+    expect(staffCanViewClientKnowledge({ ...specialist, permissions: ['client_knowledge.view', 'feedback.submit'] })).toBe(true)
+    expect(staffNavItemVisible('client-knowledge', false, true)).toBe(true)
+    expect(staffNavItemVisible('client-knowledge', false, false)).toBe(false)
+    expect(staffNavItemVisible('clients', false, true)).toBe(false)
+    expect(staffNavItemVisible('administration', false, true)).toBe(false)
+    expect(staffNavItemVisible('client-knowledge', true, true)).toBe(true)
   })
 })
 

@@ -65,6 +65,7 @@ PERMISSIONS: tuple[str, ...] = (
     "admin.view",
     "system.manage",
     "client_setup.edit",
+    "client_knowledge.view",
     "research.run",
     "feedback.submit",
 )
@@ -79,6 +80,7 @@ CLIENT_SCOPED = frozenset(
         "campaigns.manage",
         "reports.view",
         "client_setup.edit",
+        "client_knowledge.view",
         "research.run",
         "client_relationships.edit",
     }
@@ -98,6 +100,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
             "reports.view",
             "admin.view",
             "client_setup.edit",
+            "client_knowledge.view",
             "research.run",
             "feedback.submit",
             "master_data.view",
@@ -121,6 +124,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
             "reports.view",
             "research.run",
             "feedback.submit",
+            "client_knowledge.view",
             "master_data.view",
             "client_relationships.edit",
         }
@@ -135,6 +139,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
             "reports.view",
             "research.run",
             "feedback.submit",
+            "client_knowledge.view",
         }
     ),
     APPOINTMENT_SETTER: frozenset(

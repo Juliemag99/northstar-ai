@@ -129,6 +129,7 @@ import {
   dashboardStartHereMessage,
   isSingleAssignedClient,
   resolveActiveClientId,
+  staffCanViewClientKnowledge,
   staffNavItemVisible,
   staffRoleLabel,
 } from './auth/staffWorkspace'
@@ -400,6 +401,7 @@ const navItems = [
   { id: 'activities', label: 'Activities', icon: '▹' },
   { id: 'appointments', label: 'Appointments', icon: '◷' },
   { id: 'campaigns', label: 'Campaigns', icon: '◈' },
+  { id: 'client-knowledge', label: 'Client Knowledge', icon: '◉' },
   { id: 'tasks', label: 'Tasks', icon: '✓' },
   { id: 'reports', label: 'Reports', icon: '▤' },
   { id: 'research', label: 'Research', icon: '⌕' },
@@ -769,6 +771,7 @@ function navIdFromPath(pathname: string): string {
   ) {
     return 'clients'
   }
+  if (pathname === '/client-knowledge') return 'client-knowledge'
   if (pathname === '/prospects') return 'prospects'
   if (pathname === '/appointments') return 'appointments'
   if (pathname === '/campaigns' || matchPath({ path: '/campaigns/:campaignId', end: true }, pathname)) {
@@ -787,6 +790,7 @@ function pathForNav(navId: string, activeClientId?: number | null): string {
   if (navId === 'campaigns' && activeClientId != null && activeClientId > 0) {
     return `/campaigns?client_id=${activeClientId}`
   }
+  if (navId === 'client-knowledge') return '/client-knowledge'
   if (navId === 'reports' && activeClientId != null && activeClientId > 0) {
     return `/reports?client_id=${activeClientId}`
   }
@@ -802,9 +806,10 @@ function App() {
   const [searchParams, setSearchParams] = useSearchParams()
   const { authenticated, user, authAvailable, authEnforced, logout } = useAuth()
   const canAdminister = staffCanAdminister(authenticated, user)
+  const canViewClientKnowledge = staffCanViewClientKnowledge(user)
   const canManageCampaigns = staffCanManageCampaigns(user)
   const visibleNavItems = navItems.filter((item) =>
-    staffNavItemVisible(item.id, canAdminister),
+    staffNavItemVisible(item.id, canAdminister, canViewClientKnowledge),
   )
   const roleLabel = staffRoleLabel(authenticated, user)
   const displayName =
@@ -1798,6 +1803,7 @@ function App() {
     activeNav !== 'reports' &&
     activeNav !== 'clients' &&
     activeNav !== 'campaigns' &&
+    activeNav !== 'client-knowledge' &&
     activeNav !== 'administration' &&
     activeNav !== 'login'
   const showCampaigns =
@@ -2804,6 +2810,7 @@ function App() {
             onClose={() => setCampaignRouteOffer(null)}
           />
           {loading &&
+            activeNav !== 'client-knowledge' &&
             !showResearchCompany &&
             !showResearch &&
             !showContacts &&
@@ -2816,6 +2823,7 @@ function App() {
             <p className="data-status">Loading {clientName} prospects…</p>
           )}
           {error &&
+            activeNav !== 'client-knowledge' &&
             !showResearchCompany &&
             !showResearch &&
             !showContacts &&
@@ -4600,6 +4608,13 @@ function App() {
 
           {!loading && !error && showClientSetupPage && canAdminister && showClientOnboarding && (
             <ClientOnboarding />
+          )}
+
+          {activeNav === 'client-knowledge' && activeClientId != null && activeClientId > 0 && (
+            <ClientKnowledge clientId={activeClientId} />
+          )}
+          {activeNav === 'client-knowledge' && !(activeClientId != null && activeClientId > 0) && (
+            <p className="data-status">No assigned client is available for Client Knowledge.</p>
           )}
 
           {!loading &&
